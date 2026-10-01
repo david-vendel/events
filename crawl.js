@@ -2,11 +2,13 @@
 // Crawl a single page: fetch it and print title, description, headings and links.
 import * as cheerio from 'cheerio';
 
-const url = process.argv[2];
+let url = process.argv[2];
 if (!url) {
   console.error('Usage: node crawl.js <url>');
   process.exit(1);
 }
+// Default to https when no scheme is given (e.g. "www.google.com").
+if (!/^[a-z][a-z\d+.-]*:\/\//i.test(url)) url = `https://${url}`;
 
 const res = await fetch(url, { headers: { 'User-Agent': 'events-crawler/0.1' } });
 if (!res.ok) {
