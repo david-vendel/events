@@ -1,0 +1,24 @@
+{
+  "name": "events",
+  "version": "1.0.0",
+  "description": "Crawl one web page and print what it finds",
+  "main": "crawl.js",
+  "scripts": {
+    "crawl": "node crawl.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/david-vendel/events.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/david-vendel/events/issues"
+  },
+  "homepage": "https://github.com/david-vendel/events#readme",
+  "dependencies": {
+    "cheerio": "^1.2.0"
+  },
+  "type": "module"
+}
