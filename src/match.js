@@ -1,0 +1,50 @@
+// Deciding whether two sightings (from different websites) are the same event.
+// Heuristic: dates must be close and titles must share most of their meaningful words.
+const STOPWORDS = new Set(`a i o u v vo na do od po pri pre s so z zo za k ku je sa si to aj ale
+  alebo ako the of and in at on for with to by an kosice kosiciach kosic event podujatie`.split(/\s+/));
+
+const fold = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+
+export function titleTokens(title) {
+  return new Set(fold(title).split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 1 && !STOPWORDS.has(t) && !/^(19|20)\d\d$/.test(t)));
+}
+
+export function titleSimilarity(a, b) {
+  const A = titleTokens(a), B = titleTokens(b);
+  if (!A.size || !B.size) return 0;
+  let common = 0;
+  for (const t of A) if (B.has(t)) common++;
+  const jaccard = common / (A.size + B.size - common);
+  const containment = common / Math.min(A.size, B.size);
+  // "Biela noc" vs "Biela noc Košice 2026 – festival svetla": containment catches it.
+  return Math.max(jaccard, Math.min(A.size, B.size) >= 2 ? containment * 0.9 : 0);
+}
+
+const dayDiff = (a, b) => Math.round((Date.parse(a) - Date.parse(b)) / 864e5);
+
+/** How far apart two date ranges are in days (0 = overlapping). */
+export function dateDistance(a, b) {
+  const aEnd = a.end || a.start, bEnd = b.end || b.start;
+  if (a.start <= bEnd && b.start <= aEnd) return 0;
+  return Math.min(Math.abs(dayDiff(a.start, bEnd)), Math.abs(dayDiff(b.start, aEnd)));
+}
+
+/**
+ * Find the existing event a sighting belongs to, or null.
+ * Same/overlapping dates need a moderately similar title; up to 3 days apart needs a near-identical
+ * title (that's a date mismatch between sources, shown in red). Recurring events with the same title
+ * (e.g. every first Wednesday) are further apart than that, so they stay separate.
+ */
+export function findSameEvent(events, s) {
+  let best = null, bestScore = 0;
+  for (const ev of events) {
+    const dist = dateDistance(ev, s);
+    if (dist > 3) continue;
+    const sim = titleSimilarity(ev.title, s.title);
+    const ok = dist === 0 ? sim >= 0.5 : sim >= 0.85;
+    const score = sim - dist * 0.05;
+    if (ok && score > bestScore) { best = ev; bestScore = score; }
+  }
+  return best;
+}

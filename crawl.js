@@ -1,41 +1,47 @@
 #!/usr/bin/env node
-// Crawl a single page: fetch it and print title, description, headings and links.
-import * as cheerio from 'cheerio';
+// Košice events crawler.
+//   node crawl.js                 run one crawl cycle
+//   node crawl.js --watch         keep running, one cycle every --every minutes (default 60)
+//   node crawl.js --url <url>     also visit this URL first (e.g. a site you just heard about)
+//   --pages N   page budget per cycle (default 60)    --ai N   max AI calls per cycle (default 5)
+//   --verify N  events to cross-check against their other sources per cycle (default 15)
+//   --concurrency N  pages fetched in parallel (default 5)
+// For a live dashboard with start/stop, run `node server.js` instead.
+//   EVENTS_FACEBOOK=on  also read dates from linked Facebook events (see src/corroborate.js)
+import { loadState, saveState } from './src/store.js';
+import { runCycle } from './src/crawler.js';
+import { defaultControl } from './src/pool.js';
 
-let url = process.argv[2];
-if (!url) {
-  console.error('Usage: node crawl.js <url>');
-  process.exit(1);
-}
-// Default to https when no scheme is given (e.g. "www.google.com").
-if (!/^[a-z][a-z\d+.-]*:\/\//i.test(url)) url = `https://${url}`;
+const args = process.argv.slice(2);
+const opt = (name, def) => {
+  const i = args.indexOf(`--${name}`);
+  return i >= 0 ? args[i + 1] : def;
+};
+const watch = args.includes('--watch');
+const everyMin = Number(opt('every', 60));
+const options = { maxPages: Number(opt('pages', 60)), maxAi: Number(opt('ai', 5)), maxVerify: Number(opt('verify', 15)) };
 
-const res = await fetch(url, { headers: { 'User-Agent': 'events-crawler/0.1' } });
-if (!res.ok) {
-  console.error(`Request failed: ${res.status} ${res.statusText}`);
-  process.exit(1);
-}
+let state = loadState();
+const extra = opt('url');
+if (extra) state.frontier[/^https?:\/\//.test(extra) ? extra : `https://${extra}`] = { score: 100, foundOn: 'cli' };
 
-const $ = cheerio.load(await res.text());
-const clean = (s) => s.replace(/\s+/g, ' ').trim();
-
-console.log(`URL:         ${res.url}`);
-console.log(`Status:      ${res.status}`);
-console.log(`Title:       ${clean($('title').first().text()) || '(none)'}`);
-console.log(`Description: ${$('meta[name="description"]').attr('content') || '(none)'}`);
-
-console.log('\nHeadings:');
-$('h1, h2, h3').each((_, el) => {
-  const text = clean($(el).text());
-  if (text) console.log(`  ${el.tagName.toUpperCase()}  ${text}`);
+// Save what we have if interrupted mid-cycle.
+process.on('SIGINT', () => {
+  saveState(state);
+  console.log('\nSaved state, bye.');
+  process.exit(0);
 });
 
-const links = new Map();
-$('a[href]').each((_, el) => {
+do {
   try {
-    const href = new URL($(el).attr('href'), res.url).href;
-    if (href.startsWith('http') && !links.has(href)) links.set(href, clean($(el).text()));
-  } catch {}
-});
-console.log(`\nLinks (${links.size}):`);
-for (const [href, text] of links) console.log(`  ${text || '(no text)'} -> ${href}`);
+    await runCycle(state, options, defaultControl(Number(opt('concurrency', 5))));
+  } catch (err) {
+    console.error('Cycle failed:', err);
+  }
+  saveState(state);
+  if (watch) {
+    console.log(`Next cycle in ${everyMin} min.\n`);
+    await new Promise((r) => setTimeout(r, everyMin * 60e3));
+    state = loadState(); // pick up edits made to data/ while we slept
+  }
+} while (watch);
