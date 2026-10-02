@@ -106,6 +106,42 @@
   .aibox .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   @keyframes pulse { 50% { opacity: .3; } }
   .tag.ai { background: var(--ai-bg); color: var(--ai); cursor: pointer; }
+  .aijob { margin-top: 3px; font-size: 13px; }
+  .aijob.off { opacity: .6; }
+  .aijobs { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 13.5px; }
+  .aijobs .master { display: block; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .aijobrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .aijobrow:last-child { border-bottom: 0; padding-bottom: 0; }
+  .aijobrow > .muted { grid-column: 1 / -1; font-size: 12.5px; }
+  .aijobrow.off { opacity: .55; }
+  .aijobrow select { font: inherit; font-size: 13px; padding: 2px 4px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--card); color: var(--text); }
+  .aijobrow .click { cursor: pointer; text-decoration: underline; }
+  .outcome { font-size: 12px; color: var(--text); margin-top: 3px; }
+  .aijobs.plan { margin-bottom: 12px; }
+  .planhead { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .planhead .muted { flex: 1; }
+  .planrow { display: grid; grid-template-columns: 180px 1fr auto; gap: 10px; align-items: center; margin: 4px 0; font-size: 13px; }
+  .planrow .track { margin: 0; }
+  .aijobs.plan p.muted { font-size: 12.5px; margin: 8px 0 0; }
+  .detail h3 { margin: 16px 0 6px; }
+  .detail { margin-bottom: 12px; }
+  .detail .close { float: right; }
+  .detail h4 { font-size: 13px; margin: 12px 0 4px; }
+  .detail p { font-size: 13.5px; margin: 4px 0 8px; }
+  .detail ul { margin: 4px 0; padding-left: 18px; font-size: 13px; overflow-wrap: anywhere; }
+  .detail details { margin: 6px 0; font-size: 13px; }
+  .detail summary { cursor: pointer; color: var(--muted); }
+  .detail details pre { margin-top: 6px; }
+  .detail code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .etag.ai { background: var(--ai-bg); color: var(--ai); }
+  .share { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+  .share .track { width: 48px; margin: 0; flex: none; }
+  .grid tr.sub td { font-size: 12px; background: var(--panel); }
+  .grid tr.sub td:first-child { padding-left: 22px; }
+  .sorts { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+  .sorts button { border: 1px solid var(--line); background: var(--card); padding: 3px 8px; border-radius: 6px; }
+  .sorts button[aria-pressed=true] { background: var(--text); color: var(--bg); border-color: var(--text); }
 
   /* ------------------------------------------------ events */
   #events h2.title { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
@@ -120,6 +156,7 @@
   .event { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
     margin-bottom: 8px; display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 12px; }
   .event .time { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--accent); }
+  .event .time small { display: block; font-weight: 400; color: var(--muted); }
   .event .name { font-weight: 600; text-decoration: none; }
   .event .name:hover { text-decoration: underline; }
   .meta { color: var(--muted); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
@@ -135,6 +172,13 @@
   .d.bad { background: var(--bad-bg); color: var(--bad); }
   .d.na { color: var(--muted); }
   .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  .tagfilter { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; font-size: 14px; margin: -4px 0 8px; }
+  .tagfilter label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+  .tagfilter label.zero { color: var(--muted); }
+  .tagfilter .n { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .tagfilter .all { border: 0; background: none; padding: 0; color: var(--muted); text-decoration: underline; font-size: 13px; }
+  .etag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--chip);
+    color: var(--muted); margin-left: 6px; vertical-align: 1px; }
   footer { color: var(--muted); font-size: 13px; margin-top: 40px; }
 </style>
 </head>
@@ -159,7 +203,8 @@
       <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
       <button role="tab" data-tab="queue">Queue</button>
       <button role="tab" data-tab="sources">Sources</button>
-      <button role="tab" data-tab="ai">AI usage</button>
+      <button role="tab" data-tab="domains">Domains</button>
+      <button role="tab" data-tab="ai">AI</button>
       <button role="tab" data-tab="settings">Settings</button>
     </nav>
     <div id="tab"></div>
@@ -177,6 +222,7 @@
         <button data-range="all">All</button>
       </div>
     </div>
+    <div class="tagfilter" id="tags" aria-label="Filter by kind of event"></div>
     <div id="list"></div>
     <footer id="footer"></footer>
   </section>

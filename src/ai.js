@@ -1,19 +1,137 @@
-// The only place that talks to Claude. Used sparingly:
-//  - analyzePage(): first look at a promising page -> what the site is, and a CSS "recipe" so
-//    future visits are parsed with zero AI;
-//  - discoverUrls(): occasional web search for new Košice event sources.
+// The only place that talks to Claude. AI does four jobs, each switchable in the admin panel
+// (AI tab) with its own model:
+//  - analyze:  first look at a promising page -> what the site is, and a CSS "recipe" so future
+//              visits are parsed with zero AI;
+//  - tag:      give a kind (cinema, concert…) to events the rules couldn't tag;
+//  - discover: occasional web search for new Košice event sources;
+//  - dates:    check date formats the parser hasn't confirmed (and write rules for them), and read
+//              schedules written as prose ("v piatok od 10.00 do 17.00, v sobotu…").
 // Calls go through the Claude Agent SDK, which runs on your Claude Code login, so they count
 // against your Claude subscription's usage limits instead of being billed per token. Usage is
-// shared with your own Claude Code use. EVENTS_AI=off disables AI; the crawler then runs on
-// heuristics only.
+// shared with your own Claude Code use. With AI off the crawler runs on rules only.
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import fs from 'node:fs';
+import path from 'node:path';
+import { TAGS } from './tags.js';
+import { DATA_DIR } from './store.js';
 
-const MODEL = process.env.EVENTS_AI_MODEL || undefined; // undefined = your Claude Code default model
+export const AI_JOBS = {
+  analyze: {
+    label: 'Read new listing pages',
+    what: 'Reads a promising page once: what the site is, whether it lists events (and in which city), and a recipe '
+      + '(CSS selectors) so later visits need no AI.',
+    model: 'default',
+  },
+  tag: {
+    label: 'Tag & locate events',
+    what: 'Gives a kind (cinema, concert…) to events the rules could not tag, and a city to events without a '
+      + 'location. Its tags become rules for the same venue, page or title words.',
+    model: 'haiku',
+  },
+  discover: {
+    label: 'Find new sources',
+    what: 'Web search for pages that list Košice events, at most once a day.',
+    model: 'default',
+  },
+  dates: {
+    label: 'Check dates',
+    what: 'Reads date formats the parser has not confirmed yet and writes a rule for each, so later dates in that '
+      + 'format need no AI; re-checks every format now and then. Also reads schedules written as sentences.',
+    model: 'haiku',
+  },
+};
+// "default" = whatever model your Claude Code uses; the others are Claude Code model aliases.
+export const AI_MODELS = ['default', 'haiku', 'sonnet', 'opus'];
 
-export function aiAvailable() {
-  return process.env.EVENTS_AI !== 'off';
+// Set from the admin panel (state.settings.ai). Before anything is saved, AI is on unless EVENTS_AI=off.
+let config = defaultAiConfig();
+export function defaultAiConfig() {
+  return {
+    enabled: process.env.EVENTS_AI !== 'off',
+    jobs: Object.fromEntries(Object.entries(AI_JOBS).map(([k, j]) => [k, { on: true, model: j.model }])),
+  };
 }
+/** Merge a (partial, untrusted) config over the current one; returns the clean result. */
+export function setAiConfig(patch = {}) {
+  const next = structuredClone(config);
+  if (typeof patch.enabled === 'boolean') next.enabled = patch.enabled;
+  for (const [k, j] of Object.entries(patch.jobs || {})) {
+    if (!next.jobs[k]) continue;
+    if (typeof j.on === 'boolean') next.jobs[k].on = j.on;
+    if (AI_MODELS.includes(j.model)) next.jobs[k].model = j.model;
+  }
+  config = next;
+  return structuredClone(config);
+}
+export const aiConfig = () => structuredClone(config);
+
+/** Is AI on (at all, or for one job)? */
+export function aiAvailable(job) {
+  return config.enabled && (!job || config.jobs[job]?.on !== false);
+}
+// ---------------------------------------------------------------- your Claude plan
+
+// What your Claude Code login's plan reports (same data as Claude Code's /usage): plan type,
+// share of the 5-hour and weekly windows used, and usage credits. Plans have no fixed token
+// allowance, so this is the only real "how much is left". The SDK marks this call experimental,
+// so every failure is caught and the dashboard just says it's unavailable.
+let plan = null; // { at, subscription, windows: [{ name, used, resetsAt }], credits, error }
+let planFetch = null;
+const WINDOW_NAMES = { five_hour: '5-hour window', seven_day: 'Weekly', seven_day_sonnet: 'Weekly (Sonnet)', seven_day_opus: 'Weekly (Opus)' };
+
+export function planUsage({ refresh = false, maxAgeMs = 120e3 } = {}) {
+  if (!refresh && plan && Date.now() - plan.at < maxAgeMs) return Promise.resolve(plan);
+  planFetch ??= readPlanUsage().finally(() => { planFetch = null; });
+  return planFetch;
+}
+export const lastPlanUsage = () => plan;
+
+async function readPlanUsage() {
+  let done;
+  const finished = new Promise((r) => { done = r; });
+  // A session that never sends a message: enough to ask for /usage data without a model call.
+  const q = query({ prompt: (async function* idle() { await finished; })(), options: { tools: [], settingSources: [], persistSession: false, env: subscriptionEnv() } });
+  try {
+    const u = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true });
+    const rl = u.rate_limits || {};
+    const windows = Object.entries(WINDOW_NAMES).filter(([k]) => rl[k]?.utilization != null)
+      .map(([k, name]) => ({ name, used: rl[k].utilization, resetsAt: rl[k].resets_at }));
+    for (const m of rl.model_scoped || []) if (m.utilization != null) windows.push({ name: `Weekly (${m.display_name})`, used: m.utilization, resetsAt: m.resets_at });
+    const x = rl.extra_usage;
+    const credits = x?.is_enabled && x.monthly_limit ? {
+      used: x.used_credits / 10 ** (x.decimal_places ?? 2), limit: x.monthly_limit / 10 ** (x.decimal_places ?? 2),
+      percent: x.utilization, currency: x.currency || 'USD',
+    } : null;
+    plan = { at: Date.now(), subscription: u.subscription_type, available: u.rate_limits_available, windows, credits };
+  } catch (err) {
+    plan = { at: Date.now(), error: err.message };
+  } finally {
+    done();
+    for await (const _ of q) { /* let the session close */ }
+  }
+  return plan;
+}
+
+// Rate-limit news that arrives during normal calls (e.g. "weekly window 80 % used").
+function notePlanEvent(info) {
+  if (!info || info.utilization == null || !info.rateLimitType) return;
+  plan ??= { at: Date.now(), windows: [] };
+  const name = WINDOW_NAMES[info.rateLimitType] || info.rateLimitType;
+  plan.windows = [...(plan.windows || []).filter((w) => w.name !== name),
+    { name, used: info.utilization * (info.utilization <= 1 ? 100 : 1), resetsAt: info.resetsAt && new Date(info.resetsAt * 1000).toISOString() }];
+  plan.status = info.status;
+}
+
+// Use the subscription login, never a stray API key from the environment (that would bill it).
+function subscriptionEnv() {
+  const env = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  return env;
+}
+
+const modelFor = (job) => (config.jobs[job]?.model === 'default' ? undefined : config.jobs[job]?.model);
 
 // AI calls run strictly one at a time, even when the crawler fetches pages in parallel:
 // callers queue here in order. aiStatus() tells the dashboard what's running and what's waiting.
@@ -43,27 +161,35 @@ const Recipe = z.object({
   link: z.string().nullable().describe('selector, relative to item, of the <a> linking to event detail'),
 });
 
+const Tag = z.enum(TAGS);
+
 const Analysis = z.object({
   siteKind: z.enum(['event_listing', 'venue', 'municipality', 'tourism', 'news', 'ticketing', 'shopping_center', 'other']),
   summary: z.string().describe('one sentence: what this website is'),
-  publishesKosiceEvents: z.boolean().describe('does this site regularly publish events taking place in or near Košice?'),
-  listingIsKosiceOnly: z.boolean().describe('are all events on this page in Košice (vs. a national/multi-city list)?'),
+  publishesEvents: z.boolean().describe('does this site regularly publish upcoming events (any place)?'),
+  listingCity: z.string().nullable().describe('the city ALL events on this page take place in, e.g. "Košice"; null if several cities or unknown'),
   pageListsEvents: z.boolean().describe('does THIS page contain a list of multiple events?'),
   recipe: Recipe.nullable().describe('null if this page has no repeated event elements'),
   eventListUrls: z.array(z.string()).describe('other URLs on this site (from the given link list) that likely list events'),
   checkEveryHours: z.number().describe('how often to re-check this source, 12-168'),
+  venue: z.object({ name: z.string(), address: z.string().nullable() }).nullable()
+    .describe('if this website belongs to ONE venue (club, theatre, gallery, cinema): its name and street address with city'),
+  pageTags: z.array(Tag).describe('kinds that fit EVERY event this page lists, e.g. ["cinema"] for a cinema programme, ' +
+    '["theatre"] for a theatre repertoire; empty if the page mixes kinds'),
   events: z.array(z.object({
     title: z.string(),
     start: z.string().describe('YYYY-MM-DD'),
-    end: z.string().nullable(),
-    time: z.string().nullable().describe('HH:MM'),
+    end: z.string().nullable().describe('YYYY-MM-DD of the last day, if the event runs over several days'),
+    time: z.string().nullable().describe('HH:MM start'),
+    endTime: z.string().nullable().describe('HH:MM end, if given'),
     location: z.string().nullable(),
     url: z.string().nullable(),
-  })).describe('upcoming Košice events on this page ONLY when recipe is null (e.g. events written as prose)'),
+    tags: z.array(Tag).describe('what kind of event this is (film screening = cinema)'),
+  })).describe('upcoming events on this page ONLY when recipe is null (e.g. events written as prose)'),
 });
 
 const ANALYZE_SYSTEM = `You help a crawler that collects events (concerts, markets, festivals, exhibitions, sport, \
-workshops, kids' programs…) happening in Košice, Slovakia. You get one web page as simplified HTML \
+workshops, kids' programs…) anywhere; it started in Košice, Slovakia. You get one web page as simplified HTML \
 (scripts/images/most attributes removed) plus a list of its links. Classify the site and, if the page lists \
 events, write CSS selectors (cheerio-compatible, no :contains, no positional selectors that depend on the \
 specific events) so the crawler can parse future versions of this page without you. Prefer stable class \
@@ -79,16 +205,13 @@ function jsonSchema(schema) {
  * One isolated, single-purpose Claude call: no Claude Code tools unless listed, none of your
  * settings/CLAUDE.md/hooks, and no saved session. Returns the final result message.
  */
-async function ask({ prompt, systemPrompt, schema, tools = [], maxTurns = 2 }) {
-  // Use the subscription login, never a stray API key from the environment (that would bill it).
-  const env = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
-  delete env.ANTHROPIC_AUTH_TOKEN;
+async function ask({ prompt, systemPrompt, schema, tools = [], maxTurns = 2, model }) {
+  const env = subscriptionEnv();
   let result;
   for await (const msg of query({
     prompt,
     options: {
-      model: MODEL,
+      model,
       effort: 'low',
       systemPrompt,
       tools,
@@ -101,6 +224,7 @@ async function ask({ prompt, systemPrompt, schema, tools = [], maxTurns = 2 }) {
     },
   })) {
     if (msg.type === 'result') result = msg;
+    if (msg.type === 'rate_limit_event') notePlanEvent(msg.rate_limit_info);
   }
   if (!result) throw new Error('no result from Claude');
   if (result.subtype !== 'success' || result.is_error) {
@@ -116,7 +240,7 @@ async function ask({ prompt, systemPrompt, schema, tools = [], maxTurns = 2 }) {
  * `onStart` fires when this call's turn comes (calls queue behind each other).
  */
 export function analyzePage({ url, title, html, truncated, links, today, onStart }) {
-  if (!aiAvailable()) return Promise.resolve({ analysis: null, call: null });
+  if (!aiAvailable('analyze')) return Promise.resolve({ analysis: null, call: null });
   const linkList = [...links].slice(0, 300).map(([href, text]) => `${href} ${text}`).join('\n');
   const content = `URL: ${url}\nTitle: ${title}\nToday: ${today}\n` +
     (truncated ? 'Note: HTML was cut off at the size limit.\n' : '') +
@@ -124,13 +248,137 @@ export function analyzePage({ url, title, html, truncated, links, today, onStart
   return oneAtATime({ kind: 'analyze', target: url }, onStart, async () => {
     const started = Date.now();
     try {
-      const res = await ask({ prompt: content, systemPrompt: ANALYZE_SYSTEM, schema: Analysis, maxTurns: 3 });
+      const res = await ask({ prompt: content, systemPrompt: ANALYZE_SYSTEM, schema: Analysis, maxTurns: 3, model: modelFor('analyze') });
       const parsed = Analysis.safeParse(res.structured_output);
-      const call = record({ kind: 'analyze', target: url, started, res, inputChars: content.length, result: res.structured_output,
+      const call = record({ kind: 'analyze', target: url, started, res, input: { system: ANALYZE_SYSTEM, prompt: content }, result: res.structured_output,
         error: parsed.success ? undefined : 'answer did not match the schema' });
       return { analysis: parsed.success ? parsed.data : null, call };
     } catch (err) {
-      return { analysis: null, call: record({ kind: 'analyze', target: url, started, res: err.result, inputChars: content.length, error: err.message }) };
+      return { analysis: null, call: record({ kind: 'analyze', target: url, started, res: err.result, input: { system: ANALYZE_SYSTEM, prompt: content }, error: err.message }) };
+    }
+  });
+}
+
+const Classified = z.object({
+  events: z.array(z.object({
+    i: z.number(),
+    tags: z.array(Tag),
+    city: z.string().nullable().describe('only for events sent without a venue'),
+    country: z.string().nullable(),
+  })),
+});
+
+const CLASSIFY_SYSTEM = `You tag events by kind and, when the venue is missing, say where they happen. Tags: ${TAGS.join(', ')}. \
+cinema = a film screening (also film clubs, film festivals). concert = live music. talk = lectures, discussions, \
+readings, literature. party = parties, clubs, dancing, quizzes. market = markets, fairs, food and wine tastings. \
+Give every tag that fits, usually one or two; give none if nothing fits. Use the page title and venue as hints: \
+a film title on a cinema programme is cinema. For an event with no venue, give "city" (and "country") if the \
+title, description or page make it clear; otherwise null. Never guess a city.`;
+
+/**
+ * Tag events the keyword rules couldn't place, and give a city to events with no location, in one call.
+ * `events`: [{ title, location, description, page }].
+ * Returns { tags: per event (or null), places: per event { city, country } (or null), call }.
+ */
+export function classifyEvents(events, { onStart } = {}) {
+  if (!aiAvailable('tag') || !events.length) return Promise.resolve({ tags: events.map(() => null), places: events.map(() => null), call: null });
+  const lines = events.map((e, i) => JSON.stringify({
+    i, title: e.title, venue: e.location, page: e.page, about: e.description?.slice(0, 200),
+  }));
+  const prompt = `Tag each event. Answer with {"events": [{"i": <number>, "tags": [...]}, …]} for every i.\n\n${lines.join('\n')}`;
+  const target = `${events.length} event${events.length === 1 ? '' : 's'}`;
+  return oneAtATime({ kind: 'tag', target }, onStart, async () => {
+    const started = Date.now();
+    try {
+      const res = await ask({ prompt, systemPrompt: CLASSIFY_SYSTEM, schema: Classified, model: modelFor('tag'), maxTurns: 2 });
+      const parsed = Classified.safeParse(res.structured_output);
+      const tags = events.map(() => null);
+      const places = events.map(() => null);
+      if (parsed.success) {
+        for (const r of parsed.data.events) {
+          if (!(r.i >= 0 && r.i < tags.length)) continue;
+          tags[r.i] = r.tags;
+          if (r.city && !events[r.i].location) places[r.i] = { city: r.city, country: r.country || undefined };
+        }
+      }
+      const outcome = events.map((e, i) => `${e.title} → ${tags[i] ? (tags[i].join(', ') || 'no tag') : 'no answer'}`
+        + (places[i] ? `; in ${[places[i].city, places[i].country].filter(Boolean).join(', ')}` : '')).join('\n');
+      const call = record({ kind: 'tag', target, started, res, input: { system: CLASSIFY_SYSTEM, prompt }, result: res.structured_output, outcome,
+        error: parsed.success ? undefined : 'answer did not match the schema' });
+      return { tags, places, call };
+    } catch (err) {
+      return { tags: events.map(() => null), places: events.map(() => null), call: record({ kind: 'tag', target, started, res: err.result, input: { system: CLASSIFY_SYSTEM, prompt }, error: err.message }) };
+    }
+  });
+}
+
+const Group = z.number().nullable();
+const DateAnswer = {
+  start: z.string().nullable().describe('YYYY-MM-DD; null if the text gives no date'),
+  end: z.string().nullable().describe('YYYY-MM-DD of the last day if it runs over several days, else null'),
+  time: z.string().nullable().describe('HH:MM start, null if none (or only a 00:00 placeholder)'),
+  endTime: z.string().nullable().describe('HH:MM end, null if none (or only a 23:59 / 00:00 placeholder)'),
+};
+const DatesRead = z.object({
+  formats: z.array(z.object({
+    f: z.number(),
+    samples: z.array(z.object({ s: z.number(), ...DateAnswer })),
+    rule: z.object({
+      pattern: z.string().describe('JavaScript regex source, run on the text exactly as given (lowercase, no diacritics)'),
+      groups: z.object({
+        startDay: Group, startMonth: Group, startYear: Group, startHour: Group, startMinute: Group,
+        endDay: Group, endMonth: Group, endYear: Group, endHour: Group, endMinute: Group,
+      }).describe('capture group number for each part, null if the format has no such part'),
+    }).nullable().describe('one regex that reads every sample of this format; null if impossible'),
+  })),
+  prose: z.array(z.object({
+    p: z.number(),
+    ...DateAnswer,
+    schedule: z.array(z.object({ date: z.string(), time: z.string().nullable(), endTime: z.string().nullable() }))
+      .describe('one entry per day with its own hours, in order; empty if the text gives no per-day hours'),
+  })),
+});
+
+const DATES_SYSTEM = `You read event dates for a crawler in Slovakia. Texts are lowercase without diacritics \
+(Slovak: piatok = Friday, sobota = Saturday, od/do = from/to, hod = o'clock; 10.00 can be a time). \
+For each FORMAT you get a few samples of the same pattern: give each sample's start, end, time and endTime, \
+and write ONE JavaScript regex (no flags, no lookbehind needed) with numbered capture groups that reads every \
+sample, mapping groups to date parts (months may capture a number or a month name). Conventions: a start \
+time of 00:00 means no time; an end time of 23:59 means no end time; an end at 00:00 means the event ends \
+the day before with no end time; if the year is missing, it is the next upcoming such date from today. \
+For each PROSE text (an event description), give the event's first day, last day, start and end time, and \
+a per-day schedule when the days have their own hours. Only use what the text says; never guess.`;
+
+/**
+ * One call for date formats to check and prose schedules to read.
+ * `formats`: [{ samples: [text] }], `prose`: [{ title, text }]. Returns { formats, prose, call }
+ * with AI's answers by index (null where it gave none).
+ */
+export function readDates({ formats = [], prose = [], today }, { onStart } = {}) {
+  const none = { formats: formats.map(() => null), prose: prose.map(() => null), call: null };
+  if (!aiAvailable('dates') || (!formats.length && !prose.length)) return Promise.resolve(none);
+  const lines = [`Today: ${today}`];
+  formats.forEach((f, i) => lines.push(`FORMAT f=${i}`, ...f.samples.map((t, s) => `  s=${s}: ${t}`)));
+  prose.forEach((p, i) => lines.push(`PROSE p=${i} (event "${p.title}")`, `  ${p.text}`));
+  const prompt = lines.join('\n');
+  const target = [formats.length && `${formats.length} date format${formats.length === 1 ? '' : 's'}`,
+    prose.length && `${prose.length} schedule${prose.length === 1 ? '' : 's'}`].filter(Boolean).join(', ');
+  return oneAtATime({ kind: 'dates', target }, onStart, async () => {
+    const started = Date.now();
+    const input = { system: DATES_SYSTEM, prompt };
+    try {
+      const res = await ask({ prompt, systemPrompt: DATES_SYSTEM, schema: DatesRead, model: modelFor('dates'), maxTurns: 2 });
+      const parsed = DatesRead.safeParse(res.structured_output);
+      const out = { formats: formats.map(() => null), prose: prose.map(() => null) };
+      if (parsed.success) {
+        for (const f of parsed.data.formats) if (f.f >= 0 && f.f < formats.length) out.formats[f.f] = f;
+        for (const p of parsed.data.prose) if (p.p >= 0 && p.p < prose.length) out.prose[p.p] = p;
+      }
+      const call = record({ kind: 'dates', target, started, res, input, result: res.structured_output,
+        error: parsed.success ? undefined : 'answer did not match the schema' });
+      return { ...out, call };
+    } catch (err) {
+      return { ...none, call: record({ kind: 'dates', target, started, res: err.result, input, error: err.message }) };
     }
   });
 }
@@ -153,7 +401,7 @@ const DISCOVERY_QUERIES = [
 
 /** Use web search to find pages that list Košice events. Returns { urls, call }. */
 export function discoverUrls(known = [], { onStart } = {}) {
-  if (!aiAvailable()) return Promise.resolve({ urls: [], call: null });
+  if (!aiAvailable('discover')) return Promise.resolve({ urls: [], call: null });
   const q = DISCOVERY_QUERIES[Math.floor(Math.random() * DISCOVERY_QUERIES.length)];
   const month = new Date().toLocaleString('sk-SK', { month: 'long', year: 'numeric' });
   const prompt = `Search the web for: "${q}" (it is ${month}). Find web pages that list upcoming events ` +
@@ -163,11 +411,11 @@ export function discoverUrls(known = [], { onStart } = {}) {
   return oneAtATime({ kind: 'discover', target: q }, onStart, async () => {
     const started = Date.now();
     try {
-      const res = await ask({ prompt, tools: ['WebSearch'], maxTurns: 6 });
+      const res = await ask({ prompt, tools: ['WebSearch'], maxTurns: 6, model: modelFor('discover') });
       const urls = [...new Set(res.result.match(/https?:\/\/[^\s)<>\]"']+/g) || [])];
-      return { urls, call: record({ kind: 'discover', target: q, started, res, result: { query: q, urls } }) };
+      return { urls, call: record({ kind: 'discover', target: q, started, res, input: { prompt, tools: ['WebSearch'] }, result: { query: q, urls, answer: res.result } }) };
     } catch (err) {
-      return { urls: [], call: record({ kind: 'discover', target: q, started, res: err.result, error: err.message }) };
+      return { urls: [], call: record({ kind: 'discover', target: q, started, res: err.result, input: { prompt, tools: ['WebSearch'] }, error: err.message }) };
     }
   });
 }
@@ -182,9 +430,14 @@ let recorder = (rec) => {
 export function setAiRecorder(fn) { recorder = fn; }
 
 let seq = 0;
-function record({ kind, target, started, res, inputChars, result, error }) {
+/**
+ * Store one AI call. `outcome` is a plain-words line of what came of it ("recipe saved, finds 19
+ * events"); callers may fill it in later on the returned record, once they know.
+ */
+function record({ kind, target, started, res, input, result, error, outcome }) {
+  const inputChars = input ? (input.system?.length || 0) + input.prompt.length : undefined;
   // modelUsage covers every model call the request made (it can use more than one model).
-  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, webSearches: 0 };
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, webSearches: 0, costUsd: res?.total_cost_usd || 0 };
   for (const m of Object.values(res?.modelUsage || {})) {
     usage.input += m.inputTokens;
     usage.output += m.outputTokens;
@@ -197,13 +450,37 @@ function record({ kind, target, started, res, inputChars, result, error }) {
     at: new Date(started).toISOString(),
     ms: Date.now() - started,
     kind, target, inputChars, usage,
-    model: Object.keys(res?.modelUsage || {}).join(', ') || MODEL || 'default',
+    model: Object.keys(res?.modelUsage || {}).join(', ') || config.jobs[kind]?.model || 'default',
+    job: AI_JOBS[kind]?.label,
+    outcome,
     turns: res?.num_turns,
     stopReason: res?.stop_reason,
     ok: !error,
     error,
     result,
   };
+  if (input) saveInput(rec.id, input);
   recorder(rec);
   return rec;
+}
+
+// What each call was sent (instructions + page), for the admin panel's call details. A page can be
+// ~60 KB, so these live in their own files and only the newest MAX_INPUTS are kept.
+const INPUT_DIR = path.join(DATA_DIR, 'ai-inputs');
+const MAX_INPUTS = 300;
+function saveInput(id, input) {
+  try {
+    fs.mkdirSync(INPUT_DIR, { recursive: true });
+    fs.writeFileSync(path.join(INPUT_DIR, `${id}.json`), JSON.stringify(input));
+    const files = fs.readdirSync(INPUT_DIR).sort(); // ids start with a base-36 timestamp: oldest first
+    for (const f of files.slice(0, Math.max(0, files.length - MAX_INPUTS))) fs.rmSync(path.join(INPUT_DIR, f));
+  } catch {
+    // Details are a convenience; never fail a crawl over them.
+  }
+}
+
+/** The input of one call, if it's still kept. */
+export function aiInput(id) {
+  if (!/^[\w-]+$/.test(id)) return undefined;
+  try { return JSON.parse(fs.readFileSync(path.join(INPUT_DIR, `${id}.json`), 'utf8')); } catch { return undefined; }
 }

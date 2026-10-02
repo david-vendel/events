@@ -9,8 +9,9 @@
 // For a live dashboard with start/stop, run `node server.js` instead.
 //   EVENTS_FACEBOOK=on  also read dates from linked Facebook events (see src/corroborate.js)
 import { loadState, saveState } from './src/store.js';
-import { runCycle } from './src/crawler.js';
+import { queueUrl, runCycle } from './src/crawler.js';
 import { defaultControl } from './src/pool.js';
+import { setAiRecorder } from './src/ai.js';
 
 const args = process.argv.slice(2);
 const opt = (name, def) => {
@@ -23,7 +24,14 @@ const options = { maxPages: Number(opt('pages', 60)), maxAi: Number(opt('ai', 5)
 
 let state = loadState();
 const extra = opt('url');
-if (extra) state.frontier[/^https?:\/\//.test(extra) ? extra : `https://${extra}`] = { score: 100, foundOn: 'cli' };
+if (extra) queueUrl(state, /^https?:\/\//.test(extra) ? extra : `https://${extra}`);
+
+// Keep every AI call, so the admin panel's AI log also shows what CLI runs used AI for.
+setAiRecorder((rec) => {
+  state.ai.push(rec);
+  const u = rec.usage;
+  console.log(`  [AI ${rec.job || rec.kind}] ${rec.target}: ${rec.error || `${u.input + u.cacheRead + u.cacheWrite} in / ${u.output} out tokens`}`);
+});
 
 // Save what we have if interrupted mid-cycle.
 process.on('SIGINT', () => {

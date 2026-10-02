@@ -33,6 +33,53 @@ function sourcesTable(e) {
 let events = [];
 let range = 'week';
 
+// Kinds of event (same list as src/tags.js); "other" is an event with none of them.
+const TAG_LABELS = {
+  cinema: 'Cinema', concert: 'Concerts', theatre: 'Theatre', exhibition: 'Exhibitions', festival: 'Festivals',
+  kids: 'Kids', sport: 'Sport', workshop: 'Workshops', talk: 'Talks', party: 'Parties & dance',
+  market: 'Markets & food', other: 'Other',
+};
+const tagsOf = (e) => (e.tags?.length ? e.tags : ['other']);
+// Unchecked tags, remembered in this browser.
+let hidden = new Set();
+try { hidden = new Set(JSON.parse(localStorage.getItem('hiddenTags') || '[]')); } catch {}
+const saveHidden = () => { try { localStorage.setItem('hiddenTags', JSON.stringify([...hidden])); } catch {} };
+
+// Tag chip on an event; tags that came from AI say so ("AI": this event was tagged by AI;
+// "learned": a rule the crawler learned from earlier AI answers).
+const TAG_FROM = {
+  ai: ['AI', 'Tagged by AI'],
+  learned: ['learned', 'From a rule learned from earlier AI answers (same venue, page or title words)'],
+};
+function tagChip(e, t) {
+  const from = TAG_FROM[e.tagFrom?.[t]];
+  return `<span class="etag ${from ? 'ai' : ''}" title="${esc(from ? from[1] : 'From the page or the keyword rules')}">${esc(TAG_LABELS[t] || t)}${from ? ` · ${from[0]}` : ''}</span>`;
+}
+
+function renderTagFilter(inRange) {
+  const counts = {};
+  for (const e of inRange) for (const t of tagsOf(e)) counts[t] = (counts[t] || 0) + 1;
+  $('#tags').innerHTML = Object.entries(TAG_LABELS).map(([t, label]) => `
+    <label class="${counts[t] ? '' : 'zero'}"><input type="checkbox" data-tag="${t}" ${hidden.has(t) ? '' : 'checked'}>
+      ${label} <span class="n">${counts[t] || 0}</span></label>`).join('') +
+    `<button class="all" data-all="${hidden.size ? 'on' : 'off'}">${hidden.size ? 'Show all' : 'Hide all'}</button>`;
+}
+
+$('#tags').addEventListener('change', (e) => {
+  const t = e.target.dataset.tag;
+  if (!t) return;
+  if (e.target.checked) hidden.delete(t); else hidden.add(t);
+  saveHidden();
+  renderEvents();
+});
+$('#tags').addEventListener('click', (e) => {
+  const all = e.target.dataset.all;
+  if (!all) return;
+  hidden = all === 'on' ? new Set() : new Set(Object.keys(TAG_LABELS));
+  saveHidden();
+  renderEvents();
+});
+
 function rangeBounds() {
   const now = new Date(), today = ymd(now);
   if (range === 'today') return [today, today];
@@ -45,11 +92,22 @@ function rangeBounds() {
   return [today, '9999-12-31'];
 }
 
+const weekday = new Intl.DateTimeFormat('sk-SK', { weekday: 'short' });
+// Start (and end) time on day d: that day's own hours when the event has a per-day schedule.
+function timeCell(e, d) {
+  const day = e.schedule?.find((x) => x.date === d);
+  const [t, end] = day?.time ? [day.time, day.endTime] : [e.time, e.endTime];
+  return `<div class="time">${esc(t || '—')}${t && end ? `<small>–${esc(end)}</small>` : ''}</div>`;
+}
+
 function renderEvents() {
   const [from, to] = rangeBounds();
   const q = fold($('#q').value);
-  const shown = events.filter((e) => e.start <= to && (e.end || e.start) >= from
+  const inRange = events.filter((e) => e.start <= to && (e.end || e.start) >= from
     && (!q || fold(`${e.title} ${e.location} ${e.description}`).includes(q)));
+  renderTagFilter(inRange);
+  // Shown if any of its tags is checked: a kids' film stays visible with Kids on and Cinema off.
+  const shown = inRange.filter((e) => tagsOf(e).some((t) => !hidden.has(t)));
   // Multi-day events show on the first visible day of the range.
   const byDay = new Map();
   for (const e of shown) {
@@ -67,12 +125,14 @@ function renderEvents() {
     <h4 class="day">${esc(dayLabel(d))}</h4>
     ${byDay.get(d).sort((a, b) => (a.time || '99').localeCompare(b.time || '99')).map((e) => `
       <article class="event">
-        <div class="time">${esc(e.time || '—')}</div>
+        ${timeCell(e, d)}
         <div>
           <a class="name" href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.title)}</a>
           ${Date.parse(e.firstSeenAt) > dayAgo ? '<span class="badge">new</span>' : ''}
+          ${(e.tags || []).map((t) => tagChip(e, t)).join('')}
           <div class="meta">
             ${e.end && e.end !== e.start ? `until ${esc(shortFmt.format(new Date(`${e.end}T12:00`)))} · ` : ''}
+            ${e.schedule?.length > 1 ? `${e.schedule.map((x) => esc(`${weekday.format(new Date(`${x.date}T12:00`))} ${[x.time, x.endTime].filter(Boolean).join('–')}`)).join(', ')} · ` : ''}
             ${e.location ? `${esc(e.location)} · ` : ''}via ${esc(host(e.source))}
           </div>
           ${e.description ? `<div class="desc">${esc(e.description)}</div>` : ''}

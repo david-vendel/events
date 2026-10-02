@@ -16,6 +16,7 @@ const fmtTime = (t) => (t ? clock.format(new Date(t)) : '');
 const fmtWhen = (t) => (t ? dayClock.format(new Date(t)) : '—');
 const fmtTokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0));
 const fmtInt = (n) => (n || 0).toLocaleString('sk-SK');
+const fmtUsd = (n) => (n >= 1 ? `$${n.toFixed(2)}` : n >= 0.01 ? `$${n.toFixed(3)}` : n > 0 ? `$${n.toFixed(4)}` : '$0');
 function ago(t) {
   const s = Math.round((Date.now() - new Date(t)) / 1000);
   if (s < 60) return `${s}s`;

@@ -1,13 +1,15 @@
 // Left column: live crawler dashboard. Status arrives once a second over /api/stream;
-// the Queue, Sources and AI tabs fetch their own data while open.
+// the Queue, Sources, Domains and AI tabs fetch their own data while open.
 const WORKER_PRESETS = [1, 2, 5, 10, 20];
-const PHASE_TAG = { recheck: 'info', verify: 'warn', explore: '', discover: 'info' };
+const PHASE_TAG = { recheck: 'info', verify: 'warn', explore: '', discover: 'info', tag: 'ai', locate: 'ok' };
 
 let snap = null;
 let tab = 'overview';
 let tabData = null; // data for queue/sources/ai tabs
 let selectedAi = null; // id of the AI call whose details are open
 let openSource = null; // origin whose pages are expanded
+let openDomain = null; // domain whose subdomains are expanded
+let domainSort = 'visits';
 let lastEventCount = -1;
 
 // ---------------------------------------------------------------- header
@@ -88,6 +90,7 @@ const aiTag = (a) => `<span class="tag ai" data-aicall="${esc(a.id)}" title="Ope
 const STEPS = [
   ['Re-checking sources', 'Re-check sources'], ['Verifying events', 'Verify events'],
   ['AI discovery search', 'AI discovery'], ['Exploring', 'Explore'],
+  ['Checking dates', 'Check dates (AI)'], ['Tagging events', 'Tag & locate (AI)'], ['Locating events', 'Map'],
 ];
 function stepsStrip(s) {
   const name = s.phase.name;
@@ -100,17 +103,27 @@ function stepsStrip(s) {
   return `<div class="steps">${items.join('<i>›</i>')}</div>`;
 }
 
+function planLine(p) {
+  if (!p || p.error) return '';
+  const parts = (p.windows || []).map((w) => `${esc(w.name)} ${Math.round(w.used)} %`);
+  if (p.credits) parts.push(`credits ${Math.round(p.credits.percent)} % of monthly limit`);
+  return `<div class="muted" style="margin-top:4px">Plan${p.subscription ? ` (${esc(PLAN_NAMES[p.subscription] || p.subscription)})` : ''}: ${parts.join(' · ') || 'no limits reported'}</div>`;
+}
+
+const AI_BUSY = { analyze: 'reading', tag: 'tagging', discover: 'searching the web for', classify: 'tagging' };
+
 function aiBox(s) {
   const a = s.ai;
-  if (!a.enabled) return '<div class="aibox"><span class="dot"></span><div class="grow">AI is off (EVENTS_AI=off).</div></div>';
-  const today = `${fmtInt(a.todayCalls)} call${a.todayCalls === 1 ? '' : 's'} · ${fmtTokens(a.todayTokens)} tokens today`;
-  const now = a.busy
-    ? `<b>AI ${a.busy.kind === 'discover' ? 'searching the web' : 'reading'}</b> ${esc(a.busy.target)} <span class="muted">· ${ago(a.busy.startedAt)}</span>`
+  const now = !a.enabled ? '<b>AI is off</b> <span class="muted">· the crawler runs on rules only</span>'
+    : a.busy ? `<b>AI ${AI_BUSY[a.busy.kind] || 'working on'}</b> ${esc(a.busy.target)} <span class="muted">· ${ago(a.busy.startedAt)}</span>`
     : '<b>AI idle</b>';
-  const queue = a.waiting ? ` · <b>${a.waiting}</b> page${a.waiting === 1 ? '' : 's'} waiting for AI` : '';
+  const queue = a.waiting ? ` · <b>${a.waiting}</b> waiting for AI` : '';
+  const jobs = Object.values(a.jobs).map((j) => `<div class="aijob ${a.enabled && j.on ? '' : 'off'}">
+    <b>${esc(j.label)}</b> ${a.enabled && j.on ? tag(j.model, 'ai') : tag('off')}
+    <span class="muted">${j.todayCalls ? `${fmtInt(j.todayCalls)} today · ${fmtTokens(j.todayTokens)} tokens` : 'not used today'}</span></div>`).join('');
   return `<div class="aibox ${a.busy ? 'busy' : ''}"><span class="dot"></span>
-    <div class="grow">${now}${queue}<div class="muted">One page at a time · ${today}</div></div>
-    <button class="btn" data-go="ai">AI usage ›</button></div>`;
+    <div class="grow">${now}${queue}${jobs}${planLine(a.plan)}</div>
+    <button class="btn" data-go="ai">AI settings & log ›</button></div>`;
 }
 
 function jobLabel(j) {
@@ -125,6 +138,8 @@ function overview() {
     ['Event sources', fmtInt(k.sources)],
     ['Links in queue', fmtInt(k.queue), 'queue'],
     ['Pages seen', fmtInt(k.pagesKnown)],
+    ['Events on the map', `${fmtInt(k.located)} / ${fmtInt(k.upcoming)}`],
+    ['Learned tag rules', fmtInt(k.tagRules)],
     ['Sites judged', `${fmtInt(k.sources + k.irrelevant)}`, 'sources'],
     ['AI calls today', s.ai.enabled ? fmtInt(s.ai.todayCalls) : 'off', 'ai'],
     ['AI tokens today', fmtTokens(s.ai.todayTokens), 'ai'],
@@ -176,6 +191,22 @@ function queueTab() {
     </table></div>`;
 }
 
+// How a listing page is read: structured data on the page (free), a saved recipe (free), or AI.
+const HOW = {
+  'json-ld': ['structured data', 'The page carries schema.org Event data, so events are read exactly, with no recipe or AI.'],
+  recipe: ['recipe', 'CSS selectors the AI wrote once; used on every visit without AI.'],
+  'AI → recipe': ['AI wrote a recipe', 'AI read the page and saved a recipe for next time.'],
+  AI: ['read by AI', 'AI read the events itself (no reusable recipe for this page).'],
+};
+function readTag(p) {
+  const r = p.lastRead;
+  if (!r) return p.recipe ? tag('recipe', 'ok') : tag('not read yet', 'warn');
+  const [label, help] = HOW[r.how] || [r.how, ''];
+  const ok = r.events > 0;
+  return `<span class="tag ${ok ? 'ok' : 'warn'}" title="${esc(help)}">${esc(label)} · ${fmtInt(r.events)} event${r.events === 1 ? '' : 's'}</span>
+    <span class="muted">${fmtWhen(r.at)}</span>`;
+}
+
 function sourcesTab() {
   const list = tabData || [];
   return `<p class="muted" style="margin-top:0">Websites the crawler has judged. Click a row to see its listing pages.</p>
@@ -192,8 +223,8 @@ function sourcesTab() {
         ${openSource === x.origin ? `<tr><td colspan="5">
           ${x.pages.length ? x.pages.map((p) => `<div style="margin:4px 0">
             <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a>
-            ${p.recipe ? tag('recipe', 'ok') : tag('no recipe', 'warn')}
-            ${p.lastCount !== undefined ? tag(`${p.lastCount} items last time`) : ''}
+            ${readTag(p)}
+            ${p.tags?.length ? tag(`all: ${p.tags.join(', ')}`, 'info') : ''}
             ${p.failures ? tag(`${p.failures} failures`, 'bad') : ''}
             ${p.analyzedAt ? `<span class="muted">AI ${fmtWhen(p.analyzedAt)}</span>` : ''}</div>`).join('')
           : '<span class="muted">No listing pages saved.</span>'}
@@ -203,53 +234,262 @@ function sourcesTab() {
     </table></div>`;
 }
 
+// A count with a small bar for its share of the total.
+function share(n, total) {
+  const pct = total ? (n / total) * 100 : 0;
+  return `<div class="share">${fmtInt(n)}<div class="track" title="${pct.toFixed(1)} % of all"><div style="width:${Math.min(100, pct)}%"></div></div></div>`;
+}
+
+const DOMAIN_SORTS = [['visits', 'Visits'], ['cycleVisits', 'This cycle'], ['queued', 'In queue'], ['events', 'Events'], ['errors', 'Errors']];
+// One domain taking this share of the current cycle or of the queue gets a "heavy" tag.
+const HEAVY_CYCLE = 0.25, HEAVY_QUEUE = 0.2;
+
+function domainsTab() {
+  if (!tabData) return '<p class="muted">Loading…</p>';
+  const { totals: t, domains } = tabData;
+  const list = [...domains].sort((a, b) => b[domainSort] - a[domainSort] || b.visits - a.visits).slice(0, 300);
+  const heavy = (x) => (t.cycleVisits >= 10 && x.cycleVisits / t.cycleVisits >= HEAVY_CYCLE)
+    || (t.queued >= 50 && x.queued / t.queued >= HEAVY_QUEUE);
+  const cells = (x) => `
+    <td class="num">${share(x.visits, t.visits)}</td>
+    <td class="num">${share(x.cycleVisits, t.cycleVisits)}</td>
+    <td class="num">${share(x.queued, t.queued)}</td>
+    <td class="num">${fmtInt(x.pages)}</td>
+    <td class="num">${fmtInt(x.events)}${x.added ? `<div class="muted">${fmtInt(x.added)} new</div>` : ''}</td>
+    <td class="num">${x.errors ? `<span title="${esc(x.lastError || '')}">${fmtInt(x.errors)}</span>` : ''}</td>
+    <td class="num">${x.lastVisitAt ? ago(x.lastVisitAt) : ''}</td>`;
+  return `<p class="muted" style="margin-top:0">Where the crawler spends its visits, by domain. Click a domain for its
+    subdomains. Bars show the share of all visits, of this cycle's visits, and of the queue. A domain with many visits
+    but few events is eating the budget; one with many events may deserve it.</p>
+    <div class="sorts"><span>Sort by</span>${DOMAIN_SORTS.map(([k, label]) =>
+      `<button data-sort="${k}" aria-pressed="${k === domainSort}">${label}</button>`).join('')}
+      <span>· ${fmtInt(domains.length)} domains, ${fmtInt(t.visits)} visits, ${fmtInt(t.queued)} queued</span></div>
+    <div class="scroll"><table class="grid">
+      <tr><th>Domain</th><th class="num">Visits</th><th class="num">This cycle</th><th class="num">In queue</th>
+        <th class="num">Pages</th><th class="num">Events</th><th class="num">Errors</th><th class="num">Last</th></tr>
+      ${list.map((d) => `
+        <tr class="click ${openDomain === d.domain ? 'sel' : ''}" data-domain="${esc(d.domain)}">
+          <td class="url"><b>${esc(d.domain)}</b> ${d.hosts.length > 1 ? `<span class="muted">${d.hosts.length} hosts</span>` : ''}
+            ${d.kind ? tag(d.kind, d.kind === 'events' ? 'ok' : '') : ''} ${heavy(d) ? tag('heavy', 'warn') : ''}</td>
+          ${cells(d)}</tr>
+        ${openDomain === d.domain ? d.hosts.map((h) => `<tr class="sub">
+          <td class="url">${esc(h.host)} ${h.kind ? tag(h.kind, h.kind === 'events' ? 'ok' : '') : ''}
+            ${h.failStreak >= 3 ? tag(`failing: ${h.lastError || 'error'}`, 'bad') : ''}</td>
+          ${cells(h)}</tr>`).join('') : ''}`).join('')
+      || '<tr><td class="empty-row">Nothing visited yet.</td></tr>'}
+    </table></div>`;
+}
+
+let aiFilter = 'all';
+
+const PLAN_NAMES = { pro: 'Pro', max: 'Max', team: 'Team', enterprise: 'Enterprise' };
+
+// Your Claude plan: the only real measure of "how much is left". Plans have no token allowance.
+function planBox(a) {
+  const p = a.plan;
+  const bar = (pct) => `<div class="track"><div style="width:${Math.min(100, pct)}%"></div></div>`;
+  let body;
+  if (!p) body = '<p class="muted">Checking…</p>';
+  else if (p.error) body = `<p class="muted">Not available: ${esc(p.error)}</p>`;
+  else {
+    const rows = (p.windows || []).map((w) => `<div class="planrow"><span>${esc(w.name)}</span>${bar(w.used)}
+      <span>${Math.round(w.used)} % used${w.resetsAt ? ` · resets ${fmtWhen(w.resetsAt)}` : ''}</span></div>`);
+    if (p.credits) {
+      const c = p.credits;
+      rows.push(`<div class="planrow"><span>Usage credits this month</span>${bar(c.percent)}
+        <span>${c.currency === 'USD' ? '$' : ''}${c.used.toFixed(2)} of ${c.currency === 'USD' ? '$' : ''}${c.limit.toFixed(2)}${c.currency === 'USD' ? '' : ` ${esc(c.currency)}`} (${Math.round(c.percent)} %)</span></div>`);
+    }
+    body = rows.join('') || '<p class="muted">The plan reported no usage limits.</p>';
+  }
+  return `<div class="aijobs plan">
+    <div class="planhead"><b>Your Claude plan${p?.subscription ? `: ${esc(PLAN_NAMES[p.subscription] || p.subscription)}` : ''}</b>
+      <span class="muted">${p?.at ? `checked ${fmtTime(p.at)}` : ''}</span>
+      <button class="btn" data-plan-refresh>Refresh</button></div>
+    ${body}
+    <p class="muted">This is the account your Claude Code is logged in with, and everything above is shared with your
+      own Claude Code use. Claude plans (Pro, Max, Team, Enterprise) have no fixed number of tokens: they limit
+      usage per 5-hour window and per week, shown as % used. Usage credits pay for usage beyond those limits.
+      <b>API price</b> is what the same tokens would cost on the pay-per-token API. It isn't what you pay on a plan,
+      but it compares models: per token, Haiku costs about half of Sonnet and a quarter of Opus.</p>
+  </div>`;
+}
+
+function modelTable(a) {
+  if (!a.byModel?.length) return '';
+  return `<table class="grid" style="margin-top:12px">
+    <tr><th>Model</th><th class="num">Calls</th><th class="num">Tokens</th><th class="num">API price</th></tr>
+    ${a.byModel.map((m) => `<tr><td>${esc(m.model)}</td><td class="num">${fmtInt(m.calls)}</td>
+      <td class="num">${fmtTokens(m.tokens)}</td><td class="num">${m.costUsd ? fmtUsd(m.costUsd) : '<span class="muted">—</span>'}</td></tr>`).join('')}
+  </table>`;
+}
+
+function aiJobsPanel(a) {
+  return `<div class="aijobs">
+    <label class="master"><input type="checkbox" data-ai-master ${a.enabled ? 'checked' : ''}> <b>Use AI</b>
+      <span class="muted">— off: the crawler runs on rules only (recipes, JSON-LD, keyword tags)</span></label>
+    ${Object.entries(a.jobs).map(([k, j]) => `<div class="aijobrow ${a.enabled ? '' : 'off'}">
+      <label><input type="checkbox" data-ai-job="${k}" ${j.on ? 'checked' : ''} ${a.enabled ? '' : 'disabled'}> <b>${esc(j.label)}</b></label>
+      <select data-ai-model="${k}" ${a.enabled && j.on ? '' : 'disabled'} aria-label="Model for ${esc(j.label)}">
+        ${a.models.map((m) => `<option value="${m}" ${m === j.model ? 'selected' : ''}>${m === 'default' ? 'your Claude Code default' : m}</option>`).join('')}
+      </select>
+      <div class="muted">${esc(j.what)}</div>
+      <div class="muted">${fmtInt(j.calls)} call${j.calls === 1 ? '' : 's'} in total (API price ${fmtUsd(j.costUsd)}) · ${fmtInt(j.todayCalls)} today (${fmtTokens(j.todayTokens)} tokens, ${fmtUsd(j.todayCostUsd)})${j.last
+        ? ` · last ${fmtWhen(j.last.at)}: <span class="click" data-ai="${esc(j.last.id)}">${esc((j.last.error || j.last.outcome || j.last.target || '').split('\n')[0])}</span>` : ''}</div>
+    </div>`).join('')}
+  </div>`;
+}
+
 function aiTab() {
   const a = snap.ai;
-  const calls = tabData || [];
+  // A server started before the AI jobs existed sends none: say so instead of failing silently.
+  if (!a?.jobs) return '<p class="note">The crawler server is older than this page. Restart it (<code>npm run serve</code>) to see the AI tab.</p>';
+  const calls = (tabData || []).filter((c) => aiFilter === 'all' || (c.kind === 'classify' ? 'tag' : c.kind) === aiFilter);
   const tiles = [
     ['Calls', fmtInt(a.calls)], ['Today', `${fmtInt(a.todayCalls)} · ${fmtTokens(a.todayTokens)}`],
-    ['Tokens in', fmtTokens(a.input)], ['Tokens out', fmtTokens(a.output)], ['Web searches', fmtInt(a.webSearches)],
+    ['Tokens in', fmtTokens(a.input)], ['Tokens out', fmtTokens(a.output)], ['API price, all', fmtUsd(a.costUsd)],
+    ['API price, today', fmtUsd(a.todayCostUsd)], ['Web searches', fmtInt(a.webSearches)],
     ['Failed', fmtInt(a.errors)],
   ];
-  return `<p class="note" style="margin-top:0">${a.enabled
-    ? 'AI runs on your Claude subscription through your Claude Code login: calls use your plan\'s usage limits (shared with your own Claude Code use) and aren\'t billed per token.'
-    : 'AI is off (EVENTS_AI=off).'}</p>
+  const jobName = (c) => a.jobs[c.kind === 'classify' ? 'tag' : c.kind]?.label || c.kind;
+  return `${planBox(a)}
+    ${aiJobsPanel(a)}
+    <p class="note">Changes apply from the next AI call.</p>
     <div class="tiles">${tiles.map(([k, n]) => `<div class="tile"><div class="n">${n}</div><div class="k">${k}</div></div>`).join('')}</div>
+    <div id="ai-detail"></div>
+    <div class="sorts"><span>Show</span>${[['all', 'All jobs'], ...Object.entries(a.jobs).map(([k, j]) => [k, j.label])].map(([k, label]) =>
+      `<button data-aifilter="${k}" aria-pressed="${k === aiFilter}">${esc(label)}</button>`).join('')}</div>
     <div class="scroll"><table class="grid">
-      <tr><th>Time</th><th>Kind</th><th>Page / query</th><th class="num">Tokens in/out</th><th class="num">s</th></tr>
+      <tr><th>Time</th><th>Job</th><th>Page / query → what came of it</th><th class="num">Tokens in/out</th><th class="num">s</th></tr>
       ${calls.map((c) => `<tr class="click ${selectedAi === c.id ? 'sel' : ''}" data-ai="${c.id}">
         <td class="num">${fmtWhen(c.at)}</td>
-        <td>${tag(c.kind, 'info')}${c.error ? ` ${tag(c.error, 'bad')}` : ''}</td>
-        <td class="url">${esc(c.target)}</td>
-        <td class="num">${fmtTokens(c.usage.input + c.usage.cacheRead + c.usage.cacheWrite)} / ${fmtTokens(c.usage.output)}</td>
+        <td>${tag(jobName(c), 'ai')}<div class="muted">${esc(c.model || '')}</div>${c.error ? ` ${tag(c.error, 'bad')}` : ''}</td>
+        <td class="url">${esc(c.target)}${c.outcome ? `<div class="outcome">${esc(c.outcome).replace(/\n/g, '<br>')}</div>` : ''}</td>
+        <td class="num">${fmtTokens(c.usage.input + c.usage.cacheRead + c.usage.cacheWrite)} / ${fmtTokens(c.usage.output)}${c.usage.costUsd ? `<div class="muted">${fmtUsd(c.usage.costUsd)}</div>` : ''}</td>
         <td class="num">${(c.ms / 1000).toFixed(1)}</td></tr>`).join('')
       || '<tr><td class="empty-row">No AI calls yet.</td></tr>'}
     </table></div>
-    <div id="ai-detail"></div>`;
+    ${modelTable(a)}`;
 }
+
+// ---------------------------------------------------------------- AI call details, in plain words
+
+const yesNo = (v) => (v === true ? tag('yes', 'ok') : v === false ? tag('no') : '<span class="muted">—</span>');
+const link = (u) => `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`;
+const RECIPE_FIELDS = [['item', 'One event (repeated element)'], ['title', 'Title'], ['date', 'Date'], ['time', 'Time'],
+  ['location', 'Location'], ['description', 'Description'], ['link', 'Link to the event']];
+
+// "Read new listing pages": what the AI decided about the site and the page.
+function analyzeView(r) {
+  const rows = [
+    ['Publishes events', yesNo(r.publishesEvents ?? r.publishesKosiceEvents)],
+    ['This page lists several events', yesNo(r.pageListsEvents)],
+    ['All events on this page are in', r.listingCity ? esc(r.listingCity) : r.listingIsKosiceOnly ? 'Košice' : '<span class="muted">several places / unknown</span>'],
+    ['Check the site again every', r.checkEveryHours ? `${r.checkEveryHours} hours` : '—'],
+  ];
+  if (r.pageTags?.length) rows.push(['Every event on this page is', r.pageTags.map((t) => tag(t)).join(' ')]);
+  if (r.venue?.name) rows.push(['The site\'s own venue', esc([r.venue.name, r.venue.address].filter(Boolean).join(', '))]);
+  return `<p><b>${esc(r.siteKind || 'unknown')}</b> site: ${esc(r.summary || '')}</p>
+    <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+    <h4>Recipe ${r.recipe ? '<span class="muted">(CSS selectors the crawler uses on later visits, without AI)</span>' : ''}</h4>
+    ${r.recipe ? `<table class="sources">${RECIPE_FIELDS.filter(([k]) => r.recipe[k]).map(([k, label]) =>
+      `<tr><td>${label}</td><td><code>${esc(r.recipe[k])}</code></td></tr>`).join('')}</table>`
+      : '<p class="muted">None: the page has no repeated event elements.</p>'}
+    ${r.events?.length ? `<h4>Events it read itself (${r.events.length})</h4>
+      <table class="sources"><tr><th>Event</th><th>Date</th><th>Time</th><th>Where</th></tr>
+      ${r.events.map((e) => `<tr><td>${e.url ? `<a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.title)}</a>` : esc(e.title)}
+        ${(e.tags || []).map((t) => tag(t)).join(' ')}</td>
+        <td>${esc([e.start, e.end].filter(Boolean).join(' – '))}</td><td>${esc([e.time, e.endTime].filter(Boolean).join('–'))}</td><td>${esc(e.location || '')}</td></tr>`).join('')}
+      </table>` : ''}
+    ${r.eventListUrls?.length ? `<h4>Other pages on this site that list events</h4>
+      <ul>${r.eventListUrls.map((u) => `<li>${link(u)}</li>`).join('')}</ul>` : ''}`;
+}
+
+// "Tag events": which tags each event got. Titles come from the saved input.
+function tagView(r, input) {
+  const sent = new Map();
+  for (const line of (input?.prompt || '').split('\n')) {
+    try { const e = JSON.parse(line); if (Number.isInteger(e.i)) sent.set(e.i, e); } catch {}
+  }
+  const rows = (r.events || []).map((x) => {
+    const e = sent.get(x.i);
+    return `<tr><td>${e ? esc(e.title) : `event #${x.i}`}${e?.venue ? `<div class="muted">${esc(e.venue)}</div>` : ''}</td>
+      <td>${x.tags.length ? x.tags.map((t) => tag(t)).join(' ') : '<span class="muted">no tag fits</span>'}</td></tr>`;
+  });
+  return `<table class="sources"><tr><th>Event</th><th>Tags it gave</th></tr>${rows.join('')}</table>`;
+}
+
+// "Find new sources": the search and the links it found.
+function discoverView(r) {
+  return `<p>Searched for <b>${esc(r.query)}</b> and found ${r.urls?.length || 0} links:</p>
+    <ul>${(r.urls || []).map((u) => `<li>${link(u)}</li>`).join('')}</ul>`;
+}
+
+// "Check dates": what AI read for each date format and schedule. Texts come from the saved input.
+function datesView(r, input) {
+  const lines = (input?.prompt || '').split('\n');
+  const samples = {}, prose = {};
+  let f = null;
+  for (const l of lines) {
+    let m;
+    if ((m = l.match(/^FORMAT f=(\d+)/))) f = +m[1];
+    else if ((m = l.match(/^PROSE p=(\d+) \(event "(.*)"\)/))) { f = null; prose[m[1]] = m[2]; }
+    else if (f !== null && (m = l.match(/^\s+s=(\d+): (.*)/))) (samples[f] ??= {})[m[1]] = m[2];
+  }
+  const when = (a) => esc([[a.start, a.end].filter(Boolean).join(' – '), [a.time, a.endTime].filter(Boolean).join('–')].filter(Boolean).join(' · ') || '—');
+  const rows = (r.formats || []).flatMap((x) => x.samples.map((y, i) => `<tr><td><code>${esc(samples[x.f]?.[y.s] ?? `#${x.f}/${y.s}`)}</code></td>
+    <td>${when(y)}</td>${i === 0 ? `<td rowspan="${x.samples.length}">${x.rule ? `<code>${esc(x.rule.pattern)}</code>` : '<span class="muted">no rule</span>'}</td>` : ''}</tr>`));
+  return `${rows.length ? `<table class="sources"><tr><th>Date text</th><th>AI read it as</th><th>Rule it wrote</th></tr>${rows.join('')}</table>` : ''}
+    ${(r.prose || []).map((p) => `<h4>${esc(prose[p.p] || `schedule #${p.p}`)}</h4><p>${when(p)}</p>
+      ${p.schedule?.length ? `<ul>${p.schedule.map((d) => `<li>${when({ start: d.date, time: d.time, endTime: d.endTime })}</li>`).join('')}</ul>` : ''}`).join('')}`;
+}
+
+let detailCache = { id: null, html: '' };
+
+const AI_VIEWS = { analyze: analyzeView, tag: tagView, classify: tagView, discover: discoverView, dates: datesView };
 
 async function showAiDetail(id) {
   selectedAi = id;
   history.replaceState(null, '', `#ai/${id}`);
   const box = $('#ai-detail');
   if (!box) return;
+  // The tab re-renders every few seconds: put the open call back as it was, without a reload or a jump.
+  if (detailCache.id === id) {
+    box.innerHTML = detailCache.html;
+    document.querySelectorAll('[data-ai]').forEach((r) => r.classList.toggle('sel', r.dataset.ai === id));
+    return;
+  }
   box.innerHTML = '<div class="detail muted">Loading…</div>';
   const c = await getJson(`/api/ai/${id}`);
   const u = c.usage || {};
   box.innerHTML = `<div class="detail">
     <dl>
-      <dt>Kind</dt><dd>${esc(c.kind)}</dd>
+      <dt>Job</dt><dd>${esc(snap.ai.jobs[c.kind === 'classify' ? 'tag' : c.kind]?.label || c.kind)}</dd>
+      ${c.outcome ? `<dt>What came of it</dt><dd>${esc(c.outcome).replace(/\n/g, '<br>')}</dd>` : ''}
       <dt>${c.kind === 'discover' ? 'Query' : 'Page'}</dt><dd>${c.target?.startsWith('http') ? `<a href="${esc(c.target)}" target="_blank" rel="noopener">${esc(c.target)}</a>` : esc(c.target)}</dd>
       <dt>When</dt><dd>${new Date(c.at).toLocaleString('sk-SK')} · ${(c.ms / 1000).toFixed(1)} s</dd>
       <dt>Model</dt><dd>${esc(c.model)}${c.turns ? ` · ${c.turns} turns` : ''}</dd>
-      <dt>Tokens</dt><dd>${fmtInt(u.input + u.cacheRead + u.cacheWrite)} in (${fmtInt(u.cacheRead)} from cache) · ${fmtInt(u.output)} out${u.webSearches ? ` · ${u.webSearches} web searches` : ''}</dd>
-      ${c.inputChars ? `<dt>Page sent</dt><dd>${fmtInt(c.inputChars)} characters of simplified HTML</dd>` : ''}
+      <dt>Tokens</dt><dd>${fmtInt(u.input + u.cacheRead + u.cacheWrite)} in (${fmtInt(u.cacheRead)} from cache) · ${fmtInt(u.output)} out${u.webSearches ? ` · ${u.webSearches} web searches` : ''}${u.costUsd ? ` · API price ${fmtUsd(u.costUsd)}` : ''}</dd>
       ${c.error ? `<dt>Error</dt><dd>${esc(c.error)}</dd>` : ''}
     </dl>
-    <h3 style="margin-top:0">What it returned</h3>
-    <pre>${esc(JSON.stringify(c.result, null, 2) ?? 'nothing')}</pre>
+
+    <h3>What AI figured out</h3>
+    ${c.result && AI_VIEWS[c.kind] ? AI_VIEWS[c.kind](c.result, c.input) : '<p class="muted">No answer.</p>'}
+
+    <h3>What the crawler did with it</h3>
+    <p>${c.outcome ? esc(c.outcome).replace(/\n/g, '<br>') : '<span class="muted">Not recorded (calls from before this was logged).</span>'}</p>
+
+    <h3>Input and raw output</h3>
+    ${c.input ? `
+      ${c.input.system ? `<details><summary>Instructions (system prompt), ${fmtInt(c.input.system.length)} characters</summary><pre>${esc(c.input.system)}</pre></details>` : ''}
+      <details><summary>What it was sent${c.kind === 'analyze' ? ' (page URL, title, links, simplified HTML)' : ''}, ${fmtInt(c.input.prompt.length)} characters</summary><pre>${esc(c.input.prompt)}</pre></details>
+      ${c.input.tools ? `<p class="muted">Tools it could use: ${esc(c.input.tools.join(', '))}</p>` : ''}`
+      : `<p class="muted">Input not kept${c.inputChars ? ` (it was ${fmtInt(c.inputChars)} characters)` : ''}: only the last 300 calls keep it, and calls from before this version have none.</p>`}
+    <details><summary>Raw answer (JSON)</summary><pre>${esc(JSON.stringify(c.result, null, 2) ?? 'nothing')}</pre></details>
   </div>`;
+  box.querySelector('.detail').insertAdjacentHTML('afterbegin', '<button class="btn close" data-ai-close>Close</button>');
+  detailCache = { id, html: box.innerHTML };
   document.querySelectorAll('[data-ai]').forEach((r) => r.classList.toggle('sel', r.dataset.ai === id));
+  box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function settingsTab() {
@@ -264,12 +504,12 @@ function settingsTab() {
     </div>
     <p><button class="btn primary" id="save-settings">Save</button> <span class="muted" id="saved"></span></p>
     <p class="note">Each site still gets one request every 2 seconds, however many pages run in parallel.<br>
-      AI: ${snap.ai.enabled ? 'on (Claude subscription via your Claude Code login)' : 'off (EVENTS_AI=off)'} · Facebook dates: ${snap.facebook ? 'on' : 'off (set EVENTS_FACEBOOK=on)'}.
-      Both are set when starting the server.</p>`;
+      AI: ${snap.ai.enabled ? 'on' : 'off'}, switched per job in the <span class="click" style="text-decoration:underline;cursor:pointer" data-go="ai">AI tab</span>.
+      Facebook dates: ${snap.facebook ? 'on' : 'off (set EVENTS_FACEBOOK=on when starting the server)'}.</p>`;
 }
 
-const TABS = { overview, queue: queueTab, sources: sourcesTab, ai: aiTab, settings: settingsTab };
-const TAB_DATA = { queue: '/api/queue', sources: '/api/sources', ai: '/api/ai' };
+const TABS = { overview, queue: queueTab, sources: sourcesTab, domains: domainsTab, ai: aiTab, settings: settingsTab };
+const TAB_DATA = { queue: '/api/queue', sources: '/api/sources', domains: '/api/domains', ai: '/api/ai' };
 
 function renderTab() {
   if (!snap) return;
@@ -308,6 +548,30 @@ $('#tab').onclick = (e) => {
   }
   const ai = e.target.closest('[data-ai]');
   if (ai) return showAiDetail(ai.dataset.ai);
+  if (e.target.closest('[data-ai-close]')) {
+    selectedAi = null;
+    history.replaceState(null, '', '#ai');
+    return renderTab();
+  }
+  if (e.target.closest('[data-plan-refresh]')) {
+    e.target.textContent = 'Checking…';
+    return postJson('/api/plan').then((s) => { apply(s); renderTab(); });
+  }
+  const filter = e.target.closest('[data-aifilter]');
+  if (filter) {
+    aiFilter = filter.dataset.aifilter;
+    return renderTab();
+  }
+  const sort = e.target.closest('[data-sort]');
+  if (sort) {
+    domainSort = sort.dataset.sort;
+    return renderTab();
+  }
+  const dom = e.target.closest('[data-domain]');
+  if (dom) {
+    openDomain = openDomain === dom.dataset.domain ? null : dom.dataset.domain;
+    return renderTab();
+  }
   const src = e.target.closest('[data-origin]');
   if (src) {
     openSource = openSource === src.dataset.origin ? null : src.dataset.origin;
@@ -322,6 +586,16 @@ $('#tab').onclick = (e) => {
     postJson('/api/settings', patch).then((s) => { apply(s); $('#saved').textContent = 'Saved.'; });
   }
 };
+
+// AI switches and models: saved right away.
+$('#tab').addEventListener('change', (e) => {
+  const t = e.target;
+  let ai;
+  if (t.matches('[data-ai-master]')) ai = { enabled: t.checked };
+  else if (t.dataset.aiJob) ai = { jobs: { [t.dataset.aiJob]: { on: t.checked } } };
+  else if (t.dataset.aiModel) ai = { jobs: { [t.dataset.aiModel]: { model: t.value } } };
+  if (ai) postJson('/api/settings', { ai }).then((s) => { apply(s); renderTab(); });
+});
 
 // ---------------------------------------------------------------- live updates
 

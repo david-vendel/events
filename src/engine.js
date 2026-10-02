@@ -2,8 +2,12 @@
 // start/stop, number of parallel workers, budgets, and a live record of what's happening.
 import { loadState, saveState } from './store.js';
 import { runCycle } from './crawler.js';
-import { aiAvailable, aiStatus, setAiRecorder } from './ai.js';
+import {
+  AI_JOBS, AI_MODELS, aiAvailable, aiConfig, aiInput, aiStatus, lastPlanUsage, planUsage, setAiConfig, setAiRecorder,
+} from './ai.js';
 import { facebookEnabled } from './corroborate.js';
+import { domainOf, hostOf } from './urls.js';
+import { activeRuleCount, tagSources } from './tags.js';
 
 export const DEFAULT_SETTINGS = {
   concurrency: 5, // pages fetched in parallel
@@ -24,6 +28,7 @@ export class Engine {
   constructor() {
     this.state = loadState();
     this.settings = { ...DEFAULT_SETTINGS, ...this.state.settings };
+    this.settings.ai = setAiConfig(this.settings.ai); // AI switches + model per job
     this.state.settings = this.settings;
     this.running = false; // a loop is active (cycle running or waiting for the next one)
     this.stopping = false;
@@ -45,6 +50,7 @@ export class Engine {
       this.message(`AI ${rec.kind}: ${rec.target} — ${rec.error || `${fmtTokens(u.input + u.cacheRead + u.cacheWrite + u.output)} tokens, ${(rec.ms / 1000).toFixed(1)} s`}`);
     });
     setInterval(() => this.save(), SAVE_EVERY_MS).unref();
+    planUsage().catch(() => {}); // your Claude plan's usage, for the AI tab
   }
 
   // ---------------------------------------------------------------- control
@@ -69,6 +75,12 @@ export class Engine {
   }
 
   updateSettings(patch) {
+    if (patch.ai) {
+      this.settings.ai = setAiConfig(patch.ai);
+      const a = this.settings.ai;
+      this.message(`AI ${a.enabled ? 'on' : 'off'}: ${Object.entries(a.jobs)
+        .map(([k, j]) => `${AI_JOBS[k].label.toLowerCase()} ${j.on ? `on (${j.model})` : 'off'}`).join(', ')}`);
+    }
     for (const [k, [min, max]] of Object.entries(LIMITS)) {
       if (patch[k] === undefined) continue;
       const v = Math.round(Number(patch[k]));
@@ -93,6 +105,7 @@ export class Engine {
       }
       this.dirty = true;
       this.save();
+      planUsage({ refresh: true }).catch(() => {});
       if (once || this.stopping) break;
       this.nextCycleAt = Date.now() + this.settings.cycleEveryMin * 60e3;
       this.phase = { name: 'Waiting', detail: 'for the next cycle' };
@@ -160,10 +173,15 @@ export class Engine {
       t.input += tokensIn(r);
       t.output += r.usage.output;
       t.webSearches += r.usage.webSearches || 0;
-      if (r.at.slice(0, 10) === today) { t.todayCalls++; t.todayTokens += tokensIn(r) + r.usage.output; }
+      t.costUsd += r.usage.costUsd || 0;
+      if (r.at.slice(0, 10) === today) {
+        t.todayCalls++;
+        t.todayTokens += tokensIn(r) + r.usage.output;
+        t.todayCostUsd += r.usage.costUsd || 0;
+      }
       if (r.error) t.errors++;
       return t;
-    }, { calls: 0, input: 0, output: 0, webSearches: 0, todayCalls: 0, todayTokens: 0, errors: 0 });
+    }, { calls: 0, input: 0, output: 0, webSearches: 0, todayCalls: 0, todayTokens: 0, errors: 0, costUsd: 0, todayCostUsd: 0 });
     const c = this.cycle;
     return {
       running: this.running,
@@ -178,6 +196,8 @@ export class Engine {
       log: this.log.slice(0, 30),
       counts: {
         upcoming: Object.values(s.events).filter((e) => (e.end || e.start) >= today).length,
+        located: Object.values(s.events).filter((e) => (e.end || e.start) >= today && e.place).length,
+        tagRules: activeRuleCount(s.tagRules),
         events: Object.keys(s.events).length,
         sources: sources.filter((x) => x.kind === 'events').length,
         irrelevant: sources.filter((x) => x.kind === 'irrelevant').length,
@@ -186,7 +206,7 @@ export class Engine {
         pagesKnown: Object.keys(s.pages).length,
         social: Object.keys(s.social).length,
       },
-      ai: { ...ai, enabled: aiAvailable(), ...aiStatus() },
+      ai: { ...ai, enabled: aiAvailable(), ...aiStatus(), jobs: this.aiJobs(today), models: AI_MODELS, byModel: this.aiByModel(), plan: lastPlanUsage() },
       facebook: facebookEnabled(),
     };
   }
@@ -202,27 +222,112 @@ export class Engine {
     return Object.values(this.state.sources)
       .filter((x) => x.kind !== 'unknown')
       .map((x) => ({
-        origin: x.origin, kind: x.kind, siteKind: x.siteKind, summary: x.summary, kosiceOnly: x.kosiceOnly,
+        origin: x.origin, kind: x.kind, siteKind: x.siteKind, summary: x.summary, city: x.city,
         intervalHours: x.intervalHours, lastCheckedAt: x.lastCheckedAt, nextCheckAt: x.nextCheckAt, stats: x.stats,
         pages: Object.entries(x.pages).map(([url, p]) => ({
           url, recipe: Boolean(p.recipe), lastCount: p.lastCount, analyzedAt: p.analyzedAt, failures: p.failures,
+          lastRead: p.lastRead, tags: p.tags,
         })),
       }))
       .sort((a, b) => (a.kind === b.kind ? (b.stats.events - a.stats.events) : a.kind === 'events' ? -1 : 1));
+  }
+
+  /**
+   * Crawl activity grouped by domain, with each subdomain inside: visits (all time and this
+   * cycle), errors, events found, pages known and links waiting in the queue.
+   */
+  domains() {
+    const s = this.state;
+    const cycleVisits = this.cycle?.hostVisits || {};
+    const hosts = {};
+    const row = (host) => (hosts[host] ??= {
+      host, visits: 0, cycleVisits: 0, errors: 0, events: 0, added: 0, pages: 0, queued: 0, kind: undefined,
+    });
+    for (const [host, h] of Object.entries(s.hosts)) {
+      Object.assign(row(host), {
+        visits: h.visits, errors: h.errors, failStreak: h.failStreak, lastError: h.lastError,
+        events: h.events, added: h.added, lastVisitAt: h.lastVisitAt,
+      });
+    }
+    for (const [host, n] of Object.entries(cycleVisits)) row(host).cycleVisits = n;
+    for (const url of Object.keys(s.pages)) { const h = hostOf(url); if (h) row(h).pages++; }
+    for (const url of Object.keys(s.frontier)) { const h = hostOf(url); if (h) row(h).queued++; }
+    for (const src of Object.values(s.sources)) {
+      const r = hosts[hostOf(src.origin)];
+      if (r && src.kind !== 'unknown' && r.kind !== 'events') r.kind = src.kind;
+    }
+
+    const domains = {};
+    const SUM = ['visits', 'cycleVisits', 'errors', 'events', 'added', 'pages', 'queued'];
+    for (const h of Object.values(hosts)) {
+      const d = (domains[domainOf(h.host)] ??= { domain: domainOf(h.host), hosts: [], ...Object.fromEntries(SUM.map((k) => [k, 0])) });
+      d.hosts.push(h);
+      for (const k of SUM) d[k] += h[k];
+      if (h.kind === 'events' || (h.kind && !d.kind)) d.kind = h.kind;
+      if (h.lastVisitAt > (d.lastVisitAt || '')) d.lastVisitAt = h.lastVisitAt;
+    }
+    const list = Object.values(domains);
+    for (const d of list) d.hosts.sort((a, b) => b.visits - a.visits || b.queued - a.queued);
+    const totals = Object.fromEntries(SUM.map((k) => [k, list.reduce((t, d) => t + d[k], 0)]));
+    return { totals, domains: list.sort((a, b) => b.visits - a.visits || b.queued - a.queued) };
+  }
+
+  /** Each AI job: what it's for, its switch and model, and what it has done. */
+  aiJobs(today) {
+    const cfg = aiConfig();
+    const jobs = Object.fromEntries(Object.entries(AI_JOBS).map(([k, j]) => [k, {
+      ...j, ...cfg.jobs[k], calls: 0, todayCalls: 0, todayTokens: 0, costUsd: 0, todayCostUsd: 0, last: null,
+    }]));
+    for (const r of this.state.ai) {
+      const j = jobs[r.kind === 'classify' ? 'tag' : r.kind];
+      if (!j) continue;
+      j.calls++;
+      j.costUsd += r.usage.costUsd || 0;
+      if (r.at.slice(0, 10) === today) {
+        j.todayCalls++;
+        j.todayTokens += r.usage.input + r.usage.cacheRead + r.usage.cacheWrite + r.usage.output;
+        j.todayCostUsd += r.usage.costUsd || 0;
+      }
+      j.last = { id: r.id, at: r.at, target: r.target, outcome: r.outcome, error: r.error, model: r.model };
+    }
+    return jobs;
+  }
+
+  async refreshPlan() {
+    await planUsage({ refresh: true });
+    return this.snapshot();
+  }
+
+  /** Calls, tokens and API price per model: shows what the cheaper model saves. */
+  aiByModel() {
+    const by = {};
+    for (const r of this.state.ai) {
+      const m = (by[r.model || 'unknown'] ??= { model: r.model || 'unknown', calls: 0, tokens: 0, costUsd: 0 });
+      m.calls++;
+      m.tokens += r.usage.input + r.usage.cacheRead + r.usage.cacheWrite + r.usage.output;
+      m.costUsd += r.usage.costUsd || 0;
+    }
+    return Object.values(by).sort((a, b) => b.costUsd - a.costUsd || b.calls - a.calls);
   }
 
   aiCalls() {
     return this.state.ai.slice(-500).reverse().map(({ result, ...r }) => r);
   }
 
+  /** One AI call with everything about it: what it was sent (if still kept) and what it answered. */
   aiCall(id) {
-    return this.state.ai.find((r) => r.id === id);
+    const rec = this.state.ai.find((r) => r.id === id);
+    return rec && { ...rec, input: aiInput(id) };
   }
 
   events() {
     const today = new Date().toISOString().slice(0, 10);
     return Object.values(this.state.events)
       .filter((e) => (e.end || e.start) >= today)
+      .map((e) => {
+        const tagFrom = tagSources(e, this.state.tagRules);
+        return { ...e, tags: Object.keys(tagFrom), tagFrom };
+      })
       .sort((a, b) => a.start.localeCompare(b.start) || (a.time || '').localeCompare(b.time || ''));
   }
 }

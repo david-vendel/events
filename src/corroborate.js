@@ -2,7 +2,8 @@
 // gives to the same event elsewhere (Facebook event, ticket shops) and records the date each
 // source states, so the UI can show whether they agree.
 import * as cheerio from 'cheerio';
-import { fetchPage } from './fetcher.js';
+import { fetchPage, sha1 } from './fetcher.js';
+import { countTimes, countWeekdays } from './dates.js';
 import { clean, extractLinks, facebookEvent, jsonLdEvents, parseDateText } from './extract.js';
 import { titleSimilarity } from './match.js';
 import { renderPage } from './browser.js';
@@ -78,7 +79,7 @@ async function readWeb(url, event) {
   const $ = cheerio.load(res.html);
   const best = bestMatch(jsonLdEvents($, res.url), event.title);
   if (!best) return { status: 'no_date', note: 'no structured date on page' };
-  return { title: best.title, start: best.start, end: best.end, time: best.time, location: best.location, status: 'ok' };
+  return { title: best.title, start: best.start, end: best.end, time: best.time, endTime: best.endTime, location: best.location, status: 'ok' };
 }
 
 function bestMatch(candidates, title) {
@@ -88,6 +89,27 @@ function bestMatch(candidates, title) {
     if (s > score) { best = c; score = s; }
   }
   return score >= 0.3 || candidates.length === 1 ? best : null;
+}
+
+const PROSE_CHARS = 1500;
+const foldText = (s) => clean(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+/**
+ * The event's description on its detail page, if it reads like a schedule ("v piatok od 10.00 do
+ * 17.00 … v sobotu od 10.00 do 18.00"): several times, and several weekdays or dates. AI reads it.
+ */
+export function proseSchedule($, title) {
+  const $c = $('main, article').first().length ? $('main, article').first().clone() : $('body').clone();
+  $c.find('script, style, nav, header, footer, form, aside').remove();
+  const text = clean($c.text());
+  const folded = foldText(text);
+  const head = foldText(title).slice(0, 40);
+  // folding keeps the length, so an index in the folded text is also one in the original
+  const at = Math.max(0, head ? folded.indexOf(head) : 0);
+  const part = text.slice(at, at + PROSE_CHARS);
+  const dates = (foldText(part).match(/(?<![\d.])\d{1,2}\.\s*\d{1,2}\.|\d{1,2}\.\s*(januara|februara|marca|aprila|maja|juna|jula|augusta|septembra|oktobra|novembra|decembra)/g) || []).length;
+  if (countTimes(part) < 2 || (countWeekdays(part) < 2 && dates < 2)) return null;
+  return { text: part, hash: sha1(part).slice(0, 16) };
 }
 
 /** Links on a detail page that point to the same event elsewhere. */
@@ -127,7 +149,11 @@ export async function verifyEvent(index, ev, report) {
     if (res.html) {
       const $ = cheerio.load(res.html);
       const own = bestMatch(jsonLdEvents($, res.url), ev.title);
-      if (own) ({ event: ev } = index.add({ ...primary, start: own.start, end: own.end, time: own.time || primary.time }, ev));
+      if (own) ({ event: ev } = index.add({ ...primary, start: own.start, end: own.end, time: own.time || primary.time, endTime: own.endTime || primary.endTime }, ev));
+      // No structured dates: a schedule in the text is read by AI in the "Check dates" step.
+      const prose = own ? null : proseSchedule($, ev.title);
+      if (prose && prose.hash !== ev.prose?.hash) ev.prose = { url: res.url, ...prose };
+      else if (!prose && !own) { delete ev.prose; delete ev.schedule; }
       for (const [url, kind] of linkedSources($, res.url)) {
         // Skip short links we've already resolved to a canonical row.
         if (!ev.sources.some((s) => s.from === url)) linked.set(url, kind);
@@ -156,7 +182,7 @@ export async function verifyEvent(index, ev, report) {
       ev.sources = ev.sources.filter((s) => s.url !== url);
     }
     // Sources without their own date must not look like they agree: keep date fields empty.
-    if (found.status !== 'ok') Object.assign(row, { start: undefined, end: undefined, time: undefined });
+    if (found.status !== 'ok') Object.assign(row, { start: undefined, end: undefined, time: undefined, endTime: undefined });
     ({ event: ev } = index.add(row, ev));
     if (found.status === 'ok') {
       const p = ev.sources[0];
