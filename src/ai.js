@@ -3,7 +3,7 @@
 //  - analyze:  first look at a promising page -> what the site is, and a CSS "recipe" so future
 //              visits are parsed with zero AI;
 //  - tag:      give a kind (cinema, concert…) to events the rules couldn't tag;
-//  - discover: occasional web search for new Košice event sources;
+//  - discover: web search for new event sources, a different Slovak town and kind each time;
 //  - dates:    check date formats the parser hasn't confirmed (and write rules for them), and read
 //              schedules written as prose ("v piatok od 10.00 do 17.00, v sobotu…").
 // Calls go through the Claude Agent SDK, which runs on your Claude Code login, so they count
@@ -31,7 +31,7 @@ export const AI_JOBS = {
   },
   discover: {
     label: 'Find new sources',
-    what: 'Web search for pages that list Košice events, at most once a day.',
+    what: 'Web search for pages that list events in Slovak towns (a different town and kind each time), every 6 hours.',
     model: 'default',
   },
   dates: {
@@ -169,7 +169,7 @@ const Analysis = z.object({
   publishesEvents: z.boolean().describe('does this site regularly publish upcoming events (any place)?'),
   listingCity: z.string().nullable().describe('the city ALL events on this page take place in, e.g. "Košice"; null if several cities or unknown'),
   pageListsEvents: z.boolean().describe('does THIS page contain a list of multiple events?'),
-  recipe: Recipe.nullable().describe('null if this page has no repeated event elements'),
+  recipe: Recipe.nullable().describe('null if this page shows no event (one event on a detail page still gets a recipe)'),
   eventListUrls: z.array(z.string()).describe('other URLs on this site (from the given link list) that likely list events'),
   checkEveryHours: z.number().describe('how often to re-check this source, 12-168'),
   venue: z.object({ name: z.string(), address: z.string().nullable() }).nullable()
@@ -189,11 +189,14 @@ const Analysis = z.object({
 });
 
 const ANALYZE_SYSTEM = `You help a crawler that collects events (concerts, markets, festivals, exhibitions, sport, \
-workshops, kids' programs…) anywhere; it started in Košice, Slovakia. You get one web page as simplified HTML \
-(scripts/images/most attributes removed) plus a list of its links. Classify the site and, if the page lists \
-events, write CSS selectors (cheerio-compatible, no :contains, no positional selectors that depend on the \
-specific events) so the crawler can parse future versions of this page without you. Prefer stable class \
-names over auto-generated ones. Only list eventListUrls that appear in the given links.`;
+workshops, kids' programs…) anywhere, Slovakia first. You get one web page as simplified HTML \
+(scripts/images/navigation/most attributes removed) plus a list of its links. Classify the site and, if the page \
+lists events, write CSS selectors (cheerio-compatible, no :contains, no positional selectors that depend on the \
+specific events) so the crawler can parse future versions of this page without you. The recipe is also used on \
+other pages of the site with the same URL structure, so if this page shows ONE event (a detail page), still give \
+a recipe whose item selector matches the single element that wraps that event (e.g. its article or main block), \
+with title and date selectors inside it. Prefer stable class names over auto-generated ones. Only list \
+eventListUrls that appear in the given links.`;
 
 // Claude Code's schema validator doesn't accept zod's "$schema" draft header; the rest is fine.
 function jsonSchema(schema) {
@@ -383,30 +386,31 @@ export function readDates({ formats = [], prose = [], today }, { onStart } = {})
   });
 }
 
-const DISCOVERY_QUERIES = [
-  'Košice podujatia tento víkend',
-  'Košice kalendár akcií',
-  'Košice farmársky trh',
-  'Košice koncerty program',
-  'Košice výstavy galérie program',
-  'Košice festival 2026',
-  'Košice divadlo program',
-  'Košice akcie pre deti',
-  'Košice jarmok trh',
-  'Košice workshop prednáška',
-  'Košice nákupné centrum podujatia',
-  'Košice mestská časť kultúrne podujatia',
-  'events in Košice this month',
+// Discovery covers Slovakia town by town: each search is one kind of event in one place.
+const DISCOVERY_PLACES = [
+  'Košice', 'Bratislava', 'Žilina', 'Prešov', 'Banská Bystrica', 'Nitra', 'Trnava', 'Trenčín', 'Poprad', 'Martin',
+  'Michalovce', 'Spišská Nová Ves', 'Bardejov', 'Humenné', 'Levice', 'Komárno', 'Piešťany', 'Zvolen', 'Ružomberok',
+  'Liptovský Mikuláš', 'Vysoké Tatry', 'Prievidza', 'Lučenec', 'Rožňava', 'Trebišov', 'Nové Zámky', 'Senec', 'Pezinok',
+  'Košický kraj', 'Prešovský kraj', 'Žilinský kraj', 'Banskobystrický kraj', 'Nitriansky kraj', 'Trnavský kraj',
+  'Trenčiansky kraj', 'Bratislavský kraj', 'Slovensko',
+];
+const DISCOVERY_KINDS = [
+  'podujatia kalendár akcií', 'kultúrne podujatia program', 'koncerty program', 'divadlo program', 'výstavy galéria',
+  'festival', 'akcie pre deti', 'trhy jarmok', 'kino program', 'workshop prednáška', 'športové podujatia beh',
+  'mestské kultúrne stredisko program', 'kam ísť tento víkend',
 ];
 
-/** Use web search to find pages that list Košice events. Returns { urls, call }. */
+/** Use web search to find pages that list events in some Slovak town. Returns { urls, call }. */
 export function discoverUrls(known = [], { onStart } = {}) {
   if (!aiAvailable('discover')) return Promise.resolve({ urls: [], call: null });
-  const q = DISCOVERY_QUERIES[Math.floor(Math.random() * DISCOVERY_QUERIES.length)];
+  const pick = (list) => list[Math.floor(Math.random() * list.length)];
+  const place = pick(DISCOVERY_PLACES);
+  const q = `${place} ${pick(DISCOVERY_KINDS)}`;
   const month = new Date().toLocaleString('sk-SK', { month: 'long', year: 'numeric' });
   const prompt = `Search the web for: "${q}" (it is ${month}). Find web pages that list upcoming events ` +
-    `in Košice, Slovakia — especially smaller sources (venues, shopping centers, city districts, ` +
-    `community groups, markets). Skip these already-known sites: ${known.slice(0, 80).join(', ') || 'none'}. ` +
+    `in ${place}, Slovakia: event calendars of the town and its cultural centre, venues (theatres, clubs, galleries, ` +
+    `cinemas, museums), shopping centres, tourist boards, ticket shops and community groups. Prefer pages that list ` +
+    `many events. Skip these already-known sites: ${known.slice(0, 120).join(', ') || 'none'}. ` +
     `Answer with one URL per line, nothing else.`;
   return oneAtATime({ kind: 'discover', target: q }, onStart, async () => {
     const started = Date.now();

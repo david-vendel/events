@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Košice Events</title>
+<title>Slovakia Events</title>
 <style>
   :root {
     --bg: #f6f5f2; --panel: #efede8; --card: #fff; --text: #1d1d1f; --muted: #6b6b70; --line: #e4e2dc;
@@ -142,6 +142,12 @@
   .sorts { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
   .sorts button { border: 1px solid var(--line); background: var(--card); padding: 3px 8px; border-radius: 6px; }
   .sorts button[aria-pressed=true] { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .health { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .health > div { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+  .health .n { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .health .k { font-size: 12px; color: var(--muted); }
+  .alert { background: var(--bad-bg); color: var(--bad); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; font-size: 13.5px; }
+  .alert pre { margin-top: 8px; background: var(--card); color: var(--text); max-height: 160px; }
 
   /* ------------------------------------------------ events */
   #events h2.title { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
@@ -180,6 +186,29 @@
   .etag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--chip);
     color: var(--muted); margin-left: 6px; vertical-align: 1px; }
   footer { color: var(--muted); font-size: 13px; margin-top: 40px; }
+  .titlebar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .views button { padding: 6px 14px; }
+  select#city { padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+    color: var(--text); font: inherit; max-width: 100%; }
+  .mapbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 13px; }
+  #map { height: calc(100vh - 250px); min-height: 420px; border-radius: 12px; border: 1px solid var(--line);
+    background: var(--panel); z-index: 0; }
+  @media (max-width: 900px) { #map { height: 70vh; } }
+  .pin { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--accent);
+    color: #fff; font: 600 12px/1 system-ui, sans-serif; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  .pin.approx { background: var(--card); color: var(--accent); border: 2px dashed var(--accent); }
+  .pin.group { background: var(--text); color: var(--bg); border-color: var(--bg); font-size: 13px;
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--text) 25%, transparent), 0 1px 4px rgba(0,0,0,.35); }
+  @media (prefers-color-scheme: dark) {
+    #map .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); }
+  }
+  .leaflet-popup-content { margin: 10px 12px; font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .pop h5 { font-size: 14px; margin: 0 0 2px; }
+  .pop .addr { color: #6b6b70; font-size: 12px; margin-bottom: 6px; }
+  .pop ul { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; }
+  .pop li { padding: 4px 0; border-top: 1px solid #e4e2dc; }
+  .pop li b { font-variant-numeric: tabular-nums; }
+  .pop .warn { color: #8a5a00; font-size: 12px; margin-bottom: 6px; }
 </style>
 </head>
 <body>
@@ -202,6 +231,7 @@
     <nav class="tabs" role="tablist">
       <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
       <button role="tab" data-tab="queue">Queue</button>
+      <button role="tab" data-tab="templates">Templates</button>
       <button role="tab" data-tab="sources">Sources</button>
       <button role="tab" data-tab="domains">Domains</button>
       <button role="tab" data-tab="ai">AI</button>
@@ -211,10 +241,17 @@
   </section>
 
   <section id="events" aria-label="Events">
-    <h2 class="title">What's on in Košice</h2>
+    <div class="titlebar">
+      <h2 class="title">What's on in Slovakia</h2>
+      <div class="chips views" id="views" role="group" aria-label="View">
+        <button data-view="list" aria-pressed="true">List</button>
+        <button data-view="map">Map</button>
+      </div>
+    </div>
     <p class="sub" id="summary">Loading…</p>
     <div class="controls">
       <input type="search" id="q" placeholder="Search events, places…" aria-label="Search">
+      <select id="city" aria-label="Town"><option value="">All towns</option></select>
       <div class="chips" id="ranges">
         <button data-range="today">Today</button>
         <button data-range="weekend">Weekend</button>
@@ -223,6 +260,10 @@
       </div>
     </div>
     <div class="tagfilter" id="tags" aria-label="Filter by kind of event"></div>
+    <div id="mapview" hidden>
+      <div class="mapbar"><span class="muted" id="mapnote"></span><button class="btn" id="fit">Zoom to events</button></div>
+      <div id="map" role="region" aria-label="Map of events"></div>
+    </div>
     <div id="list"></div>
     <footer id="footer"></footer>
   </section>

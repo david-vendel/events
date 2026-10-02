@@ -8,6 +8,8 @@ import {
 import { facebookEnabled } from './corroborate.js';
 import { domainOf, hostOf } from './urls.js';
 import { activeRuleCount, tagSources } from './tags.js';
+import { parseLocation } from './geo.js';
+import { linkBonus, patternKeys } from './learn.js';
 
 export const DEFAULT_SETTINGS = {
   concurrency: 5, // pages fetched in parallel
@@ -150,6 +152,13 @@ export class Engine {
   }
 
   message(text) {
+    // The same message again (a bug hit on every page, say) is counted, not repeated.
+    const last = this.log[0];
+    if (last && last.text === text) {
+      last.repeat = (last.repeat || 1) + 1;
+      last.at = Date.now();
+      return;
+    }
     this.log.unshift({ at: Date.now(), text });
     if (this.log.length > 100) this.log.length = 100;
   }
@@ -190,7 +199,9 @@ export class Engine {
       settings: this.settings,
       cycles: this.cycles,
       nextCycleAt: this.nextCycleAt,
-      cycle: c && { n: c.n, startedAt: c.startedAt, budget: c.budget, used: c.used, found: c.found },
+      cycle: c && { n: c.n, startedAt: c.startedAt, budget: c.budget, used: c.used, found: c.found, health: c.health },
+      // One line per finished cycle (newest last): pages read, how many had events, new events…
+      history: (s.meta.cycles || []).slice(-12),
       active: [...this.active.values()],
       recent: this.recent.slice(0, 40),
       log: this.log.slice(0, 30),
@@ -198,6 +209,8 @@ export class Engine {
         upcoming: Object.values(s.events).filter((e) => (e.end || e.start) >= today).length,
         located: Object.values(s.events).filter((e) => (e.end || e.start) >= today && e.place).length,
         tagRules: activeRuleCount(s.tagRules),
+        templates: Object.keys(s.patterns || {}).length,
+        recipes: Object.values(s.patterns || {}).filter((p) => p.recipe).length,
         events: Object.keys(s.events).length,
         sources: sources.filter((x) => x.kind === 'events').length,
         irrelevant: sources.filter((x) => x.kind === 'irrelevant').length,
@@ -212,10 +225,35 @@ export class Engine {
   }
 
   queue(limit = 200) {
+    // Ranked the way the crawler picks: the link's own score plus what its template and host taught.
     return Object.entries(this.state.frontier)
-      .map(([url, f]) => ({ url, ...f }))
-      .sort((a, b) => b.score - a.score)
+      .map(([url, f]) => {
+        const learned = Math.round(linkBonus(this.state, url, patternKeys(url)) * 10) / 10;
+        return { url, ...f, learned, total: f.score + learned };
+      })
+      .sort((a, b) => b.total - a.total)
       .slice(0, limit);
+  }
+
+  /**
+   * Page templates (learn.js) with what the crawler learned about each: visits, how many had
+   * upcoming events, new events, AI verdict, recipe, and how much that moves their links' score.
+   */
+  patterns(limit = 400) {
+    const list = Object.entries(this.state.patterns || {})
+      .filter(([key]) => !key.includes('/…')) // the coarse ones are a fallback, not worth a row
+      .map(([key, p]) => ({
+        key, visits: p.visits, withEvents: p.withEvents, events: p.events, added: p.added, lastAt: p.lastAt,
+        example: p.example, aiAt: p.aiAt, aiSaid: p.aiSaid, recipe: Boolean(p.recipe), recipeFrom: p.recipeFrom,
+        effect: p.example ? Math.round(linkBonus(this.state, p.example, patternKeys(p.example)) * 10) / 10 : 0,
+      }));
+    const wasted = list.filter((p) => !p.withEvents).reduce((t, p) => t + p.visits, 0);
+    const visits = list.reduce((t, p) => t + p.visits, 0);
+    return {
+      totals: { templates: list.length, visits, wasted, productive: list.filter((p) => p.withEvents).length },
+      productive: [...list].filter((p) => p.withEvents).sort((a, b) => b.added - a.added || b.events - a.events).slice(0, limit),
+      wasteful: [...list].filter((p) => !p.withEvents).sort((a, b) => b.visits - a.visits).slice(0, limit),
+    };
   }
 
   sources() {
@@ -326,7 +364,9 @@ export class Engine {
       .filter((e) => (e.end || e.start) >= today)
       .map((e) => {
         const tagFrom = tagSources(e, this.state.tagRules);
-        return { ...e, tags: Object.keys(tagFrom), tagFrom };
+        // The town, for the website's filter (the map step stores it; older events get it here).
+        const city = e.place?.city ?? parseLocation(e.location).city;
+        return { ...e, tags: Object.keys(tagFrom), tagFrom, city };
       })
       .sort((a, b) => a.start.localeCompare(b.start) || (a.time || '').localeCompare(b.time || ''));
   }

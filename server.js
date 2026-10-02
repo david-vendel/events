@@ -42,6 +42,7 @@ const routes = {
   'GET /api/status': () => engine.snapshot(),
   'GET /api/queue': () => engine.queue(),
   'GET /api/domains': () => engine.domains(),
+  'GET /api/patterns': () => engine.patterns(),
   'GET /api/ai': () => engine.aiCalls(),
   'POST /api/plan': () => engine.refreshPlan(),
   'POST /api/start': () => { engine.start(); return engine.snapshot(); },

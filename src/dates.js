@@ -20,7 +20,7 @@ const MONTHS = {
   december: 12, decembra: 12, januara: 1, februara: 2, aprila: 4, maja: 5, juna: 6, jula: 7,
   augusta: 8, january: 1, february: 2, march: 3, may: 5, june: 6, july: 7, october: 10,
 };
-const MONTH_RE = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join('|');
+export const MONTH_RE = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join('|');
 const pad = (n) => String(n).padStart(2, '0');
 
 function makeDate(d, m, y, now) {

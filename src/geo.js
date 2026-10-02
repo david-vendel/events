@@ -31,13 +31,58 @@ export function distanceKm(a, b) {
 const STREET = /^\p{L}[\p{L}\s.'-]*?\s\d+[a-z]?(\/\d+[a-z]?)?\.?$/iu;
 const POSTCODE = /\b(\d{3})\s?(\d{2})\b/;
 
+// Towns, to find the one in "Dom umenia Košice" or "Košice-Staré Mesto, Collosseum klub": Slovak
+// towns and spa/tourist places, plus nearby big cities. Folded name -> name as written.
+const TOWN_NAMES = [
+  'Bratislava', 'Košice', 'Prešov', 'Žilina', 'Banská Bystrica', 'Nitra', 'Trnava', 'Trenčín', 'Martin', 'Poprad',
+  'Prievidza', 'Zvolen', 'Považská Bystrica', 'Michalovce', 'Nové Zámky', 'Spišská Nová Ves', 'Komárno', 'Levice',
+  'Humenné', 'Bardejov', 'Liptovský Mikuláš', 'Lučenec', 'Piešťany', 'Ružomberok', 'Topoľčany', 'Trebišov', 'Čadca',
+  'Dubnica nad Váhom', 'Rimavská Sobota', 'Partizánske', 'Šaľa', 'Dunajská Streda', 'Vranov nad Topľou', 'Pezinok',
+  'Hlohovec', 'Brezno', 'Senica', 'Nové Mesto nad Váhom', 'Snina', 'Malacky', 'Senec', 'Dolný Kubín', 'Rožňava',
+  'Púchov', 'Žiar nad Hronom', 'Stará Ľubovňa', 'Bánovce nad Bebravou', 'Sereď', 'Kežmarok', 'Skalica', 'Galanta',
+  'Handlová', 'Kysucké Nové Mesto', 'Levoča', 'Detva', 'Šamorín', 'Stupava', 'Sabinov', 'Zlaté Moravce', 'Revúca',
+  'Bytča', 'Holíč', 'Veľký Krtíš', 'Myjava', 'Nová Dubnica', 'Svidník', 'Moldava nad Bodvou', 'Stropkov',
+  'Medzilaborce', 'Sobrance', 'Gelnica', 'Krompachy', 'Spišská Belá', 'Vysoké Tatry', 'Štrbské Pleso',
+  'Tatranská Lomnica', 'Starý Smokovec', 'Kremnica', 'Banská Štiavnica', 'Krupina', 'Turčianske Teplice', 'Bojnice',
+  'Trenčianske Teplice', 'Rajecké Teplice', 'Bardejovské Kúpele', 'Veľké Kapušany', 'Kráľovský Chlmec',
+  'Čierna nad Tisou', 'Sečovce', 'Spišské Podhradie', 'Smižany', 'Jasov', 'Medzev', 'Šaca', 'Tvrdošín', 'Námestovo',
+  'Liptovský Hrádok', 'Svit', 'Vrútky', 'Turany', 'Rajec', 'Kolárovo', 'Štúrovo', 'Hurbanovo', 'Želiezovce',
+  'Šahy', 'Vráble', 'Šurany', 'Nesvady', 'Modra', 'Svätý Jur', 'Vrbové', 'Leopoldov', 'Trstená', 'Hriňová',
+  'Poltár', 'Tornaľa', 'Hnúšťa', 'Dobšiná', 'Fiľakovo', 'Giraltovce', 'Lipany', 'Vysoké Tatry',
+  'Praha', 'Brno', 'Ostrava', 'Olomouc', 'Budapest', 'Budapešť', 'Wien', 'Viedeň', 'Vienna', 'Kraków', 'Krakov',
+  'Miskolc', 'Užhorod', 'Uzhhorod',
+];
+const TOWNS = new Map(TOWN_NAMES.map((n) => [fold(n), n]));
+// Town names that are also everyday words or first names ("sála" = hall, "svit" = light, Martin):
+// they count only as a whole part of the location ("…, Martin"), never inside a venue's name.
+const AMBIGUOUS = new Set(['sala', 'svit', 'modra', 'martin', 'turany', 'rajec', 'sahy', 'sered', 'detva', 'holic',
+  'vrable', 'medzev', 'jasov', 'saca', 'lipany', 'senec', 'svidnik', 'myjava', 'krupina', 'vrbove', 'leopoldov']);
+const byLength = (keys) => [...keys].sort((a, b) => b.length - a.length).join('|');
+const TOWN_RE = new RegExp(`(?:^|[^a-z])(${byLength([...TOWNS.keys()].filter((k) => !AMBIGUOUS.has(k)))})(?=$|[^a-z])`, 'g');
+const WHOLE_TOWN_RE = new RegExp(`^(${byLength(TOWNS.keys())})(?:\\s*[-–—]\\s*(.+))?$`);
+
+// A part that IS a town, maybe with its district: "Košice", "Košice-Staré Mesto", "Košice – Krásna".
+function wholeTown(part) {
+  const m = fold(part).match(WHOLE_TOWN_RE);
+  if (!m) return null;
+  const district = m[2] ? part.slice(part.length - m[2].length).trim() : undefined;
+  return { city: TOWNS.get(m[1]), district };
+}
+
+// The last town named anywhere in a text ("Dom umenia Košice" → Košice).
+function townIn(text) {
+  const all = [...fold(text).matchAll(TOWN_RE)];
+  return all.length ? TOWNS.get(all[all.length - 1][1]) : undefined;
+}
+
 /**
- * Split a location string: { name, street, postcode, city }. `cityHint` (the city the source site
- * covers, when known) fills in a missing city.
+ * Split a location string: { name, street, postcode, city, district }. `cityHint` (the city the
+ * source site covers, when known) fills in a missing city. A list of towns ("Košice, Prešov,
+ * Poprad": a tour) has no single place: { multi: [towns] }.
  */
 export function parseLocation(text, cityHint) {
   const parts = (text || '').split(/\s*[,|;]\s*/).map((p) => p.trim()).filter(Boolean);
-  let name, street, postcode, city;
+  let name, street, postcode, city, district;
   const rest = [];
   for (let p of parts) {
     const pc = p.match(POSTCODE);
@@ -50,22 +95,32 @@ export function parseLocation(text, cityHint) {
     else if (STREET.test(p)) continue; // a second address (e.g. a building with two entrances)
     else rest.push({ p, afterStreet: Boolean(street) });
   }
-  // The city is the last plain part after the street (or the last part, when there's no street).
-  const cityPart = [...rest].reverse().find((r) => r.afterStreet || !street);
-  if (cityPart && (rest.length > 1 || street)) {
-    city = /kosic/.test(fold(cityPart.p)) ? 'Košice' : cityPart.p;
-    rest.splice(rest.indexOf(cityPart), 1);
+  const whole = rest.map((r) => wholeTown(r.p));
+  const towns = [...new Set(whole.filter(Boolean).map((t) => t.city))];
+  if (towns.length >= 2 && !street) return { multi: towns };
+  const at = whole.findIndex(Boolean);
+  if (at >= 0) {
+    ({ city, district } = whole[at]);
+    rest.splice(at, 1);
+  } else {
+    // Otherwise the city is the last plain part after the street (or the last part, when there's
+    // no street), unless that part is a venue that merely names its town ("Miestny úrad Košice").
+    const cityPart = [...rest].reverse().find((r) => r.afterStreet || !street);
+    if (cityPart && (rest.length > 1 || street)) {
+      const named = townIn(cityPart.p);
+      city = named || cityPart.p;
+      if (!named || rest.length > 1) rest.splice(rest.indexOf(cityPart), 1);
+    }
   }
-  name = rest.find((r) => !r.afterStreet)?.p;
-  if (!name && !street && !city && rest.length) name = rest[0].p;
-  // A location that is just one word or name with no street ("Košice", "Bratislava") is a city.
-  if (name && !street && !postcode && parts.length === 1) { city = /^kosice$/.test(fold(name)) ? 'Košice' : name; name = undefined; }
-  return { name, street, postcode, city: city || cityHint || undefined };
+  name = rest.find((r) => !r.afterStreet)?.p ?? rest[0]?.p;
+  city ??= townIn(text); // "Dom umenia Košice", "Národné divadlo Košice"
+  return { name, street, postcode, city: city || cityHint || undefined, district };
 }
 
 /** Cache key for a place: its street (or name) and city, so spelling variants share one lookup. */
 export function venueKey(text, cityHint) {
   const p = parseLocation(text, cityHint);
+  if (p.multi) return null; // several towns: no one place to look up
   const what = p.street ? fold(p.street).replace(/\.$/, '') : fold(p.name);
   return what ? `${what}|${fold(p.city)}` : `city|${fold(p.city)}`;
 }
@@ -96,24 +151,50 @@ async function nominatim(params) {
   } : null;
 }
 
+// Words of a venue name worth comparing ("DKC Veritas" → dkc, veritas); towns and filler words don't count.
+const FILLER = new Set(['the', 'and', 'pre', 'pri', 'nad', 'pod', 'mesto', 'stare', 'nove', 'mestska', 'mestsky', 'mestske', 'cast']);
+const nameWords = (s) => fold(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !FILLER.has(w) && !TOWNS.has(w));
+
+/**
+ * Is a venue-name hit really that venue? Free-text search falls back to whatever matches part of the
+ * query: "Yama Event Place, Košice" finds the railway station called "Košice", "Sobášna sieň, Košice"
+ * finds a hall of that name in Bratislava. The hit's own name must share a word with the venue's,
+ * and its address must be in the town we expect.
+ */
+function plausible(hit, p) {
+  const label = fold(hit.label);
+  if (p.city && TOWNS.has(fold(p.city)) && !label.includes(fold(p.city))) return false;
+  const words = nameWords(p.name || '');
+  if (!words.length || hit.area) return true;
+  const own = fold(hit.label.split(',')[0]);
+  return words.some((w) => own.includes(w));
+}
+
 /** Look one place up: street address, then venue name, then the city. */
 async function geocode(text, cityHint) {
   const p = parseLocation(text, cityHint);
+  if (p.multi) return null;
   const city = p.city;
-  const tries = [];
+  const tries = []; // [precision, query, check the hit against the venue name?]
   if (p.street && city) {
     tries.push(['address', { street: p.street, city, ...(p.postcode && { postalcode: p.postcode }) }]);
     if (p.postcode) tries.push(['address', { street: p.street, city }]); // postcodes are often wrong
   } else if (p.street && p.postcode) {
     tries.push(['address', { q: `${p.street}, ${p.postcode}` }]);
   }
-  if (p.name) tries.push(['venue', { q: [p.name, city].filter(Boolean).join(', ') }]);
-  // A location that's only a name ("Výmenník Važecká Košice") may be a venue or a city: ask as is.
-  if (city) tries.push(['venue', { q: text.length > city.length ? text : city }]);
-  for (const [kind, params] of tries) {
+  if (p.name) tries.push(['venue', { q: [p.name, city].filter(Boolean).join(', ') }, true]);
+  // A location that's only a name ("Výmenník Važecká Košice") may be a venue or a city: ask as is;
+  // last of all, the town itself (the map then shows the town centre, marked as approximate).
+  if (city) {
+    if (fold(text) !== fold(city)) tries.push(['venue', { q: text }, true]);
+    tries.push(['city', { q: [p.district, city].filter(Boolean).join(', ') }]);
+  }
+  for (const [kind, params, check] of tries) {
     const hit = await nominatim(params);
-    // Precision from what OpenStreetMap found: a town or district only gives the area's centre.
-    if (hit) return { ...hit, precision: hit.area ? 'city' : kind };
+    if (!hit || (check && !plausible(hit, p))) continue;
+    // Precision from what OpenStreetMap found: a town or district only gives the area's centre
+    // (and asking for just the town counts as that, even if the best hit is a building named after it).
+    return { ...hit, precision: hit.area || kind === 'city' ? 'city' : kind };
   }
   return null;
 }
@@ -125,7 +206,7 @@ function cityHint(state, ev) {
 
 function venueFor(state, ev) {
   const key = venueKey(ev.location, cityHint(state, ev));
-  return [key, state.venues[key]];
+  return [key, key ? state.venues[key] : undefined];
 }
 
 /** Coordinates written on the event's pages (schema.org geo), if any source had them. */
@@ -141,7 +222,8 @@ function pageGeo(ev) {
 export function placeFor(state, ev) {
   if (!ev.location) return undefined;
   const p = parseLocation(ev.location, cityHint(state, ev));
-  const base = { name: p.name, address: [p.street, p.city].filter(Boolean).join(', ') };
+  if (p.multi) return undefined;
+  const base = { name: p.name, address: [p.street, p.district, p.city].filter(Boolean).join(', '), city: p.city };
   const geo = pageGeo(ev);
   if (geo) return { ...base, lat: geo.lat, lon: geo.lon, precision: 'page', km: distanceKm(KOSICE, geo) };
   const [, v] = venueFor(state, ev);
@@ -161,7 +243,7 @@ export async function locateEvents(state, today, budget, report) {
   for (const ev of upcoming) {
     const geo = pageGeo(ev);
     const [key, v] = venueFor(state, ev);
-    if (geo && v?.status !== 'manual' && v?.precision !== 'page') {
+    if (geo && key && v?.status !== 'manual' && v?.precision !== 'page') {
       state.venues[key] = { ...v, text: ev.location, lat: geo.lat, lon: geo.lon, precision: 'page', status: 'ok',
         km: distanceKm(KOSICE, geo), checkedAt: now };
     }
@@ -172,6 +254,7 @@ export async function locateEvents(state, today, budget, report) {
   for (const ev of upcoming) {
     if (pageGeo(ev)) continue;
     const [key, v] = venueFor(state, ev);
+    if (!key) continue;
     const due = !v || (v.status === 'not_found' && Date.now() - Date.parse(v.checkedAt) > RETRY_NOT_FOUND);
     if (!due) continue;
     const t = todo.get(key) || { text: ev.location, hint: cityHint(state, ev), events: 0 };

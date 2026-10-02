@@ -1,6 +1,7 @@
 // Polite HTTP fetching: robots.txt, per-host delay, conditional requests
 // (ETag / Last-Modified) and a content hash so unchanged pages are skipped.
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 
 const USER_AGENT = 'KosiceEventsBot/0.1 (+https://github.com/david-vendel/events)';
 const HOST_DELAY_MS = 2000;
@@ -8,7 +9,7 @@ const TIMEOUT_MS = 20000;
 const MAX_BYTES = 3_000_000;
 
 const lastHit = new Map(); // host -> timestamp of last request
-const robotsCache = new Map(); // origin -> array of disallowed path prefixes
+const robotsCache = new Map(); // origin -> { rules: disallowed path prefixes, sitemaps: URLs }
 
 export const sha1 = (s) => crypto.createHash('sha1').update(s).digest('hex');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -21,10 +22,10 @@ async function politeWait(host) {
   if (slot > Date.now()) await sleep(slot - Date.now());
 }
 
-// Minimal robots.txt support: "User-agent: *" (or our name) + Disallow prefixes.
-async function disallowedPaths(origin) {
+// Minimal robots.txt support: "User-agent: *" (or our name) + Disallow prefixes, and Sitemap lines.
+async function robots(origin) {
   if (robotsCache.has(origin)) return robotsCache.get(origin);
-  let rules = [];
+  const rules = [], sitemaps = [];
   try {
     await politeWait(new URL(origin).host);
     const res = await fetch(`${origin}/robots.txt`, {
@@ -39,13 +40,39 @@ async function disallowedPaths(origin) {
         const value = rest.join(':').trim();
         if (/^user-agent$/i.test(key)) applies = value === '*' || /kosiceevents/i.test(value);
         else if (applies && /^disallow$/i.test(key) && value) rules.push(value);
+        else if (/^sitemap$/i.test(key) && /^https?:\/\//.test(value)) sitemaps.push(value);
       }
     }
   } catch {
     // Unreachable robots.txt: treat as allowed.
   }
-  robotsCache.set(origin, rules);
-  return rules;
+  const r = { rules, sitemaps };
+  robotsCache.set(origin, r);
+  return r;
+}
+
+const disallowed = async (u) => (await robots(u.origin)).rules.some((p) => u.pathname.startsWith(p));
+
+/** Sitemap URLs a site's robots.txt names. */
+export const robotsSitemaps = async (origin) => (await robots(origin)).sitemaps;
+
+/**
+ * Fetch a text file that isn't a web page (a sitemap, maybe gzipped), politely and within
+ * robots.txt. Returns { status, text } or { status, error }.
+ */
+export async function fetchText(url, maxBytes = 30_000_000) {
+  const u = new URL(url);
+  if (await disallowed(u)) return { status: 0, error: 'robots.txt' };
+  await politeWait(u.host);
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, redirect: 'follow', signal: AbortSignal.timeout(TIMEOUT_MS * 2) });
+    if (!res.ok) return { status: res.status, error: res.statusText || `HTTP ${res.status}` };
+    let buf = Buffer.from(await res.arrayBuffer());
+    if (buf[0] === 0x1f && buf[1] === 0x8b) buf = zlib.gunzipSync(buf, { maxOutputLength: maxBytes });
+    return { status: res.status, text: buf.subarray(0, maxBytes).toString('utf8') };
+  } catch (err) {
+    return { status: 0, error: err.cause?.code || err.message };
+  }
 }
 
 /**
@@ -55,10 +82,7 @@ async function disallowedPaths(origin) {
  */
 export async function fetchPage(url, cache = {}, { ignoreRobots = false } = {}) {
   const u = new URL(url);
-  if (!ignoreRobots) {
-    const disallowed = await disallowedPaths(u.origin);
-    if (disallowed.some((p) => u.pathname.startsWith(p))) return { status: 0, error: 'robots.txt' };
-  }
+  if (!ignoreRobots && await disallowed(u)) return { status: 0, error: 'robots.txt' };
 
   await politeWait(u.host);
   const headers = { 'User-Agent': USER_AGENT, 'Accept-Language': 'sk,cs;q=0.9,en;q=0.8' };

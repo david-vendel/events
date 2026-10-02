@@ -39,3 +39,44 @@ export function domainOf(host) {
   const n = /^(co|com|net|org|gov|ac|edu)\.[a-z]{2}$/.test(parts.slice(-2).join('.')) ? 3 : 2;
   return parts.slice(-n).join('.');
 }
+
+/**
+ * The template a URL belongs to: host plus the shape of its path, so pages built from one template
+ * share what the crawler learns about them (do they hold events?) and one AI-written recipe.
+ * Numbers become #, dates D, slugs *; short words stay ("sk", "podujatia", "page"). Query values
+ * are dropped, names kept.
+ *   nasekosice.sk/podujatia/1022-taste-of-fire  → nasekosice.sk/podujatia/*
+ *   www.kosicak.sk/clanky/6463/video-kosicky-…  → kosicak.sk/clanky/#/*
+ *   www.kosice.sk/kalendar-primatora?year=2020&month=7 → kosice.sk/kalendar-primatora?month&year
+ */
+const shapeSegment = (seg) => {
+  let s;
+  try { s = decodeURIComponent(seg).toLowerCase(); } catch { s = seg.toLowerCase(); }
+  if (/^\d+$/.test(s)) return '#';
+  if (/^\d{4}-\d{2}(-\d{2})?$/.test(s)) return 'D';
+  if (s.length <= 24 && /^[a-z_]+(-[a-z_]+)?(\.(html?|php|aspx?))?$/.test(s)) return s;
+  return '*';
+};
+
+export function urlPattern(url) {
+  let u;
+  try { u = new URL(url); } catch { return ''; }
+  const segs = u.pathname.split('/').filter(Boolean);
+  const shape = segs.slice(0, 5).map(shapeSegment);
+  if (segs.length > 5) shape.push('…');
+  const params = [...new Set(u.searchParams.keys())].sort();
+  return `${u.hostname.replace(/^www\./, '')}/${shape.join('/')}${params.length ? `?${params.join('&')}` : ''}`;
+}
+
+/**
+ * A rougher template: host, first path segment and depth ("goout.net/sk/…3"). Some sites use
+ * random-looking words as ids (goout.net/sk/particka/szejfiy), which urlPattern() can't tell from
+ * words; this one still groups them, and is used while the exact template has too few visits.
+ */
+export function coarsePattern(url) {
+  let u;
+  try { u = new URL(url); } catch { return ''; }
+  const segs = u.pathname.split('/').filter(Boolean);
+  const host = u.hostname.replace(/^www\./, '');
+  return segs.length ? `${host}/${shapeSegment(segs[0])}/…${segs.length}` : `${host}/`;
+}

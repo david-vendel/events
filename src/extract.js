@@ -4,7 +4,7 @@ import * as cheerio from 'cheerio';
 import { sha1 } from './fetcher.js';
 import { normalizeUrl } from './urls.js';
 import { TAGS, tagsFromSchemaTypes } from './tags.js';
-import { finishDate, parseDateText, readDateText } from './dates.js';
+import { MONTH_RE, finishDate, parseDateText, readDateText } from './dates.js';
 
 export { PARSER_VERSION, parseDateText } from './dates.js';
 
@@ -23,12 +23,31 @@ export function eventId(title, start) {
   return sha1(`${fold(title).replace(/[^a-z0-9]+/g, ' ').trim()}|${start}`).slice(0, 16);
 }
 
+// Slovak local date and time of an instant.
+const LOCAL = new Intl.DateTimeFormat('sv-SE', {
+  timeZone: 'Europe/Bratislava', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
+
+/**
+ * A structured (schema.org) date: ISO "2026-10-07" / "2026-10-07T18:00" are taken as written; a
+ * JavaScript date string with a zone ("Mon Apr 13 2026 10:00:01 GMT+0000", GoOut) is an instant
+ * and is turned into Slovak local time.
+ */
+function structuredDate(text, now) {
+  const parsed = parseDateText(text, now);
+  if (parsed) return parsed;
+  const t = Date.parse(text);
+  if (Number.isNaN(t) || !/\d{4}/.test(text)) return null;
+  const [start, time] = LOCAL.format(new Date(t)).split(' ');
+  return finishDate({ start, time });
+}
+
 export function makeEvent(raw, sourceUrl, now = new Date()) {
   const title = plain(raw.title);
   // Free-form text (from a recipe) goes through the learned formats; structured dates don't need to.
-  const date = raw.start ? parseDateText(raw.start, now) : readDateText(clean(raw.dateText), now);
+  const date = raw.start ? structuredDate(raw.start, now) : readDateText(clean(raw.dateText), now);
   if (!title || !date) return null;
-  const endDate = raw.end ? parseDateText(raw.end, now) : null;
+  const endDate = raw.end ? structuredDate(raw.end, now) : null;
   const time = raw.time || date.time;
   const fin = finishDate({
     start: date.start,
@@ -140,8 +159,28 @@ export const absolutize = (href, base) => normalizeUrl(href, base);
 const SOCIAL = /(^|\.)(facebook\.com|fb\.com|instagram\.com|tiktok\.com|x\.com|twitter\.com|youtube\.com|linkedin\.com|threads\.net)$/i;
 const SKIP_EXT = /\.(pdf|jpe?g|png|gif|webp|svg|zip|rar|docx?|xlsx?|pptx?|mp[34]|avi|mov|ics)$/i;
 const SKIP_HOSTS = /(^|\.)(google\.[a-z.]+|goo\.gl|apple\.com|microsoft\.com|wikipedia\.org|gstatic\.com|doubleclick\.net|cookiebot\.com|wa\.me|t\.me)$/i;
-const EVENT_WORDS = /podujat|akci[ae]|event|kalendar|program|festival|koncert|vystav|divadl|trh|jarmok|kino|predstaven|workshop|prednask|kultur|zabav|vikend|tickets?|vstupenk|majales|beh\b|maraton/;
+const EVENT_WORDS = /podujat|akci[ae]|event|kalendar|program|festival|koncert|vystav|divadl|trh|jarmok|kino|predstaven|workshop|prednask|kultur|zabav|vikend|tickets?|vstupenk|listky|majales|beh\b|maraton/;
 const KOSICE_WORDS = /kosic|kosice|cassovia|kassa|kaschau/;
+// Slovak towns and regions: the crawler covers all of Slovakia first.
+const SK_PLACES = /kosic|bratislav|zilin|presov|banska.?bystric|nitr[ae]|trnav|trencin|poprad|martin|michalovc|spisska|bardejov|humenn|levic|komarn|piestan|zvolen|ruzomberok|liptov|tatr|senec|pezinok|prievidz|lucenec|roznav|trebisov|dunajska|nove.?zamky|topolcan|skalic|senic|sabinov|kezmarok|stara.?lubovn|vranov/;
+// News and discussion pages rarely list events; archives and other-language copies repeat what we have.
+const NEWSY = /\/(clanky|clanok|spravy|sprava|news|novinky|article|articles|blog|diskusia|debata|komentare|forum|magazin|tlacove-spravy)(\/|$)/;
+const ARCHIVE = /archiv|archive|historia\b|history\b|vysledky|results/;
+const OTHER_LANG_PATH = /^\/(en|pl|hu|de|uk|ua|ru|fr|it|es|cs)(\/|$)/i;
+const OTHER_LANG_QUERY = /[?&](lang|language|locale|hl)=(en|pl|hu|de|uk|ua|ru|fr|it|es|cs)\b/i;
+
+/** Does the text carry only dates in the past ("…/2023/…", "rok=2009", "2026-09-14" before today)? */
+export function pastDated(text, now = new Date()) {
+  const today = now.toISOString().slice(0, 10);
+  let future = false, past = false;
+  for (const m of text.matchAll(/(?<!\d)(20\d{2})-(\d{2})(?:-(\d{2}))?(?!\d)/g)) {
+    if (`${m[1]}-${m[2]}-${m[3] || '31'}` < today) past = true; else future = true;
+  }
+  for (const m of text.replace(/(20\d{2})-(\d{2})(-\d{2})?/g, ' ').matchAll(/(?<!\d)(19\d{2}|20\d{2})(?!\d)/g)) {
+    if (+m[1] < now.getFullYear()) past = true; else future = true;
+  }
+  return past && !future;
+}
 
 /** Facebook event id from a facebook.com/events/<id> URL, or 'short' for fb.me/e/… links. */
 export function facebookEvent(url) {
@@ -159,19 +198,31 @@ export function isSocial(url) {
   try { return SOCIAL.test(new URL(url).hostname); } catch { return false; }
 }
 
-/** Priority for exploring a link: higher = more likely to lead to Košice events. */
+/**
+ * Priority for exploring a link, from the link alone: higher = more likely to lead to upcoming
+ * events in Slovakia. (What the crawler has learned about the link's template and host is added
+ * when it picks from the frontier; see learn.js.)
+ */
 export function scoreLink(url, anchorText) {
   let u;
   try { u = new URL(url); } catch { return -1; }
   if (!/^https?:$/.test(u.protocol) || SKIP_EXT.test(u.pathname) || SKIP_HOSTS.test(u.hostname)) return -1;
-  if (/login|signin|register|cart|kosik|wp-admin|secret=|token=|api\/|live-preview|\/tag\/|\/author\/|print=|share=|mailto:/i.test(url)) return -1;
-  const hay = fold(`${decodeURIComponent(u.hostname + u.pathname)} ${anchorText}`);
+  if (/login|signin|register|cart|kosik|wp-admin|secret=|token=|api\/|live-preview|\/tag\/|\/author\/|print=|share=|mailto:|cdn-cgi|\/(prihlasenie|registracia|cookies?|gdpr|ochrana-osobnych-udajov|privacy|kontakt|contact)(\/|$)/i.test(url)) return -1;
+  let path;
+  try { path = decodeURIComponent(u.pathname + u.search); } catch { path = u.pathname + u.search; }
+  path = fold(path);
+  const hay = fold(`${u.hostname} ${path} ${anchorText}`);
   let score = 1;
   if (EVENT_WORDS.test(hay)) score += 3;
-  if (KOSICE_WORDS.test(hay)) score += 2;
+  if (KOSICE_WORDS.test(hay)) score += 1;
+  if (SK_PLACES.test(hay)) score += 1;
   if (u.hostname.endsWith('.sk')) score += 1;
   if (u.pathname.split('/').filter(Boolean).length > 4) score -= 1; // deep pages are rarely hubs
   if (u.search.length > 60) score -= 1;
+  if (NEWSY.test(path)) score -= 2;
+  if (ARCHIVE.test(hay)) score -= 2;
+  if (OTHER_LANG_PATH.test(u.pathname) || OTHER_LANG_QUERY.test(u.search)) score -= 2;
+  if (pastDated(`${path} ${fold(anchorText)}`)) score -= 3;
   return score;
 }
 
@@ -197,9 +248,11 @@ export function pageSignals($) {
 }
 
 /** Strip a page down to structure + text so the AI sees the DOM cheaply. */
-export function simplifyHtml(html, maxChars = 60_000) {
+export function simplifyHtml(html, maxChars = 45_000) {
   const $ = cheerio.load(html);
   $('script, style, noscript, svg, iframe, link, meta, img, picture, source, video, form, template').remove();
+  // Site navigation, footers and cookie banners: the same on every page, and rarely events.
+  $('nav, footer, [role=navigation], [id*=cookie i], [class*=cookie i]').remove();
   $('*').each((_, el) => {
     for (const name of Object.keys(el.attribs || {})) {
       if (!['class', 'id', 'href', 'datetime'].includes(name)) $(el).removeAttr(name);

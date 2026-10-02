@@ -1,6 +1,7 @@
-# events — what's on in Košice
+# events — what's on in Slovakia
 
-A crawler that looks for events happening in Košice, Slovakia, and a small website that lists them.
+A crawler that collects events (all of Slovakia first, anywhere eventually; it started in Košice) and a
+small website that lists them and shows them on a map.
 
 ## Run
 
@@ -25,10 +26,15 @@ that controls the crawler, which runs inside the server:
 - **Parallel pages** (1–20, or up to 50 in Settings). A new value applies within a second. Each
   site still gets at most one request every 2 seconds.
 - **Status:** the current phase, progress bars for the cycle's page, AI and verification budgets,
-  the pages being fetched right now, recently scanned pages and what was found on them, and a log.
-- **Tabs:** *Queue* (links waiting to be explored, by score), *Sources* (sites the crawler has judged,
-  their listing pages and whether a recipe is saved), *AI usage* (every AI call with tokens, cost and
-  duration; click one to see what it returned), and *Settings*.
+  a **health box** for the running cycle (pages read, how many had upcoming events, new events, fetch
+  errors, AI calls, links from sitemaps; crawler bugs in red with the error), the pages being fetched
+  right now, recently scanned pages and what was found on them, a table of **recent cycles** (is the
+  crawl finding events, and at what cost?) and a log (a message repeated many times shows once, "×N").
+- **Tabs:** *Queue* (links waiting to be explored, ranked as the crawler picks them, with what it
+  learned), *Templates* (page templates that find events, and ones that waste visits; see below),
+  *Sources* (sites the crawler has judged, their listing pages and whether a recipe is saved),
+  *Domains*, *AI usage* (every AI call with tokens, cost and duration; click one to see what it
+  returned), and *Settings*.
 
 The admin API has no login, so the server listens only on localhost unless you set
 `HOST=0.0.0.0`. Add authentication before you put it on the internet. `node server.js --start`
@@ -41,7 +47,7 @@ both write the same files in `data/`.
 
 ## How it works
 
-Each cycle has three steps ([src/crawler.js](src/crawler.js)):
+Each cycle has these steps ([src/crawler.js](src/crawler.js)):
 
 1. **Re-check known sources that are due.** Every website that publishes Košice events is saved in
    `data/sources.json` with its listing pages and a check interval (12 h to 7 days). The interval
@@ -52,13 +58,45 @@ Each cycle has three steps ([src/crawler.js](src/crawler.js)):
    soonest first, each event is re-checked at most every 3 days. The crawler opens the event's own
    page, follows its links to the same event elsewhere (Facebook events, ticket shops) and records
    the date each source gives. See "One event, many sources" below.
-3. **Discovery** (at most once a day, AI only). Claude runs a web search with a randomly chosen
-   query (markets, concerts, kids' events…) and the URLs it finds are added to the frontier.
-4. **Explore.** Links from every visited page go into `data/frontier.json` with a score. Links that
-   look like events or mention Košice score higher, `.sk` domains get a small bonus, and links to
-   sites already judged irrelevant score lower. Each cycle picks frontier links by score plus random
-   noise, so promising links usually win but anything can be picked. Each host gets at most 3
-   exploration visits per cycle.
+3. **Discovery** (every 6 hours, `EVENTS_DISCOVERY_HOURS`; AI only). Claude runs a web search for
+   one kind of event in one Slovak town or region (a different pair each time) and the URLs it finds
+   are added to the frontier.
+4. **Sitemaps** ([src/sitemaps.js](src/sitemaps.js)). For sites that have produced events (and the
+   seeds), the sitemap (from `robots.txt`, or `/sitemap.xml`) is read at most once a day; event-like
+   pages and pages whose template has produced events are queued, newest first, at most 150 per site.
+   This finds event pages that no listing links to (GoOut's sitemap alone lists ~27,000).
+5. **Explore.** Links from every visited page go into `data/frontier.json` with a score from the
+   link itself: event words, Slovak towns, `.sk`, and penalties for news and discussion pages,
+   archives, past years or dates in the URL ("rok=2009", "podujatia-2023") and other-language copies
+   (`/pl/`, `/en/`, `?lang=hu`). Links to pages of events we already have are skipped (verification
+   re-reads those), and on a listing with events, "next page" links get a bonus. When picking, what
+   the crawler has **learned** is added (see *Page templates*), plus random noise, so promising links
+   usually win but anything can be picked. Sites that produce many new events may take up to 15
+   pages a cycle, sites that produce some 8, unknown ones 3, and sites read 6+ times without any
+   event 1.
+
+### Page templates: learning where events are
+
+Pages of one site built from one template share a URL shape ([src/urls.js](src/urls.js)):
+`kamdomesta.sk/kosice/*`, `kosicak.sk/clanky/#/*`, `sfk.sk/sk/podujatia/*?page`. Numbers become `#`,
+dates `D`, slugs `*`; short words stay. A rougher shape (host, first segment, depth) covers sites
+whose ids look like words. For every template, `data/patterns.json` counts visits, visits that found
+**upcoming** events (a page of past events is an archive, not a source) and new events
+([src/learn.js](src/learn.js)). That is used three ways:
+
+- **Ranking.** A link from a template that nearly always has new events gets up to +8, one visited
+  often without any event down to −6; the site's record adds +2 … −5. A template whose events we
+  already had (detail pages of events a listing gave us) gets at most +1. The Queue tab shows this
+  as "Learned".
+- **One AI call per template, not per page.** The AI looks at a template at most once a week, and not
+  at all at a template visited 5 times without an event (seeds and listing pages it named are
+  exempt). A recipe it writes is stored on the template and used for every page built from it, also
+  detail pages: the AI is asked for a recipe even for a page with a single event.
+- **Sibling recipes.** A template without a recipe tries the recipes of the same site's templates at
+  the same depth, so `kamdomesta.sk/bratislava/koncerty` is read with the recipe written for
+  `kamdomesta.sk/kosice/koncerty`, with no AI. A recipe that works is kept for the new template.
+
+The first time this runs, the templates are filled from the pages already visited.
 
 ### Getting events out of a page
 
@@ -72,8 +110,8 @@ Three methods, tried from cheapest to most expensive:
   version of the HTML and returns what the site is, whether it publishes Košice events, other
   listing pages on the same site, how often to check it, and a recipe. The recipe is tested on the
   page right away and saved only if it finds events. If a saved recipe later finds nothing, the
-  site has probably been redesigned and the page is re-learned. Each page is re-learned at most
-  once a week.
+  site has probably been redesigned and the page is re-learned. Each page (and each page
+  template) is shown to the AI at most once a week.
 
 **Dates** ([src/dates.js](src/dates.js)) are parsed from Slovak formats such as `03.10.2026`,
 `9. – 11. októbra`, `piatok 3. októbra o 18.00 h`, `02.10.2026 10:00 - 03.10.2026 18:00` and ISO dates,
@@ -98,8 +136,6 @@ od 10.00 do 18.00") is spotted while the event is verified and read by the same 
 schedule, so the website shows each day's own hours. When the date parser changes,
 `PARSER_VERSION` is bumped so listing pages are read again even if they haven't changed.
 
-Events that come from national or multi-city listings are kept only if they mention Košice.
-
 Every event gets **tags** for its kind (cinema, concert, theatre, exhibition, festival, kids, sport,
 workshop, talk, party, market; see [src/tags.js](src/tags.js)). Rules come first, and AI is used only
 when they fail:
@@ -117,17 +153,44 @@ when they fail:
 The website has a checkbox per tag; an event is shown if any of its tags is checked.
 
 **Location.** Events from any place are kept (the project started with Košice, and link priorities
-still favour it). Each event's location text is split into venue, street, postcode and city
-([src/geo.js](src/geo.js)); a missing city comes from the source site's city when the AI said all its
-events are in one. Each distinct place is looked up once in OpenStreetMap's Nominatim geocoder
-(street address, then venue name, then the whole text or city; at most 1 request per second and 40
-new places per cycle; after "too many requests" lookups pause for an hour) and cached in
+still favour it). Each event's location text is split into venue, street, postcode, town and district
+([src/geo.js](src/geo.js)). A list of Slovak towns finds the town whatever the order ("Košice-Staré
+Mesto, Collosseum klub", "Dom umenia Košice"); names that are also words or first names (sála, Svit,
+Martin) count only on their own. A list of towns ("Košice, Prešov, Poprad", a tour) has no single
+place and isn't put on the map. A missing town comes from the source site's city when the AI said
+all its events are in one. Each distinct place is looked up once in OpenStreetMap's Nominatim geocoder
+(street address, then venue name, then the whole text, then the town; at most 1 request per second
+and 40 new places per cycle; after "too many requests" lookups pause for an hour). A venue-name hit
+must share a word with the venue's name and lie in the expected town, otherwise free-text search
+would happily return the railway station called "Košice" for "Yama Event Place, Košice"; asking for
+just the town always counts as town-level precision and cached in
 `data/venues.json`. Coordinates on the event page itself (schema.org `geo`) win over the lookup.
 Events with no location at all get a city from the AI tagging job when the title or page makes it
 clear. Every upcoming event gets `place: { lat, lon, precision, name, address, km }`: `precision` is
 `page`, `address`, `venue`, `city` (OpenStreetMap only matched a town or district) or `manual`, and
 `km` is the distance from Košice. To fix a place by hand, edit its entry in `data/venues.json` and set
 `"status": "manual"`. `EVENTS_GEOCODER=off` disables lookups.
+
+### The website: list and map
+
+The right half lists upcoming events by day, or shows them on a **map** (List / Map at the top;
+`?view=map` opens the map directly). Both use the same filters: dates, search, **town** (towns with
+events, most first) and kind of event. The map ([public/events.js](public/events.js)) uses
+[Leaflet](https://leafletjs.com) with OpenStreetMap tiles, loaded only when the map is opened. Each
+place gets one pin with its number of events; its popup lists them by date. A dashed pin means only
+the town is known (the pin is at its centre). Pins cluster when zoomed out, showing the number of
+events inside. Choosing a town zooms to it.
+
+### When things go wrong
+
+- **A bug in the crawler** (an exception while reading a page) no longer looks like "no events
+  here": it's counted in the health box, shown in red with the error, the visit is forgotten so the
+  page is read again once it's fixed, and after 10 bugs with fewer pages read the cycle ends early
+  instead of burning the queue. (On 2 Oct 2026 a refactor left `MONTH_RE` undefined in
+  `extract.js` and every page failed for 4 hours, silently; 3,760 pages were repaired.)
+- **No network** (laptop asleep, Wi-Fi gone): a cycle doesn't start while DNS lookups fail, and a
+  run of network errors mid-cycle triggers a check; when offline, the cycle ends and those failed
+  visits are forgotten, so pages and sites aren't marked as failing.
 
 ### One event, many sources
 
@@ -209,6 +272,9 @@ reads or writes them, so moving to a database later means changing that one file
 | `pages.json` | HTTP cache info per URL (ETag, Last-Modified, text hash) |
 | `social.json` | Facebook/Instagram/etc. links found while crawling, saved for later |
 | `dateFormats.json` | date text shapes: samples, how each is read (built-in / AI rule), last AI check |
+| `patterns.json` | page templates: visits, visits with events, new events, AI verdict, shared recipe |
+| `sitemaps.json` | per site: when its sitemap was last read and what it gave |
+| `hosts.json` | per host: visits, errors, events, new events (site-level learning, failure pauses) |
 | `ai.json` | every AI call: model, tokens, cost, duration, what it returned |
 | `settings.json` | crawler settings from the admin panel |
 
@@ -221,4 +287,4 @@ requests to the same host.
   links to them (and only with `EVENTS_FACEBOOK=on`). Other social links are collected in
   `data/social.json`.
 - Sites that render events only with JavaScript need a headless browser.
-- Pagination on listing pages: only the first page of a listing is read.
+- Pagination is followed through "next page" links and learned templates, not read in one go.

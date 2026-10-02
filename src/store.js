@@ -40,6 +40,10 @@ export function loadState() {
     hosts: load('hosts', null) ?? hostsFromSources(sources),
     // tag rules learned from the AI's verdicts: venue / listing page / title word -> tag counts
     tagRules: load('tagRules', { venues: {}, pages: {}, words: {} }),
+    // URL template -> visits, visits with events, AI verdict, shared recipe (see learn.js)
+    patterns: load('patterns'),
+    // site -> when its sitemap was last read and what it gave
+    sitemaps: load('sitemaps'),
     // place -> coordinates (geocoder cache; set status "manual" to pin a place by hand)
     venues: load('venues'),
     // date text shape -> how it's read (built-in parser / AI-written rule), when AI last checked it

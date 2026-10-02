@@ -1,7 +1,7 @@
 // Left column: live crawler dashboard. Status arrives once a second over /api/stream;
 // the Queue, Sources, Domains and AI tabs fetch their own data while open.
 const WORKER_PRESETS = [1, 2, 5, 10, 20];
-const PHASE_TAG = { recheck: 'info', verify: 'warn', explore: '', discover: 'info', tag: 'ai', locate: 'ok' };
+const PHASE_TAG = { recheck: 'info', verify: 'warn', explore: '', discover: 'info', tag: 'ai', locate: 'ok', sitemap: 'info' };
 
 let snap = null;
 let tab = 'overview';
@@ -10,6 +10,7 @@ let selectedAi = null; // id of the AI call whose details are open
 let openSource = null; // origin whose pages are expanded
 let openDomain = null; // domain whose subdomains are expanded
 let domainSort = 'visits';
+let templateView = 'productive';
 let lastEventCount = -1;
 
 // ---------------------------------------------------------------- header
@@ -76,6 +77,7 @@ function resultCell(r) {
   const parts = [];
   if (r.ai) parts.push(aiTag(r.ai));
   if (r.events !== undefined) parts.push(r.events ? tag(`${r.events} event${r.events === 1 ? '' : 's'}`, 'ok') : tag('no events'));
+  if (r.past) parts.push(tag(`${r.past} past`, ''));
   if (r.added) parts.push(tag(`+${r.added} new`, 'ok'));
   if (r.how) parts.push(tag(r.how, 'info'));
   if (r.kind) parts.push(tag(r.kind, r.kind === 'events' ? 'ok' : ''));
@@ -89,7 +91,7 @@ const aiTag = (a) => `<span class="tag ai" data-aicall="${esc(a.id)}" title="Ope
 // The steps of one cycle, with the current one highlighted.
 const STEPS = [
   ['Re-checking sources', 'Re-check sources'], ['Verifying events', 'Verify events'],
-  ['AI discovery search', 'AI discovery'], ['Exploring', 'Explore'],
+  ['AI discovery search', 'AI discovery'], ['Reading sitemaps', 'Sitemaps'], ['Exploring', 'Explore'],
   ['Checking dates', 'Check dates (AI)'], ['Tagging events', 'Tag & locate (AI)'], ['Locating events', 'Map'],
 ];
 function stepsStrip(s) {
@@ -126,6 +128,44 @@ function aiBox(s) {
     <button class="btn" data-go="ai">AI settings & log ›</button></div>`;
 }
 
+// Is the crawl working, and is it finding events? Crawler bugs first, in red: a bug that hits every
+// page otherwise only shows up as "0 events" everywhere.
+const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
+function healthBox(s) {
+  const h = s.cycle?.health;
+  if (!h) return '';
+  const bug = h.crashes ? `<div class="alert"><b>${fmtInt(h.crashes)} crawler bug${h.crashes === 1 ? '' : 's'} this cycle.</b>
+    Pages that hit a bug are not counted as read and will be read again once it's fixed.
+    <pre>${esc(h.lastCrash?.url || '')}\n${esc(h.lastCrash?.error || '')}</pre></div>` : '';
+  const cells = [
+    ['Pages read', fmtInt(h.read), h.unchanged ? `+${fmtInt(h.unchanged)} unchanged` : ''],
+    ['Had upcoming events', `${fmtInt(h.withEvents)}`, h.read ? `${pct(h.withEvents, h.read)} % of pages read` : ''],
+    ['New events', fmtInt(h.added), `${fmtInt(h.events)} seen`],
+    ['Fetch errors', fmtInt(h.errors), h.fetched ? `${pct(h.errors, h.fetched)} % of fetches` : ''],
+    ['AI calls', fmtInt(h.ai), h.aiRecipes ? `${h.aiRecipes} new recipes` : ''],
+    ['From sitemaps', fmtInt(h.sitemapQueued), h.sitemapFiles ? `${h.sitemapFiles} files read` : 'links queued'],
+  ];
+  return `${bug}<div class="health">${cells.map(([k, n, sub]) => `<div><div class="k">${k}</div><div class="n">${n}</div>
+    <div class="k">${esc(sub)}</div></div>`).join('')}</div>`;
+}
+
+function historyTable(s) {
+  const rows = [...(s.history || [])].reverse();
+  if (!rows.length) return '';
+  return `<h3>Recent cycles</h3>
+    <div class="scroll"><table class="grid">
+      <tr><th>Ended</th><th class="num">Pages</th><th class="num">Read</th><th class="num">With events</th>
+        <th class="num">New events</th><th class="num">AI</th><th class="num">Errors</th><th class="num">Bugs</th><th class="num">min</th></tr>
+      ${rows.map((c) => `<tr>
+        <td class="num">${fmtWhen(new Date(Date.parse(c.at) + c.ms))}</td>
+        <td class="num">${fmtInt(c.pages)}</td><td class="num">${fmtInt(c.read)}</td>
+        <td class="num">${fmtInt(c.withEvents)} <span class="muted">${pct(c.withEvents, c.read)} %</span></td>
+        <td class="num">${c.added ? `<b>${fmtInt(c.added)}</b>` : '0'}</td><td class="num">${fmtInt(c.ai)}</td>
+        <td class="num">${fmtInt(c.errors)}</td><td class="num">${c.crashes ? tag(fmtInt(c.crashes), 'bad') : ''}</td>
+        <td class="num">${(c.ms / 60e3).toFixed(1)}</td></tr>`).join('')}
+    </table></div>`;
+}
+
 function jobLabel(j) {
   const link = j.url?.startsWith('http') ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.url)}</a>` : esc(j.url);
   return j.label ? `<b>${esc(j.label)}</b><br>${link}` : link;
@@ -140,6 +180,8 @@ function overview() {
     ['Pages seen', fmtInt(k.pagesKnown)],
     ['Events on the map', `${fmtInt(k.located)} / ${fmtInt(k.upcoming)}`],
     ['Learned tag rules', fmtInt(k.tagRules)],
+    ['Page templates', `${fmtInt(k.templates)}`, 'templates'],
+    ['Shared recipes', fmtInt(k.recipes), 'templates'],
     ['Sites judged', `${fmtInt(k.sources + k.irrelevant)}`, 'sources'],
     ['AI calls today', s.ai.enabled ? fmtInt(s.ai.todayCalls) : 'off', 'ai'],
     ['AI tokens today', fmtTokens(s.ai.todayTokens), 'ai'],
@@ -147,6 +189,7 @@ function overview() {
   const found = s.cycle ? `${s.cycle.found.events} events seen, ${s.cycle.found.added} new` : '';
   return `
     ${stepsStrip(s)}
+    ${healthBox(s)}
     ${aiBox(s)}
     <div class="tiles">${tiles.map(([label, n, go]) => go
       ? `<button class="tile" data-go="${go}"><div class="n">${n}</div><div class="k">${label} ›</div></button>`
@@ -173,17 +216,22 @@ function overview() {
       : '<tr><td class="empty-row" colspan="5">Nothing scanned since the server started.</td></tr>'}
     </table></div>
 
+    ${historyTable(s)}
+
     <h3>Log</h3>
-    <div class="log">${s.log.map((l) => `<div>${fmtTime(l.at)} ${esc(l.text)}</div>`).join('') || 'Empty.'}</div>`;
+    <div class="log">${s.log.map((l) => `<div>${fmtTime(l.at)} ${esc(l.text)}${l.repeat ? ` <b>×${fmtInt(l.repeat)}</b>` : ''}</div>`).join('') || 'Empty.'}</div>`;
 }
 
 function queueTab() {
   const q = tabData || [];
-  return `<p class="muted" style="margin-top:0">${fmtInt(snap.counts.queue)} links waiting. Highest scores first; each cycle
-    picks by score plus randomness, at most 3 per site.</p>
+  return `<p class="muted" style="margin-top:0">${fmtInt(snap.counts.queue)} links waiting, best first. A link's score is its
+    own (event words, Slovak place names, .sk; minus for news, archives, past years, other languages) plus what the
+    crawler learned about its page template and site (see Templates). Each cycle picks by score plus randomness;
+    sites that produce events may take up to 15 pages a cycle, sites that never do 1.</p>
     <div class="scroll"><table class="grid">
-      <tr><th class="num">Score</th><th>Link</th><th>Found on</th><th class="num">Added</th></tr>
-      ${q.map((f) => `<tr><td class="num">${f.score}</td>
+      <tr><th class="num">Score</th><th class="num">Learned</th><th>Link</th><th>Found on</th><th class="num">Added</th></tr>
+      ${q.map((f) => `<tr><td class="num"><b>${f.total ?? f.score}</b></td>
+        <td class="num">${f.learned ? tag(`${f.learned > 0 ? '+' : ''}${f.learned}`, f.learned > 0 ? 'ok' : 'bad') : ''}</td>
         <td class="url"><a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.url)}</a></td>
         <td>${f.foundOn?.startsWith('http') ? esc(host(f.foundOn)) : tag(f.foundOn || '?', 'info')}</td>
         <td class="num">${f.addedAt ? ago(f.addedAt) : ''}</td></tr>`).join('')
@@ -277,6 +325,39 @@ function domainsTab() {
             ${h.failStreak >= 3 ? tag(`failing: ${h.lastError || 'error'}`, 'bad') : ''}</td>
           ${cells(h)}</tr>`).join('') : ''}`).join('')
       || '<tr><td class="empty-row">Nothing visited yet.</td></tr>'}
+    </table></div>`;
+}
+
+const TEMPLATE_VIEWS = [['productive', 'Finding events'], ['wasteful', 'Never had events']];
+
+function templatesTab() {
+  if (!tabData) return '<p class="muted">Loading…</p>';
+  const t = tabData.totals;
+  const list = tabData[templateView] || [];
+  return `<p class="muted" style="margin-top:0">Pages built from one template share a URL shape
+    (<code>kamdomesta.sk/kosice/*</code>). The crawler counts, per template, how many visits found upcoming events.
+    Templates that keep finding events get their links visited sooner; ones that never do sink in the queue, and the
+    AI looks at a template at most once a week. A recipe the AI writes for one page is used for every page of the
+    template (and tried on sibling templates of the same site), so no AI is needed for them.</p>
+    <div class="tiles">
+      <div class="tile"><div class="n">${fmtInt(t.templates)}</div><div class="k">templates seen</div></div>
+      <div class="tile"><div class="n">${fmtInt(t.productive)}</div><div class="k">with events</div></div>
+      <div class="tile"><div class="n">${pct(t.wasted, t.visits)} %</div><div class="k">of visits went to templates that never had events</div></div>
+    </div>
+    <div class="sorts"><span>Show</span>${TEMPLATE_VIEWS.map(([k, label]) =>
+      `<button data-tview="${k}" aria-pressed="${k === templateView}">${label}</button>`).join('')}</div>
+    <div class="scroll"><table class="grid">
+      <tr><th>Template</th><th class="num">Visits</th><th class="num">With events</th><th class="num">New events</th>
+        <th>Reading</th><th class="num">Effect</th></tr>
+      ${list.map((p) => `<tr>
+        <td class="url"><b>${esc(p.key)}</b>${p.example ? `<div><a class="muted" href="${esc(p.example)}" target="_blank" rel="noopener">${esc(p.example)}</a></div>` : ''}</td>
+        <td class="num">${fmtInt(p.visits)}</td>
+        <td class="num">${fmtInt(p.withEvents)} <span class="muted">${pct(p.withEvents, p.visits)} %</span></td>
+        <td class="num">${fmtInt(p.added)}<div class="muted">${fmtInt(p.events)} seen</div></td>
+        <td>${p.recipe ? tag(p.recipeFrom ? 'sibling recipe' : 'recipe', 'ok') : ''} ${p.aiSaid ? tag(`AI: ${p.aiSaid}`, 'ai') : ''}
+          ${p.aiAt ? `<span class="muted">${fmtWhen(p.aiAt)}</span>` : ''}</td>
+        <td class="num">${p.effect ? tag(`${p.effect > 0 ? '+' : ''}${p.effect}`, p.effect > 0 ? 'ok' : 'bad') : ''}</td></tr>`).join('')
+      || '<tr><td class="empty-row" colspan="6">Nothing here yet.</td></tr>'}
     </table></div>`;
 }
 
@@ -508,8 +589,8 @@ function settingsTab() {
       Facebook dates: ${snap.facebook ? 'on' : 'off (set EVENTS_FACEBOOK=on when starting the server)'}.</p>`;
 }
 
-const TABS = { overview, queue: queueTab, sources: sourcesTab, domains: domainsTab, ai: aiTab, settings: settingsTab };
-const TAB_DATA = { queue: '/api/queue', sources: '/api/sources', domains: '/api/domains', ai: '/api/ai' };
+const TABS = { overview, queue: queueTab, templates: templatesTab, sources: sourcesTab, domains: domainsTab, ai: aiTab, settings: settingsTab };
+const TAB_DATA = { queue: '/api/queue', templates: '/api/patterns', sources: '/api/sources', domains: '/api/domains', ai: '/api/ai' };
 
 function renderTab() {
   if (!snap) return;
@@ -560,6 +641,11 @@ $('#tab').onclick = (e) => {
   const filter = e.target.closest('[data-aifilter]');
   if (filter) {
     aiFilter = filter.dataset.aifilter;
+    return renderTab();
+  }
+  const tview = e.target.closest('[data-tview]');
+  if (tview) {
+    templateView = tview.dataset.tview;
     return renderTab();
   }
   const sort = e.target.closest('[data-sort]');
