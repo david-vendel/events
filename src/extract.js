@@ -258,6 +258,7 @@ export function simplifyHtml(html, maxChars = 45_000) {
       if (!['class', 'id', 'href', 'datetime'].includes(name)) $(el).removeAttr(name);
     }
   });
+  collapseRepeats($);
   let out = ($('body').html() || '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/\s+/g, ' ')
@@ -265,4 +266,25 @@ export function simplifyHtml(html, maxChars = 45_000) {
   const truncated = out.length > maxChars;
   if (truncated) out = out.slice(0, maxChars);
   return { html: out, truncated, title: clean($('title').text()) };
+}
+
+// A listing repeats one card (or table row) per event; a few are enough to write a recipe, and
+// the rest is most of the page's tokens. Runs of same tag + class siblings keep their first few.
+const KEEP_REPEATS = 8;
+function collapseRepeats($) {
+  const sig = (el) => `${el.tagName}.${el.attribs?.class || ''}`;
+  $('body *').each((_, el) => {
+    const kids = $(el).children().toArray();
+    if (kids.length <= KEEP_REPEATS + 2) return;
+    const total = {};
+    for (const k of kids) total[sig(k)] = (total[sig(k)] || 0) + 1;
+    const seen = {};
+    for (const k of kids) {
+      const s = sig(k);
+      if (total[s] <= KEEP_REPEATS + 2) continue;
+      seen[s] = (seen[s] || 0) + 1;
+      if (seen[s] === KEEP_REPEATS) $(k).after(`<p>[… ${total[s] - KEEP_REPEATS} more like this]</p>`);
+      else if (seen[s] > KEEP_REPEATS) $(k).remove();
+    }
+  });
 }

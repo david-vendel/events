@@ -14,6 +14,7 @@ import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
 import { TAGS } from './tags.js';
+import { scoreLink } from './extract.js';
 import { DATA_DIR } from './store.js';
 
 export const AI_JOBS = {
@@ -21,7 +22,7 @@ export const AI_JOBS = {
     label: 'Read new listing pages',
     what: 'Reads a promising page once: what the site is, whether it lists events (and in which city), and a recipe '
       + '(CSS selectors) so later visits need no AI.',
-    model: 'default',
+    model: 'sonnet', // Opus wrote no better recipes; Haiku's were worse (eval, 2 Oct 2026)
   },
   tag: {
     label: 'Tag & locate events',
@@ -32,7 +33,7 @@ export const AI_JOBS = {
   discover: {
     label: 'Find new sources',
     what: 'Web search for pages that list events in Slovak towns (a different town and kind each time), every 6 hours.',
-    model: 'default',
+    model: 'haiku', // found as many new event sites as Sonnet (eval, 2 Oct 2026)
   },
   dates: {
     label: 'Check dates',
@@ -163,7 +164,7 @@ const Recipe = z.object({
 
 const Tag = z.enum(TAGS);
 
-const Analysis = z.object({
+export const Analysis = z.object({
   siteKind: z.enum(['event_listing', 'venue', 'municipality', 'tourism', 'news', 'ticketing', 'shopping_center', 'other']),
   summary: z.string().describe('one sentence: what this website is'),
   publishesEvents: z.boolean().describe('does this site regularly publish upcoming events (any place)?'),
@@ -188,9 +189,10 @@ const Analysis = z.object({
   })).describe('upcoming events on this page ONLY when recipe is null (e.g. events written as prose)'),
 });
 
-const ANALYZE_SYSTEM = `You help a crawler that collects events (concerts, markets, festivals, exhibitions, sport, \
+export const ANALYZE_SYSTEM = `You help a crawler that collects events (concerts, markets, festivals, exhibitions, sport, \
 workshops, kids' programs…) anywhere, Slovakia first. You get one web page as simplified HTML \
-(scripts/images/navigation/most attributes removed) plus a list of its links. Classify the site and, if the page \
+(scripts/images/navigation/most attributes removed; long runs of look-alike elements are cut to the \
+first few, marked "[… N more like this]") plus a list of its links. Classify the site and, if the page \
 lists events, write CSS selectors (cheerio-compatible, no :contains, no positional selectors that depend on the \
 specific events) so the crawler can parse future versions of this page without you. The recipe is also used on \
 other pages of the site with the same URL structure, so if this page shows ONE event (a detail page), still give \
@@ -208,8 +210,10 @@ function jsonSchema(schema) {
  * One isolated, single-purpose Claude call: no Claude Code tools unless listed, none of your
  * settings/CLAUDE.md/hooks, and no saved session. Returns the final result message.
  */
-async function ask({ prompt, systemPrompt, schema, tools = [], maxTurns = 2, model }) {
-  const env = subscriptionEnv();
+export async function ask({ prompt, systemPrompt, schema, tools = [], maxTurns = 2, model }) {
+  // Without this, Claude Code also sends the whole prompt to Haiku in a side call we don't need
+  // (as many input tokens as the call itself).
+  const env = { ...subscriptionEnv(), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' };
   let result;
   for await (const msg of query({
     prompt,
@@ -244,7 +248,7 @@ async function ask({ prompt, systemPrompt, schema, tools = [], maxTurns = 2, mod
  */
 export function analyzePage({ url, title, html, truncated, links, today, onStart }) {
   if (!aiAvailable('analyze')) return Promise.resolve({ analysis: null, call: null });
-  const linkList = [...links].slice(0, 300).map(([href, text]) => `${href} ${text}`).join('\n');
+  const linkList = analyzeLinks(url, links).map(([href, text]) => `${href} ${text}`).join('\n');
   const content = `URL: ${url}\nTitle: ${title}\nToday: ${today}\n` +
     (truncated ? 'Note: HTML was cut off at the size limit.\n' : '') +
     `\n<links>\n${linkList}\n</links>\n\n<html>\n${html}\n</html>`;
@@ -260,6 +264,20 @@ export function analyzePage({ url, title, html, truncated, links, today, onStart
       return { analysis: null, call: record({ kind: 'analyze', target: url, started, res: err.result, input: { system: ANALYZE_SYSTEM, prompt: content }, error: err.message }) };
     }
   });
+}
+
+// The answer's eventListUrls are only used when they are on this site (and only the first few),
+// so the AI sees same-site links that could lead to events, best first.
+const MAX_LINKS = 100;
+function analyzeLinks(url, links) {
+  let origin;
+  try { origin = new URL(url).origin; } catch { return []; }
+  return [...links]
+    .filter(([href]) => { try { return new URL(href).origin === origin; } catch { return false; } })
+    .map(([href, text]) => [href, text, scoreLink(href, text)])
+    .filter(([, , score]) => score >= 0)
+    .sort((a, b) => b[2] - a[2])
+    .slice(0, MAX_LINKS);
 }
 
 const Classified = z.object({
@@ -415,7 +433,7 @@ export function discoverUrls(known = [], { onStart } = {}) {
   return oneAtATime({ kind: 'discover', target: q }, onStart, async () => {
     const started = Date.now();
     try {
-      const res = await ask({ prompt, tools: ['WebSearch'], maxTurns: 6, model: modelFor('discover') });
+      const res = await ask({ prompt, tools: ['WebSearch'], maxTurns: 8, model: modelFor('discover') });
       const urls = [...new Set(res.result.match(/https?:\/\/[^\s)<>\]"']+/g) || [])];
       return { urls, call: record({ kind: 'discover', target: q, started, res, input: { prompt, tools: ['WebSearch'] }, result: { query: q, urls, answer: res.result } }) };
     } catch (err) {
