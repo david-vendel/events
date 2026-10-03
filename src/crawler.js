@@ -203,7 +203,8 @@ function recordVisit(state, ctx, url, r) {
   else h.ok++;
   h.events += r.events || 0; // upcoming events read
   // How often a visit lately found something new (moving average; see hostBonus).
-  if (r.status === 'ok') h.newRate = 0.85 * (h.newRate ?? 0.5) + 0.15 * (r.added > 0 ? 1 : 0);
+  // (A host seen before this was tracked starts from its own record: new events per visit.)
+  if (r.status === 'ok') h.newRate = 0.8 * (h.newRate ?? Math.min(0.5, h.visits ? (h.added || 0) / h.visits : 0.5)) + 0.2 * (r.added > 0 ? 1 : 0);
   if (r.events > 0) h.withEvents = (h.withEvents || 0) + 1;
   h.added += r.added || 0;
   h.linksQueued += r.links || 0;

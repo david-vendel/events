@@ -4,7 +4,7 @@
 // sources agree. sources[0] is the primary source; the event's top-level fields mirror it.
 import { cleanLocation, eventId, facebookEvent } from './extract.js';
 import { couldBeSame, dateDistance, differentTowns, findSameEvent, titleSimilarity, titleTokens } from './match.js';
-import { finishDate, tooFarAhead } from './dates.js';
+import { finishDate, readDateText, tooFarAhead } from './dates.js';
 import { eventTags } from './tags.js';
 import { knownTown } from './geo.js';
 
@@ -136,7 +136,9 @@ function tidyRows(ev) {
   for (const r of ev.sources) {
     if (r.location) r.location = cleanLocation(r.location) || undefined;
     if (!r.start) continue;
-    const d = finishDate(r);
+    // A listing row is read again from its text, so parser fixes reach stored events.
+    const again = r.dateText && !r.linked && readDateText(r.dateText, new Date(), { note: false });
+    const d = finishDate(again || r);
     for (const k of ['end', 'time', 'endTime']) if (d[k] === undefined) delete r[k]; else r[k] = d[k];
   }
 }

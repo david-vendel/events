@@ -12,13 +12,17 @@ const fold = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase().no
 
 // Bump when date parsing changes: listing pages are then re-read even if unchanged, so events
 // already stored get the corrected dates.
-export const PARSER_VERSION = 5;
+export const PARSER_VERSION = 6;
 
 const MONTHS = {
   januar: 1, februar: 2, marec: 3, marca: 3, april: 4, maj: 5, jun: 6, jul: 7, august: 8,
   september: 9, septembra: 9, oktober: 10, oktobra: 10, november: 11, novembra: 11,
   december: 12, decembra: 12, januara: 1, februara: 2, aprila: 4, maja: 5, juna: 6, jula: 7,
   augusta: 8, january: 1, february: 2, march: 3, may: 5, june: 6, july: 7, october: 10,
+  // Czech (folded), nominative and genitive: "27 říjen", "27. října"
+  leden: 1, ledna: 1, unor: 2, unora: 2, brezen: 3, brezna: 3, duben: 4, dubna: 4, kveten: 5, kvetna: 5,
+  cerven: 6, cervna: 6, cervenec: 7, cervence: 7, srpen: 8, srpna: 8, zari: 9, rijen: 10, rijna: 10,
+  listopad: 11, listopadu: 11, prosinec: 12, prosince: 12,
 };
 export const MONTH_RE = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join('|');
 const pad = (n) => String(n).padStart(2, '0');
@@ -75,6 +79,9 @@ const DASH = String.raw`\s*(?:h|hod\.?)?\s*[-–—]\s*(?:[a-z]{2,8}\.?,?\s*)?`;
 const DMY_RANGE = new RegExp(`${DMY}${AT}${DASH}${DMY}${AT}`);
 // 17:00 - 23:59, 10.00 – 18.00 hod.
 const TIME_RE = /(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?:\s*(?:h|hod\.?)?\s*[-–—]\s*([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d))?/;
+// "27 říjen Út | 19.00", "piatok o 19.30": a dotted time after "|" or "o" (at); not after a comma,
+// where it's as likely a price or another part's time ("Vernisáž: 28. 10. 2026, 18.00 … Trvanie: …")
+const TIME_AFTER_SEP = /(?:\||\bo)\s*([01]?\d|2[0-3])\.([0-5]\d)(?![\d.,])/;
 const TIME_H_RE = /(?<![\d.])([01]?\d|2[0-3])\.([0-5]\d)(?:\s*[-–—]\s*([01]?\d|2[0-3])\.([0-5]\d))?\s*(?:h\b|hod)/;
 
 // Relative dates are read against today every time, never stored as a day: the format "dnes N:N" is
@@ -104,9 +111,21 @@ function relativeDays(t, now) {
   return undefined;
 }
 
+// A date or a time ("23.10.2026", "20:00"), and text after one that is a place, not more of the date:
+// "23.10.2026 20:00 - Kesta Bistro, Ul. 29. augusta 645, Martin" (where "29. augusta" is a street).
+const WHEN_TOKEN = /\d{1,2}\.\s*\d{1,2}\.\s*\d{4}|\d{1,2}:\d{2}(?::\d{2})?/g;
+/** The folded text without a place written after its date and time. */
+export function withoutPlace(t) {
+  for (const m of t.matchAll(WHEN_TOKEN)) {
+    const tail = t.slice(m.index + m[0].length);
+    if (/^\s*(?:[-–—,|]|\bv\b)\s*[a-z]/.test(tail) && !/\d{1,2}:\d{2}/.test(tail)) return t.slice(0, m.index + m[0].length);
+  }
+  return t;
+}
+
 /** Parse free-form (mostly Slovak) date text into { start, end?, time?, endTime? } or null. */
 export function parseDateText(text, now = new Date()) {
-  const t = fold(text);
+  const t = withoutPlace(fold(text));
   let start, end;
   let m;
 
@@ -120,20 +139,33 @@ export function parseDateText(text, now = new Date()) {
     start = makeDate(m[1], m[2], y, now);
     end = makeDate(m[6], m[7], m[8] || y, now);
     if (start && m[4]) return finishDate({ start, end, time: hhmm(m[4], m[5]), endTime: hhmm(m[9], m[10]) });
+    // "09.10 - 11.10.2026 19:00": a time only after the last day is each day's start
+    if (start && m[9]) {
+      const to = t.slice(m.index + m[0].length).match(/^\s*(?:h|hod\.?)?\s*[-–—]\s*([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d)/);
+      return finishDate({ start, end, time: hhmm(m[9], m[10]), endTime: to ? hhmm(to[1], to[2]) : undefined });
+    }
   } else if ((m = t.match(/(\d{1,2})\.\s*[-–—]\s*(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})?/))) {
     // 9. - 11. 10. 2026
     start = makeDate(m[1], m[3], m[4], now);
     end = makeDate(m[2], m[3], m[4], now);
-  } else if ((m = t.match(new RegExp(`(\\d{1,2})\\.?\\s*(?:[-–—]\\s*(\\d{1,2})\\.?\\s*)?(${MONTH_RE})\\s*(\\d{4})?`)))) {
-    // 3. októbra 2026, 9. – 11. októbra
-    start = makeDate(m[1], MONTHS[m[3]], m[4], now);
-    if (m[2]) end = makeDate(m[2], MONTHS[m[3]], m[4], now);
-  } else if ((m = t.match(new RegExp(`(${MONTH_RE})\\s+(\\d{1,2}),?\\s+(\\d{4})`)))) {
-    // október 7 2026 (Facebook), October 7, 2026
-    start = makeDate(m[2], MONTHS[m[1]], m[3], now);
-  } else if ((m = t.match(/(?<![\d.])(\d{1,2})\.\s*(\d{1,2})\.(?:\s*(\d{4}))?/))) {
-    // 3.10.2026, 3. 10.
-    start = makeDate(m[1], m[2], m[3], now);
+  } else {
+    // A single date, written one of three ways; the one that comes first in the text counts (a later
+    // one may be part of an address: "ul. 29. augusta").
+    const ways = [
+      // 3. októbra 2026, 9. – 11. októbra
+      [new RegExp(`(\\d{1,2})\\.?\\s*(?:[-–—]\\s*(\\d{1,2})\\.?\\s*)?\\b(${MONTH_RE})\\b\\s*(\\d{4})?`), (x) => {
+        start = makeDate(x[1], MONTHS[x[3]], x[4], now);
+        if (x[2]) end = makeDate(x[2], MONTHS[x[3]], x[4], now);
+      }],
+      // október 7 2026 (Facebook), October 7, 2026
+      [new RegExp(`\\b(${MONTH_RE})\\s+(\\d{1,2}),?\\s+(\\d{4})`), (x) => { start = makeDate(x[2], MONTHS[x[1]], x[3], now); }],
+      // 3.10.2026, 3. 10.
+      [/(?<![\d.])(\d{1,2})\.\s*(\d{1,2})\.(?:\s*(\d{4}))?/, (x) => { start = makeDate(x[1], x[2], x[3], now); }],
+    ].map(([re, use]) => [t.match(re), use]).filter(([x]) => x).sort((a, b) => a[0].index - b[0].index);
+    if (ways.length) {
+      m = ways[0][0];
+      ways[0][1](m);
+    }
   }
   if (!start) {
     // No date written out: maybe one relative to today ("dnes 19:00", "pred 1 tyzdnom").
@@ -145,7 +177,7 @@ export function parseDateText(text, now = new Date()) {
   }
 
   const rest = m ? t.slice(m.index + m[0].length) + ' ' + t.slice(0, m.index) : t;
-  const tm = rest.match(TIME_RE) || rest.match(TIME_H_RE);
+  const tm = rest.match(TIME_RE) || rest.match(TIME_H_RE) || rest.match(TIME_AFTER_SEP);
   return finishDate({ start, end, time: tm ? hhmm(tm[1], tm[2]) : undefined, endTime: tm ? hhmm(tm[3], tm[4]) : undefined });
 }
 
@@ -189,7 +221,7 @@ const MONTH_WORD = new RegExp(`\\b(${MONTH_RE})\\b`, 'g');
 
 /** "02.10.2026 10:00 - 03.10.2026 18:00" -> "N.N.Y N:N - N.N.Y N:N" */
 export function dateShape(text) {
-  return fold(text).replace(MONTH_WORD, 'M').replace(WEEKDAYS, 'W').replace(/\d{4}/g, 'Y').replace(/\d{1,2}/g, 'N')
+  return withoutPlace(fold(text)).replace(MONTH_WORD, 'M').replace(WEEKDAYS, 'W').replace(/\d{4}/g, 'Y').replace(/\d{1,2}/g, 'N')
     .replace(/[a-z]+/g, 'w').replace(/(w\s*)+/g, 'w ').replace(/\s+/g, ' ').trim();
 }
 
