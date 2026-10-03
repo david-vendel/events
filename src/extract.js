@@ -169,7 +169,8 @@ export const absolutize = (href, base) => normalizeUrl(href, base);
 
 const SOCIAL = /(^|\.)(facebook\.com|fb\.com|instagram\.com|tiktok\.com|x\.com|twitter\.com|youtube\.com|linkedin\.com|threads\.net)$/i;
 const SKIP_EXT = /\.(pdf|jpe?g|png|gif|webp|svg|zip|rar|docx?|xlsx?|pptx?|mp[34]|avi|mov|ics)$/i;
-const SKIP_HOSTS = /(^|\.)(google\.[a-z.]+|goo\.gl|apple\.com|microsoft\.com|wikipedia\.org|gstatic\.com|doubleclick\.net|cookiebot\.com|wa\.me|t\.me)$/i;
+// (Plugin and CMS sites are linked from event sites' footers: "Powered by Events Manager".)
+const SKIP_HOSTS = /(^|\.)(google\.[a-z.]+|goo\.gl|apple\.com|microsoft\.com|wikipedia\.org|gstatic\.com|doubleclick\.net|cookiebot\.com|wa\.me|t\.me|wordpress\.(org|com)|wp-events-plugin\.com|theeventscalendar\.com|wix\.com|webnode\.\w+|zendesk\.com|bazos\.sk|topreality\.sk|nehnutelnosti\.sk)$/i;
 const EVENT_WORDS = /podujat|akci[ae]|event|kalendar|program|festival|koncert|vystav|divadl|trh|jarmok|kino|predstaven|workshop|prednask|kultur|zabav|vikend|tickets?|vstupenk|listky|majales|beh\b|maraton/;
 const KOSICE_WORDS = /kosic|kosice|cassovia|kassa|kaschau/;
 // Slovak towns and regions: the crawler covers all of Slovakia first.
@@ -228,6 +229,8 @@ export function scoreLink(url, anchorText) {
   try { u = new URL(url); } catch { return -1; }
   if (!/^https?:$/.test(u.protocol) || SKIP_EXT.test(u.pathname) || SKIP_HOSTS.test(u.hostname)) return -1;
   if (/login|signin|register|cart|kosik|wp-admin|secret=|token=|api\/|live-preview|\/tag\/|\/author\/|print=|share=|mailto:|cdn-cgi|\/(prihlasenie|registracia|cookies?|gdpr|ochrana-osobnych-udajov|privacy|kontakt|contact)(\/|$)/i.test(url)) return -1;
+  // Terms, contacts, galleries, jobs…: never a list of events.
+  if (/\/(obchodn[eiy]-podmienky|obchodni-podminky|vop|reklamac\w*|kontakty?|o-nas|about(-us)?|kariera|jobs?|faq|galeri[ae]|fotogaleri[ae]|gallery|cennik|pravidla)(\/|\.html?|$)/i.test(u.pathname)) return -1;
   // Calendar exports, feeds, and e-mail addresses written as links: never a page to read.
   if (/[?&](ical|outlook-ical|ics)=|\/(feed|rss|ical)\/?$|@/i.test(u.pathname + u.search)) return -1;
   let path;

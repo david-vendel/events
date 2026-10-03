@@ -57,7 +57,7 @@ const CRASHES_BEFORE_GIVING_UP = 10;
 // Errors that mean "we can't reach the internet" rather than "this site is down".
 const NET_DOWN = /ENOTFOUND|EAI_AGAIN|ENETUNREACH|ENETDOWN|EHOSTUNREACH|UND_ERR_CONNECT_TIMEOUT|fetch failed/;
 const NET_FAILS_BEFORE_CHECK = 6; // network errors in a row before checking whether we're offline
-const SCORE_VERSION = 3; // bump when scoreLink() changes a lot: queued links get scored again
+const SCORE_VERSION = 4; // bump when scoreLink() changes a lot: queued links get scored again
 const TAG_BATCH = 40; // events per cheap-AI tagging call
 const TAG_BATCHES = 2; // tagging calls per cycle
 

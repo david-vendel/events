@@ -293,11 +293,17 @@ function readKnown(f, text, now) {
   return null; // "none": not a date; "new"/"ok": the built-in parser's reading is used
 }
 
+// A new format the parser reads without any sign of trouble is checked by AI only once it's common:
+// most are one-off sentences ("v pondelok 10. augusta o 17.00 h sa kona…") the parser gets right.
+const SPOT_CHECK_USES = 10;
+
 /** Formats due for an AI check: new ones (unsure first), then ones due for a re-check. */
 export function formatsDue(limit) {
   const now = Date.now();
   return Object.values(formats)
-    .filter((f) => f.samples.length && (f.status === 'new' || (f.status !== 'none' || f.nextCheckAt) && Date.parse(f.nextCheckAt || 0) <= now))
+    .filter((f) => f.samples.length && (f.status === 'new'
+      ? f.unsure || f.uses >= SPOT_CHECK_USES
+      : (f.status !== 'none' || f.nextCheckAt) && Date.parse(f.nextCheckAt || 0) <= now))
     .sort((a, b) => (a.status === 'new') - (b.status === 'new') || Boolean(a.unsure) - Boolean(b.unsure) || b.uses - a.uses)
     .reverse()
     .slice(0, limit);
