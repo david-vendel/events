@@ -24,6 +24,12 @@ export const AI_JOBS = {
       + '(CSS selectors) so later visits need no AI.',
     model: 'sonnet', // Opus wrote no better recipes; Haiku's were worse (eval, 2 Oct 2026)
   },
+  triage: {
+    label: 'Pre-check pages',
+    what: 'A quick look at a page found while exploring (its text only) before the page reader sees it: does it '
+      + 'list upcoming events? Pages that do not are skipped, which spares most of the bigger model\'s calls.',
+    model: 'haiku',
+  },
   tag: {
     label: 'Tag & locate events',
     what: 'Gives a kind (cinema, concert…) to events the rules could not tag, and a city to events without a '
@@ -262,6 +268,37 @@ export function analyzePage({ url, title, html, truncated, links, today, onStart
       return { analysis: parsed.success ? parsed.data : null, call };
     } catch (err) {
       return { analysis: null, call: record({ kind: 'analyze', target: url, started, res: err.result, input: { system: ANALYZE_SYSTEM, prompt: content }, error: err.message }) };
+    }
+  });
+}
+
+const Triage = z.object({
+  listsEvents: z.boolean().describe('the page itself lists upcoming events, each with a date'),
+  reason: z.string().describe('a few words'),
+});
+const TRIAGE_SYSTEM = `You help a crawler that collects public events (concerts, theatre, cinema, exhibitions, \
+markets, festivals, sport, talks, workshops) in Slovakia and nearby. You get the text of one web page. Say \
+whether the page itself lists upcoming events, each with its own date (a programme, a calendar, a list of \
+events or screenings, one event's own page). It also counts when such a list is only part of the page: a \
+homepage section of upcoming events, or an article that is a guide to what's on ("where to go this week") \
+with some days still ahead. News articles about one thing, opening hours, archives of past events, \
+contacts, shops, real estate, job ads and documents are not. Today is given; past events don't count.`;
+
+/** Quick yes/no: does this page list upcoming events? { listsEvents, reason, call } (listsEvents null: no answer). */
+export function triagePage({ url, title, text, today, onStart }) {
+  if (!aiAvailable('triage')) return Promise.resolve({ listsEvents: null, call: null });
+  const prompt = `URL: ${url}\nTitle: ${title}\nToday: ${today}\n\n<text>\n${text}\n</text>`;
+  return oneAtATime({ kind: 'triage', target: url }, onStart, async () => {
+    const started = Date.now();
+    try {
+      const res = await ask({ prompt, systemPrompt: TRIAGE_SYSTEM, schema: Triage, maxTurns: 2, model: modelFor('triage') });
+      const parsed = Triage.safeParse(res.structured_output);
+      const call = record({ kind: 'triage', target: url, started, res, input: { system: TRIAGE_SYSTEM, prompt },
+        result: res.structured_output, error: parsed.success ? undefined : 'answer did not match the schema',
+        outcome: parsed.success ? `${parsed.data.listsEvents ? 'lists events' : 'no events'}: ${parsed.data.reason}` : undefined });
+      return { listsEvents: parsed.success ? parsed.data.listsEvents : null, reason: parsed.data?.reason, call };
+    } catch (err) {
+      return { listsEvents: null, call: record({ kind: 'triage', target: url, started, res: err.result, input: { system: TRIAGE_SYSTEM, prompt }, error: err.message }) };
     }
   });
 }

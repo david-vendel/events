@@ -282,7 +282,11 @@ export async function locateEvents(state, today, budget, report) {
 
   // One lookup per distinct place, places with the most events first.
   const todo = new Map();
-  for (const ev of upcoming) {
+  // Each event's place, and the other places its sources give (a film at several cinemas in town).
+  const spots = upcoming.flatMap((ev) => [ev, ...new Set((ev.sources || [])
+    .filter((r) => !r.linked && r.location && r.location !== ev.location).map((r) => r.location))]
+    .map((x) => (typeof x === 'string' ? { location: x, source: ev.source, sources: [] } : x)));
+  for (const ev of spots) {
     if (pageGeo(ev)) continue;
     const [key, v] = venueFor(state, ev);
     if (!key) continue;

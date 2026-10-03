@@ -246,8 +246,22 @@ const PRECISION = {
 };
 
 // One pin per place, with the number of events there; the popup lists them by date.
+// Where an event goes on the map: its place, and each other venue it's on at (with that venue's times).
+function spotsOf(e) {
+  const out = new Map();
+  const add = (p, times) => {
+    if (!Number.isFinite(p?.lat) || !Number.isFinite(p?.lon)) return;
+    const key = `${p.lat.toFixed(4)},${p.lon.toFixed(4)}`;
+    if (!out.has(key)) out.set(key, { place: p, times });
+  };
+  for (const list of Object.values(e.showings || {})) for (const s of list) add(s.place, s.times);
+  add(e.place);
+  return [...out.values()];
+}
+
 async function renderMap(shown) {
-  const placed = shown.filter((e) => Number.isFinite(e.place?.lat) && Number.isFinite(e.place?.lon));
+  const spotted = shown.map((e) => [e, spotsOf(e)]).filter(([, s]) => s.length);
+  const placed = spotted.map(([e]) => e);
   const missing = shown.length - placed.length;
   $('#mapnote').textContent = `${fmtCount(placed.length)} events on the map`
     + (missing ? ` · ${fmtCount(missing)} more have no position yet (they're in the list)` : '');
@@ -260,10 +274,12 @@ async function renderMap(shown) {
   map.invalidateSize();
   if (popupOpen) { pendingRender = shown; return; }
   const places = new Map();
-  for (const e of placed) {
-    const key = `${e.place.lat.toFixed(4)},${e.place.lon.toFixed(4)}`;
-    if (!places.has(key)) places.set(key, { place: e.place, events: [] });
-    places.get(key).events.push(e);
+  for (const [e, spots] of spotted) {
+    for (const { place, times } of spots) {
+      const key = `${place.lat.toFixed(4)},${place.lon.toFixed(4)}`;
+      if (!places.has(key)) places.set(key, { place, events: [] });
+      places.get(key).events.push({ ...e, time: times?.length ? times.join(', ') : e.time });
+    }
   }
   cluster.clearLayers();
   const markers = [...places.values()].map(({ place, events: here }) => {

@@ -16,12 +16,13 @@ import dns from 'node:dns/promises';
 import * as cheerio from 'cheerio';
 import { fetchPage } from './fetcher.js';
 import {
-  PARSER_VERSION, applyRecipe, clean, extractLinks, makeEvent, isArchiveUrl, isSocial, jsonLdEvents, pageSignals, partialStructured, scoreLink,
+  PARSER_VERSION, applyRecipe, clean, extractLinks, makeEvent, isArchiveUrl, isSocial, jsonLdEvents, pageSignals, pageText,
+  partialStructured, scoreLink,
   simplifyHtml,
 } from './extract.js';
 import { checkDates } from './datecheck.js';
 import { useDateFormats } from './dates.js';
-import { aiAvailable, analyzePage, classifyEvents, discoverUrls, setAiConfig } from './ai.js';
+import { aiAvailable, analyzePage, classifyEvents, discoverUrls, setAiConfig, triagePage } from './ai.js';
 import { eventTags, headingTags, learnTags } from './tags.js';
 import { locateEvents } from './geo.js';
 import { EventIndex, migrate } from './events.js';
@@ -49,6 +50,7 @@ const EMPTY_READS_BEFORE_REST = 3; // a listing page empty this many reads in a 
 const EMPTY_LISTING_REST = 14 * DAY;
 const NOT_LISTING_FOR = 30 * DAY; // a page AI said lists no events isn't taken as a listing again for this long
 const AI_MISSES_PER_SITE = 3;
+const TRIAGE_PER_CYCLE = 60; // cheap pre-checks, on top of the AI budget for the bigger model
 // A template recipe that finds events on fewer than 10 % of at least 10 pages read the wrong pages
 // (an event page's recipe borrowed by the same site's news articles reads their publish time).
 const RECIPE_MIN_VISITS = 10;
@@ -463,7 +465,28 @@ async function readPage(state, url, ctx, job) {
     && !isArchiveUrl(url)
     && source.kind !== 'irrelevant';
 
-  if (wantsAi) {
+  // A page with no recipe and nobody vouching for it (not a seed): the cheap model first says whether
+  // it lists upcoming events at all; only then does the page reader (the bigger model) see it.
+  let precheck = null;
+  if (wantsAi && !ctx.seeds.has(url) && !listing?.recipe && aiAvailable('triage') && ctx.budget.triage > 0) {
+    ctx.budget.triage--;
+    ctx.used.triage++;
+    ctx.aiSites.add(source.origin);
+    report.update?.(job, { note: 'waiting for AI…', ai: 'waiting' });
+    precheck = await triagePage({
+      url: res.url, title: clean($('title').first().text()), text: pageText($), today: ctx.today,
+      onStart: () => report.update?.(job, { note: 'AI pre-check…', ai: 'running' }),
+    });
+    aiCall = precheck.call;
+    if (precheck.listsEvents === false) {
+      tpl.aiAt = iso(Date.now()); // counts as this template's look for the week
+      tpl.aiSaid = `pre-check: no upcoming events (${precheck.reason || ''})`;
+      source.aiMisses = (source.aiMisses || 0) + 1;
+      how = 'pre-check: no events';
+    }
+  }
+
+  if (wantsAi && precheck?.listsEvents !== false) {
     if (!listing?.recipe) ctx.aiSites.add(source.origin);
     ctx.budget.ai--;
     ctx.used.ai++;
@@ -745,8 +768,8 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
     for (const s of ev.sources || []) if (s.url && s.url !== s.via) eventPages.add(urlKey(s.url));
   }
   const ctx = {
-    budget: { pages: maxPages, ai: aiAvailable() ? maxAi : 0, verify: maxVerify },
-    used: { pages: 0, ai: 0, verify: 0 },
+    budget: { pages: maxPages, ai: aiAvailable() ? maxAi : 0, verify: maxVerify, triage: TRIAGE_PER_CYCLE },
+    used: { pages: 0, ai: 0, verify: 0, triage: 0 },
     found: { events: 0, added: 0 },
     // How well this cycle is going: pages fetched / read / failed, crawler bugs, pages with events…
     health: {

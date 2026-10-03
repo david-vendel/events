@@ -8,7 +8,7 @@ import {
 import { facebookEnabled } from './corroborate.js';
 import { domainOf, hostOf } from './urls.js';
 import { activeRuleCount, tagSources } from './tags.js';
-import { parseLocation, venueKey } from './geo.js';
+import { parseLocation, placeFor, venueKey } from './geo.js';
 import { linkBonus, patternKeys } from './learn.js';
 
 /**
@@ -16,7 +16,7 @@ import { linkBonus, patternKeys } from './learn.js';
  * cinemas in town): { "2026-10-03": [{ venue: "CINEMAX", times: ["13:10", "18:20"] }, …] }. Places
  * are told apart by address, since sites write one cinema differently.
  */
-function showings(e) {
+function showings(state, e) {
   const days = {};
   for (const r of e.sources) {
     if (r.linked || !r.start || r.end) continue;
@@ -25,14 +25,16 @@ function showings(e) {
     const day = (days[r.start] ??= new Map());
     // A location that's only the town names no venue.
     const name = (loc && parseLocation(loc).name) || '';
-    const v = day.get(key) || { venue: name, times: new Set() };
+    // Its own pin on the map, once the place is known.
+    const v = day.get(key) || { venue: name, times: new Set(), place: loc && placeFor(state, { location: loc, source: e.source }) };
     if (name && (!v.venue || name.length < v.venue.length)) v.venue = name; // the shortest way the sites write it
     if (r.time) v.times.add(r.time);
     day.set(key, v);
   }
   const out = {};
   for (const [d, m] of Object.entries(days)) {
-    const list = [...m.values()].map((v) => ({ venue: v.venue, times: [...v.times].sort() }));
+    const list = [...m.values()].map((v) => ({ venue: v.venue, times: [...v.times].sort(),
+      ...(v.place && { place: { lat: v.place.lat, lon: v.place.lon, name: v.place.name, address: v.place.address, precision: v.place.precision } }) }));
     if (list.length > 1 || list[0].times.length > 1) out[d] = list.sort((a, b) => (a.times[0] || '').localeCompare(b.times[0] || ''));
   }
   return Object.keys(out).length ? out : undefined;
@@ -402,7 +404,7 @@ export class Engine {
         // Only what the website shows: the full record (AI inputs, row descriptions…) is several MB.
         const pick = (o, keys) => Object.fromEntries(keys.filter((k) => o[k] !== undefined).map((k) => [k, o[k]]));
         return {
-          ...pick(e, PUBLIC_EVENT), tags: Object.keys(tagFrom), tagFrom, city, showings: showings(e),
+          ...pick(e, PUBLIC_EVENT), tags: Object.keys(tagFrom), tagFrom, city, showings: showings(this.state, e),
           sources: e.sources.map((r) => pick(r, r.title === e.title ? PUBLIC_ROW.filter((k) => k !== 'title') : PUBLIC_ROW)),
         };
       })

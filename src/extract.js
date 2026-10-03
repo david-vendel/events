@@ -287,6 +287,13 @@ export function partialStructured(events, links, pageUrl) {
   return like.size >= 2 * new Set(own.map((e) => urlKey(e.url))).size + 3;
 }
 
+/** A page's visible text (no scripts, menus or footers), for a quick AI look. */
+export function pageText($, maxChars = 6000) {
+  const $b = $('body').clone();
+  $b.find('script, style, noscript, svg, iframe, template, nav, footer, [role=navigation], [id*=cookie i], [class*=cookie i]').remove();
+  return clean($b.text()).slice(0, maxChars);
+}
+
 /** Strip a page down to structure + text so the AI sees the DOM cheaply. */
 export function simplifyHtml(html, maxChars = 45_000) {
   const $ = cheerio.load(html);
