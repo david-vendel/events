@@ -12,7 +12,7 @@ const fold = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase().no
 
 // Bump when date parsing changes: listing pages are then re-read even if unchanged, so events
 // already stored get the corrected dates.
-export const PARSER_VERSION = 7;
+export const PARSER_VERSION = 8;
 
 const MONTHS = {
   januar: 1, februar: 2, marec: 3, marca: 3, april: 4, maj: 5, jun: 6, jul: 7, august: 8,
@@ -80,7 +80,10 @@ const DASH = String.raw`\s*(?:h|hod\.?)?\s*(?:[-–—]|\bdo\b)\s*(?:[a-z]{2,8}\
 const DMY_RANGE = new RegExp(`${DMY}${AT}${DASH}${DMY}${AT}`);
 // 5. októbra – 9. decembra, 1. augusta 2023 0:00 - 6. septembra 2023 0:00 (no weekday after the dash:
 // "– nám. 29. augusta" is a street)
-const DMONTH = String.raw`(?<![\d.])(0?[1-9]|[12]\d|3[01])\.?\s*\b(${MONTH_RE})\b\.?\s*(\d{4})?`;
+// Short month names count only here, inside a range ("28. nov - 1. dec 2022"): alone, "jan" is a name.
+const SHORT_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, okt: 10, oct: 10, nov: 11, dec: 12 };
+const monthNum = (w) => MONTHS[w] ?? SHORT_MONTHS[w];
+const DMONTH = String.raw`(?<![\d.])(0?[1-9]|[12]\d|3[01])\.?\s*\b(${MONTH_RE}|${Object.keys(SHORT_MONTHS).join('|')})\b\.?\s*(\d{4})?`;
 const DMONTH_RANGE = new RegExp(`${DMONTH}${AT}\\s*(?:h|hod\\.?)?\\s*(?:[-–—]|\\bdo\\b)\\s*${DMONTH}${AT}`);
 // 17:00 - 23:59, 10.00 – 18.00 hod.
 const TIME_RE = /(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?:\s*(?:h|hod\.?)?\s*(?:[-–—]|\bdo\b)\s*([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d))?/;
@@ -151,10 +154,10 @@ export function parseDateText(text, now = new Date()) {
     }
   } else if ((m = t.match(DMONTH_RANGE))) {
     const y = m[3] || m[8];
-    start = makeDate(m[1], MONTHS[m[2]], y, now);
+    start = makeDate(m[1], monthNum(m[2]), y, now);
     // No year: the end is in the start's year, or the next one ("20. júla – 24. augusta", "5. dec – 9. jan").
-    end = !y && start ? makeDate(m[6], MONTHS[m[7]], start.slice(0, 4), now) : makeDate(m[6], MONTHS[m[7]], m[8] || y, now);
-    if (!y && end && end < start) end = makeDate(m[6], MONTHS[m[7]], String(+start.slice(0, 4) + 1), now);
+    end = !y && start ? makeDate(m[6], monthNum(m[7]), start.slice(0, 4), now) : makeDate(m[6], monthNum(m[7]), m[8] || y, now);
+    if (!y && end && end < start) end = makeDate(m[6], monthNum(m[7]), String(+start.slice(0, 4) + 1), now);
     if (start && m[4]) return finishDate({ start, end, time: hhmm(m[4], m[5]), endTime: hhmm(m[9], m[10]) });
     if (start && m[9]) return finishDate({ start, end, time: hhmm(m[9], m[10]) });
   } else if ((m = t.match(/(\d{1,2})\.\s*[-–—]\s*(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})?/))) {
