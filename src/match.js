@@ -33,6 +33,12 @@ export function dateDistance(a, b) {
   return Math.min(Math.abs(dayDiff(a.start, bEnd)), Math.abs(dayDiff(b.start, aEnd)));
 }
 
+/** Both places are known and they're different towns. */
+export const differentTowns = (a, b) => {
+  const x = knownTown(a.location), y = knownTown(b.location);
+  return Boolean(x && y && x !== y);
+};
+
 /**
  * Find the existing event a sighting belongs to, or null.
  * Same/overlapping dates need a moderately similar title; up to 3 days apart needs a near-identical
@@ -42,12 +48,6 @@ export function dateDistance(a, b) {
  * listed once per day): it joins the event and widens its dates. Two or three days apart on the
  * same site are separate performances, not a mismatch.
  */
-/** Both places are known and they're different towns. */
-export const differentTowns = (a, b) => {
-  const x = knownTown(a.location), y = knownTown(b.location);
-  return Boolean(x && y && x !== y);
-};
-
 export function findSameEvent(events, s) {
   let best = null, bestScore = 0;
   for (const ev of events) {
