@@ -12,7 +12,7 @@ const fold = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase().no
 
 // Bump when date parsing changes: listing pages are then re-read even if unchanged, so events
 // already stored get the corrected dates.
-export const PARSER_VERSION = 3;
+export const PARSER_VERSION = 4;
 
 const MONTHS = {
   januar: 1, februar: 2, marec: 3, marca: 3, april: 4, maj: 5, jun: 6, jul: 7, august: 8,
@@ -40,10 +40,14 @@ function makeDate(d, m, y, now) {
 const dayBefore = (iso) => new Date(Date.parse(`${iso}T12:00Z`) - 864e5).toISOString().slice(0, 10);
 const hhmm = (h, m) => (h === undefined ? undefined : `${pad(h)}:${m}`);
 
+// An end years after the start ("2.1.2026 – 31.12.9999 00:59") is a site's way of saying "no end".
+const MAX_RUN_DAYS = 2 * 366;
+export const placeholderEnd = (start, end) => Boolean(end && start) && (Date.parse(end) - Date.parse(start)) / 864e5 > MAX_RUN_DAYS;
+
 // Listings often pad all-day or open-ended entries with placeholder times: "01.10. 00:00 –
 // 05.10. 00:00" is 1–4 October with no time; "17:00 – 23:59" just means "from 17:00".
 export function finishDate({ start, end, time, endTime }) {
-  if (end && end < start) end = endTime = undefined;
+  if (end && (end < start || placeholderEnd(start, end))) end = endTime = undefined;
   if (time === '00:00') time = undefined;
   if (endTime === '23:59') endTime = undefined;
   if (endTime === '00:00') {

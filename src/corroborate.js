@@ -5,7 +5,7 @@ import * as cheerio from 'cheerio';
 import { fetchPage, sha1 } from './fetcher.js';
 import { countTimes, countWeekdays } from './dates.js';
 import { clean, extractLinks, facebookEvent, jsonLdEvents, parseDateText } from './extract.js';
-import { titleSimilarity } from './match.js';
+import { dateDistance, titleSimilarity } from './match.js';
 import { renderPage } from './browser.js';
 
 const VERIFY_EVERY = 3 * 864e5;
@@ -112,6 +112,24 @@ export function proseSchedule($, title) {
   return { text: part, hash: sha1(part).slice(0, 16) };
 }
 
+/**
+ * The date range a detail page states right under the event's heading ("03.10.2026 – 31.10.2026"),
+ * when it has no structured data. Only a range is taken, and only one close to the event's dates;
+ * it can only make the event run longer (see syncFromPrimary).
+ */
+export function headingRange($, ev) {
+  const h = $('h1').toArray().find((el) => titleSimilarity(clean($(el).text()), ev.title) >= 0.5);
+  if (!h) return null;
+  // Text that comes after the heading, in page order (its later siblings and those of its parents).
+  let text = '';
+  for (let el = h; el && el.type !== 'root' && text.length < 200; el = el.parent) {
+    text += ` ${$(el).nextAll().not('script, style').text()}`;
+  }
+  const r = parseDateText(clean(text).slice(0, 120));
+  if (!r?.end || dateDistance(r, ev) > 3) return null;
+  return { start: r.start, end: r.end };
+}
+
 /** Links on a detail page that point to the same event elsewhere. */
 function linkedSources($, pageUrl) {
   const out = new Map();
@@ -150,6 +168,9 @@ export async function verifyEvent(index, ev, report) {
       const $ = cheerio.load(res.html);
       const own = bestMatch(jsonLdEvents($, res.url), ev.title);
       if (own) ({ event: ev } = index.add({ ...primary, start: own.start, end: own.end, time: own.time || primary.time, endTime: own.endTime || primary.endTime }, ev));
+      const range = own ? null : headingRange($, ev);
+      if (range) ev.pageRange = { url: res.url, ...range }; else delete ev.pageRange;
+      index.refresh(ev);
       // No structured dates: a schedule in the text is read by AI in the "Check dates" step.
       const prose = own ? null : proseSchedule($, ev.title);
       if (prose && prose.hash !== ev.prose?.hash) ev.prose = { url: res.url, ...prose };

@@ -35,12 +35,15 @@ export function dateDistance(a, b) {
  * Same/overlapping dates need a moderately similar title; up to 3 days apart needs a near-identical
  * title (that's a date mismatch between sources, shown in red). Recurring events with the same title
  * (e.g. every first Wednesday) are further apart than that, so they stay separate.
+ * One site listing the same title on the next day is another day of a run ("Október v knižnici",
+ * listed once per day): it joins the event and widens its dates. Two or three days apart on the
+ * same site are separate performances, not a mismatch.
  */
 export function findSameEvent(events, s) {
   let best = null, bestScore = 0;
   for (const ev of events) {
     const dist = dateDistance(ev, s);
-    if (dist > 3) continue;
+    if (dist > (s.site && ev.sources?.[0]?.site === s.site ? 1 : 3)) continue;
     const sim = titleSimilarity(ev.title, s.title);
     const ok = dist === 0 ? sim >= 0.5 : sim >= 0.85;
     const score = sim - dist * 0.05;
@@ -48,3 +51,10 @@ export function findSameEvent(events, s) {
   }
   return best;
 }
+
+/**
+ * Could two events (or an event and a sighting) be the same thing? Sharing a URL is not enough:
+ * detail pages link to generic pages ("/program?institutionId=7") and to other events, and listings
+ * may give many events one link.
+ */
+export const couldBeSame = (a, b) => titleSimilarity(a.title, b.title) >= 0.5 && dateDistance(a, b) <= 3;

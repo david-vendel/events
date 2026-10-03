@@ -6,21 +6,31 @@ const fmtDate = (s) => s.start
   : '';
 const STATUS = { not_checked: 'not checked', no_date: 'no date found', error: 'unreachable' };
 
-// Does a source agree with the primary one? Start dates must match; times only if both have one.
-function agrees(row, primary) {
-  return row.start === primary.start && (!row.time || !primary.time || row.time === primary.time);
+// Does a source agree with the event? Its start must match (or fall on a day of a run the event
+// spans); times only if both have one.
+function agrees(row, e) {
+  const day = e.end ? row.start >= e.start && row.start <= e.end : row.start === e.start;
+  return day && (!row.time || !e.time || row.time === e.time);
 }
 
+// The primary site listing the same title on other days: days of one run, not a disagreement
+// (the event's dates already span them; see runRows in src/events.js).
+const sameTitle = (a, b) => (a || '').trim().toLowerCase() === (b || '').trim().toLowerCase();
+const isRunDay = (r, p) => r !== p && !r.linked && r.start && r.site === p.site && sameTitle(r.title, p.title);
+
 function sourcesTable(e) {
-  const rows = e.sources || [];
-  if (!rows.length) return '';
-  const p = rows[0];
+  const all = e.sources || [];
+  if (!all.length) return '';
+  const p = all[0];
+  const days = new Set(all.filter((r) => r === p || isRunDay(r, p)).map((r) => r.start)).size;
+  const rows = all.filter((r) => !isRunDay(r, p));
   return `<table class="sources">
     <tr><th>Source</th><th>Date</th><th>Time</th></tr>
     ${rows.map((r, i) => {
-      const cls = i === 0 ? '' : r.status === 'ok' ? (agrees(r, p) ? 'ok' : 'bad') : 'na';
-      const date = r.status === 'ok' || i === 0 ? fmtDate(r) : (STATUS[r.status] || r.status);
-      const role = i === 0 ? 'primary' : r.kind === 'facebook' ? 'Facebook' : r.linked ? 'linked' : 'also listed';
+      const cls = i === 0 ? '' : r.status === 'ok' ? (agrees(r, e) ? 'ok' : 'bad') : 'na';
+      const date = i === 0 ? fmtDate(e) : r.status === 'ok' ? fmtDate(r) : (STATUS[r.status] || r.status);
+      const role = i === 0 ? (days > 1 ? `primary, listed on ${days} days` : 'primary')
+        : r.kind === 'facebook' ? 'Facebook' : r.linked ? 'linked' : 'also listed';
       const time = r.status === 'ok' || i === 0 ? [r.time, r.endTime].filter(Boolean).join('–') : '';
       return `<tr>
         <td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.site || host(r.url))}</a> <span class="role">· ${role}</span></td>
