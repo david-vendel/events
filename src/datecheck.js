@@ -3,7 +3,7 @@
 // decides how it is parsed from now on (see dates.js); stored events in a format that changed are
 // read again right away.
 import { readDates } from './ai.js';
-import { dateShape, formatsDue, learnFormat, readDateText } from './dates.js';
+import { dateShape, formatsDue, learnFormat, parseDateText, readDateText } from './dates.js';
 
 const FORMATS_PER_CALL = 12;
 const SAMPLES_PER_FORMAT = 3;
@@ -36,7 +36,8 @@ export async function checkDates(state, ctx, report) {
     const sent = formats.map((f) => ({ f, samples: f.samples.slice(0, SAMPLES_PER_FORMAT) }));
     const job = report.start('dates', `${formats.length} formats, ${prose.length} schedules`, 'cheap AI');
     const res = await readDates({
-      formats: sent.map((x) => ({ samples: x.samples })),
+      // With the built-in parser's reading: AI writes a rule only where that is wrong.
+      formats: sent.map((x) => ({ samples: x.samples, parsed: x.samples.map((t) => parseDateText(t)) })),
       prose: prose.map((e) => ({ title: e.title, text: e.prose.text })),
       today,
     }, { onStart: () => report.update?.(job, { note: 'AI is reading dates…', ai: 'running' }) });

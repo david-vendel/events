@@ -8,8 +8,18 @@ const STOPWORDS = new Set(`a i o u v vo na do od po pri pre s so z zo za k ku je
 
 const fold = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 
+// Cinema listings tag the format and language: "Odysea 2D ATMOS (ČT)" is the film "Odysea". A part
+// in brackets is often the original title ("Nádej (Håp)").
+// (Language codes count only right after a format: "Divadlo ST" is a theatre's name.)
+const FILM_TAGS = /\b(2d|3d|4dx|imax|hfr)(\s+(atmos|dolby))*(\s+(ct|st|sd|ov|cz))?\b|\b(atmos|titulky|dabing)\b/g;
+const bareTitle = (t) => {
+  const f = fold(t).replace(FILM_TAGS, ' ');
+  const out = f.replace(/\s\([^)]*\)/g, ' '); // "(Ne)viditeľní" keeps its bracket
+  return /[a-z0-9]/.test(out) ? out : f;
+};
+
 export function titleTokens(title) {
-  return new Set(fold(title).split(/[^a-z0-9]+/)
+  return new Set(bareTitle(title).split(/[^a-z0-9]+/)
     .filter((t) => t.length > 1 && !STOPWORDS.has(t) && !/^(19|20)\d\d$/.test(t)));
 }
 

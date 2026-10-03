@@ -180,6 +180,9 @@ const ARCHIVE = /archiv|archive|historia\b|history\b|vysledky|results|eventdispl
 const OTHER_LANG_PATH = /^\/(en|pl|hu|de|uk|ua|ru|fr|it|es|cs)(\/|$)/i;
 const OTHER_LANG_QUERY = /[?&](lang|language|locale|hl)=(en|pl|hu|de|uk|ua|ru|fr|it|es|cs)\b/i;
 
+/** A page of past events ("…/archiv-podujati/", "?eventDisplay=past"). */
+export const isArchiveUrl = (url) => ARCHIVE.test(fold(url));
+
 /** Does the text carry only dates in the past ("…/2023/…", "rok=2009", "2026-09-14" before today)? */
 export function pastDated(text, now = new Date()) {
   const today = now.toISOString().slice(0, 10);

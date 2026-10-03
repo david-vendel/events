@@ -16,7 +16,7 @@ import dns from 'node:dns/promises';
 import * as cheerio from 'cheerio';
 import { fetchPage } from './fetcher.js';
 import {
-  PARSER_VERSION, applyRecipe, clean, extractLinks, makeEvent, isSocial, jsonLdEvents, pageSignals, partialStructured, scoreLink,
+  PARSER_VERSION, applyRecipe, clean, extractLinks, makeEvent, isArchiveUrl, isSocial, jsonLdEvents, pageSignals, partialStructured, scoreLink,
   simplifyHtml,
 } from './extract.js';
 import { checkDates } from './datecheck.js';
@@ -32,6 +32,7 @@ import {
   MAX_BONUS, bootstrapPatterns, hostCap, linkBonus, notePatternVisit, patternKeys, siblingRecipes, templateOf,
 } from './learn.js';
 import { readSitemaps, sitemapsDue } from './sitemaps.js';
+import { downUntil, noteFetch, serverTrouble } from './hosthealth.js';
 
 const HOUR = 3600e3;
 const DAY = 24 * HOUR;
@@ -47,7 +48,11 @@ const TEMPLATE_DEAD_AFTER = 5; // visits of a template without any event before 
 const EMPTY_READS_BEFORE_REST = 3; // a listing page empty this many reads in a row is read only now and then
 const EMPTY_LISTING_REST = 14 * DAY;
 const NOT_LISTING_FOR = 30 * DAY; // a page AI said lists no events isn't taken as a listing again for this long
-const AI_MISSES_PER_SITE = 3; // AI looks at a site's pages that found nothing before it stops looking at more
+const AI_MISSES_PER_SITE = 3;
+// A template recipe that finds events on fewer than 10 % of at least 10 pages read the wrong pages
+// (an event page's recipe borrowed by the same site's news articles reads their publish time).
+const RECIPE_MIN_VISITS = 10;
+const RECIPE_MIN_YIELD = 0.1; // AI looks at a site's pages that found nothing before it stops looking at more
 const CRASHES_BEFORE_GIVING_UP = 10;
 // Errors that mean "we can't reach the internet" rather than "this site is down".
 const NET_DOWN = /ENOTFOUND|EAI_AGAIN|ENETUNREACH|ENETDOWN|EHOSTUNREACH|UND_ERR_CONNECT_TIMEOUT|fetch failed/;
@@ -224,7 +229,7 @@ function pickFromFrontier(state, hostCounts, busyHosts, eventPages) {
     let fullHost;
     try { fullHost = new URL(url).hostname; } catch { dequeue(state, url); continue; }
     const host = fullHost.replace(/^www\./, ''); // www.x.sk and x.sk are one site for the per-site cap
-    if (busyHosts.has(host) || hostPaused(state, fullHost)) continue;
+    if (busyHosts.has(host) || hostPaused(state, fullHost) || downUntil(state, url)) continue;
     let cap = caps.get(host);
     if (cap === undefined) caps.set(host, (cap = hostCap(state, fullHost)));
     if ((hostCounts.get(host) || 0) >= cap) continue;
@@ -275,6 +280,8 @@ function forgetVisit(state, url, host) {
   if (h) {
     h.errors = Math.max(0, h.errors - 1);
     h.failStreak = Math.max(0, h.failStreak - 1);
+    h.troubleStreak = 0; // we were offline: the site isn't down
+    delete h.downUntil;
   }
 }
 
@@ -367,6 +374,15 @@ async function readPage(state, url, ctx, job) {
   const source = sourceFor(state, res.url || url);
   source.stats.visits++;
   const listing = source.pages[url];
+  const wentDown = noteFetch(state, url, res);
+  if (wentDown) report.log(`${hostOf(url)} is down (${res.status || ''} ${res.error}): its pages wait until ${new Date(wentDown).toISOString().slice(11, 16)} UTC`);
+  if (res.error && serverTrouble(res)) {
+    // The site's server is in trouble, not this page: as if not visited; back in the queue for later.
+    health.errors++;
+    for (const k of ['visitedAt', 'error', 'failures']) delete cache[k];
+    if (!listing) queue(state, url, { score: scoreLink(url, ''), v: SCORE_VERSION, foundOn: 'retry', addedAt: iso(Date.now()) });
+    return { status: 'error', http: res.status, note: `${res.error} (site in trouble: tried again later)` };
+  }
   if (res.error) {
     health.errors++;
     if (listing) listing.failures = (listing.failures || 0) + 1;
@@ -403,12 +419,17 @@ async function readPage(state, url, ctx, job) {
   // sibling template of the same site (same depth): no AI needed here. A sibling's recipe that
   // works is kept for this template.
   const tpl = templateOf(state, url);
+  if (tpl.recipe && tpl.visits >= RECIPE_MIN_VISITS && tpl.withEvents / tpl.visits < RECIPE_MIN_YIELD) {
+    report.log(`Dropped the recipe of ${urlPattern(url)}: events on ${tpl.withEvents} of ${tpl.visits} pages`);
+    delete tpl.recipe;
+    tpl.noRecipe = true; // and it doesn't borrow a sibling's again
+  }
   if (unread && !listing?.recipe && tpl.recipe) {
     const found = withTags(applyRecipe($, tpl.recipe, res.url), tpl.tags);
     events.push(...found);
     if (found.length) how = partial ? 'json-ld + template recipe' : 'template recipe';
   }
-  if (unread && !listing?.recipe && !tpl.recipe) {
+  if (unread && !listing?.recipe && !tpl.recipe && !tpl.noRecipe) {
     for (const sib of siblingRecipes(state, url)) {
       const found = applyRecipe($, sib.recipe, res.url);
       if (!found.length) continue;
@@ -434,13 +455,15 @@ async function readPage(state, url, ctx, job) {
     && Date.now() - Date.parse(listing?.analyzedAt || 0) > RELEARN_AFTER
     && (listing || ctx.seeds.has(url) || !(tplAsked || tplDead))
     && (!tpl.structured || partial)
-    // Pages found while exploring: one look per site a cycle, and none after several found nothing
-    // there (a festival's gallery, info and about pages are all different templates).
-    && (listing || ctx.seeds.has(url) || (!ctx.aiSites.has(source.origin) && !(source.aiMisses >= AI_MISSES_PER_SITE)))
+    // Pages without a working recipe: one look per site a cycle, and none after several found
+    // nothing there (a festival's gallery, info and about pages are all different templates, and AI
+    // may have named them as listings). Archives of past events are never worth a look.
+    && (ctx.seeds.has(url) || listing?.recipe || (!ctx.aiSites.has(source.origin) && !(source.aiMisses >= AI_MISSES_PER_SITE)))
+    && !isArchiveUrl(url)
     && source.kind !== 'irrelevant';
 
   if (wantsAi) {
-    if (!listing) ctx.aiSites.add(source.origin);
+    if (!listing?.recipe) ctx.aiSites.add(source.origin);
     ctx.budget.ai--;
     ctx.used.ai++;
     health.ai++;
@@ -762,6 +785,9 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
     if (!source || ctx.budget.pages <= 0) return null;
     return async () => {
       let added = 0;
+      // A site that's down: its check waits until it's expected back.
+      const resumeAt = () => downUntil(state, source.origin);
+      if (resumeAt()) { source.nextCheckAt = iso(resumeAt()); return; }
       // The listing pages read longest ago first, so a site with many (one per town and kind of
       // event) gets all of them re-read over a few checks.
       const pages = Object.entries(source.pages)
@@ -769,10 +795,11 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
         .sort((a, b) => (a[1].lastRead?.at || '').localeCompare(b[1].lastRead?.at || ''))
         .slice(0, RECHECK_PAGES);
       for (const [url] of pages) {
-        if (ctx.budget.pages <= 0 || control.stopped()) break;
+        if (ctx.budget.pages <= 0 || control.stopped() || resumeAt()) break;
         added += await visit(state, url, ctx, 'recheck');
       }
-      scheduleNext(source, added);
+      if (resumeAt()) source.nextCheckAt = iso(resumeAt()); // went down meanwhile
+      else scheduleNext(source, added);
     };
   }, control);
 
@@ -810,7 +837,8 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
     const due = sitemapsDue(state, seeds).slice(0, SITEMAP_SITES_PER_CYCLE);
     if (due.length) report.phase('Reading sitemaps', `${due.length} sites`);
     await runPool(() => {
-      const origin = due.shift();
+      let origin = due.shift();
+      while (origin && downUntil(state, origin)) origin = due.shift(); // read when it's back
       if (!origin || ctx.budget.pages <= 0) return null;
       return async () => {
         const job = report.start('sitemap', origin);

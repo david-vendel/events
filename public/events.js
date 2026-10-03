@@ -179,7 +179,8 @@ function renderEvents() {
           <div class="meta">
             ${e.end && e.end !== e.start ? `until ${esc(shortFmt.format(new Date(`${e.end}T12:00`)))} · ` : ''}
             ${e.schedule?.length > 1 && new Set(e.schedule.map((x) => `${x.time}–${x.endTime}`)).size > 1 ? `${e.schedule.map((x) => esc(`${weekday.format(new Date(`${x.date}T12:00`))} ${[x.time, x.endTime].filter(Boolean).join('–')}`)).join(', ')} · ` : ''}
-            ${e.location ? `${esc(e.location)} · ` : ''}via ${esc(host(e.source))}
+            ${e.showings?.[d] ? `${e.showings[d].map((s) => [s.venue, s.times.join(', ')].filter(Boolean).map(esc).join(' ')).join(' · ')} · `
+              : e.location ? `${esc(e.location)} · ` : ''}via ${esc(host(e.source))}
           </div>
           ${e.description ? `<div class="desc">${esc(e.description)}</div>` : ''}
           ${sourcesTable(e)}

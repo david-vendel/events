@@ -318,11 +318,13 @@ function domainsTab() {
       ${list.map((d) => `
         <tr class="click ${openDomain === d.domain ? 'sel' : ''}" data-domain="${esc(d.domain)}">
           <td class="url"><b>${esc(d.domain)}</b> ${d.hosts.length > 1 ? `<span class="muted">${d.hosts.length} hosts</span>` : ''}
-            ${d.kind ? tag(d.kind, d.kind === 'events' ? 'ok' : '') : ''} ${heavy(d) ? tag('heavy', 'warn') : ''}</td>
+            ${d.kind ? tag(d.kind, d.kind === 'events' ? 'ok' : '') : ''} ${heavy(d) ? tag('heavy', 'warn') : ''}
+            ${d.hosts.some((h) => h.downUntil) ? tag('down', 'bad') : ''}</td>
           ${cells(d)}</tr>
         ${openDomain === d.domain ? d.hosts.map((h) => `<tr class="sub">
           <td class="url">${esc(h.host)} ${h.kind ? tag(h.kind, h.kind === 'events' ? 'ok' : '') : ''}
-            ${h.failStreak >= 3 ? tag(`failing: ${h.lastError || 'error'}`, 'bad') : ''}</td>
+            ${h.downUntil ? tag(`down (${h.lastTrouble || 'error'}): back ${fmtWhen(h.downUntil)}`, 'bad')
+              : h.failStreak >= 3 ? tag(`failing: ${h.lastError || 'error'}`, 'bad') : ''}</td>
           ${cells(h)}</tr>`).join('') : ''}`).join('')
       || '<tr><td class="empty-row">Nothing visited yet.</td></tr>'}
     </table></div>`;

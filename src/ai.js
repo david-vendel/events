@@ -362,9 +362,12 @@ const DatesRead = z.object({
 
 const DATES_SYSTEM = `You read event dates for a crawler in Slovakia. Texts are lowercase without diacritics \
 (Slovak: piatok = Friday, sobota = Saturday, od/do = from/to, hod = o'clock; 10.00 can be a time). \
-For each FORMAT you get a few samples of the same pattern: give each sample's start, end, time and endTime, \
-and write ONE JavaScript regex (no flags, no lookbehind needed) with numbered capture groups that reads every \
-sample, mapping groups to date parts (months may capture a number or a month name). Conventions: a start \
+For each FORMAT you get a few samples of the same pattern, each with the built-in parser's reading: give each \
+sample's start, end, time and endTime. Only if the parser's reading is wrong for some sample, also write ONE \
+JavaScript regex (no flags, no lookbehind needed) with numbered capture groups that reads every sample, mapping \
+groups to date parts (months may capture a number or a month name); when the parser is right, rule is null. \
+Text that holds no event date (a byline, an e-mail, a headline, when an article was posted such as "pred 1 \
+tyzdnom") gets start null and rule null. Conventions: a start \
 time of 00:00 means no time; an end time of 23:59 means no end time; an end at 00:00 means the event ends \
 the day before with no end time; if the year is missing, it is the next upcoming such date from today. \
 For each PROSE text (an event description), give the event's first day, last day, start and end time, and \
@@ -379,7 +382,9 @@ export function readDates({ formats = [], prose = [], today }, { onStart } = {})
   const none = { formats: formats.map(() => null), prose: prose.map(() => null), call: null };
   if (!aiAvailable('dates') || (!formats.length && !prose.length)) return Promise.resolve(none);
   const lines = [`Today: ${today}`];
-  formats.forEach((f, i) => lines.push(`FORMAT f=${i}`, ...f.samples.map((t, s) => `  s=${s}: ${t}`)));
+  const reading = (r) => (r ? [r.start, r.end && `to ${r.end}`, r.time, r.endTime && `to ${r.endTime}`].filter(Boolean).join(' ') : 'no date');
+  formats.forEach((f, i) => lines.push(`FORMAT f=${i}`,
+    ...f.samples.map((t, s) => `  s=${s}: ${t}${f.parsed ? `   [parser: ${reading(f.parsed[s])}]` : ''}`)));
   prose.forEach((p, i) => lines.push(`PROSE p=${i} (event "${p.title}")`, `  ${p.text}`));
   const prompt = lines.join('\n');
   const target = [formats.length && `${formats.length} date format${formats.length === 1 ? '' : 's'}`,

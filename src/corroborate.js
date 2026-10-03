@@ -6,6 +6,7 @@ import { fetchPage, sha1 } from './fetcher.js';
 import { countTimes, countWeekdays } from './dates.js';
 import { clean, extractLinks, facebookEvent, jsonLdEvents, parseDateText } from './extract.js';
 import { dateDistance, titleSimilarity } from './match.js';
+import { downUntil, noteFetch, serverTrouble } from './hosthealth.js';
 import { renderPage } from './browser.js';
 
 const VERIFY_EVERY = 3 * 864e5;
@@ -153,6 +154,7 @@ function linkedSources($, pageUrl) {
 export function dueForVerification(state, today, budget) {
   return Object.values(state.events)
     .filter((ev) => (ev.end || ev.start) >= today && Date.now() - Date.parse(ev.verifiedAt || 0) > VERIFY_EVERY)
+    .filter((ev) => !downUntil(state, ev.sources[0]?.url || ev.url)) // its site is down: verified when back
     .sort((a, b) => a.start.localeCompare(b.start))
     .slice(0, budget);
 }
@@ -171,6 +173,12 @@ export async function verifyEvent(index, ev, report) {
   if (primary.url && primary.url !== primary.via && primary.kind === 'web') {
     // Fresh cache: a 304 would hide the links we came for.
     const res = await fetchPage(primary.url, {});
+    noteFetch(index.state, primary.url, res);
+    if (res.error && serverTrouble(res)) {
+      // The site is in trouble: verify again later, not in three days.
+      report.end(job, { status: 'error', note: `detail page: ${res.status || ''} ${res.error} (site in trouble: tried again later)` });
+      return;
+    }
     if (res.html) {
       const $ = cheerio.load(res.html);
       const own = bestMatch(jsonLdEvents($, res.url), ev);
@@ -194,6 +202,7 @@ export async function verifyEvent(index, ev, report) {
   // 2. Every linked source.
   let agree = 0, disagree = 0;
   for (const [url, kind] of linked) {
+    if (downUntil(index.state, url)) continue; // checked when that site is back
     report.update?.(job, { note: `checking ${host(url)}…` });
     let found;
     if (kind === 'facebook') {

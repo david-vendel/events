@@ -3,7 +3,7 @@
 // that lists the same thing… Each sighting keeps its own date so the UI can show whether
 // sources agree. sources[0] is the primary source; the event's top-level fields mirror it.
 import { cleanLocation, eventId, facebookEvent } from './extract.js';
-import { couldBeSame, dateDistance, differentTowns, findSameEvent, titleSimilarity } from './match.js';
+import { couldBeSame, dateDistance, differentTowns, findSameEvent, titleSimilarity, titleTokens } from './match.js';
 import { finishDate, tooFarAhead } from './dates.js';
 import { eventTags } from './tags.js';
 import { knownTown } from './geo.js';
@@ -99,7 +99,7 @@ export function migrate(state) {
 function joinRuns(state) {
   const byRun = new Map();
   for (const ev of Object.values(state.events)) {
-    const key = `${ev.sources[0].site}|${ev.title.trim().toLowerCase()}|${knownTown(ev.location) || ''}`;
+    const key = `${ev.sources[0].site}|${[...titleTokens(ev.title)].sort().join(' ')}|${knownTown(ev.location) || ''}`;
     byRun.set(key, [...(byRun.get(key) || []), ev]);
   }
   for (const evs of byRun.values()) {

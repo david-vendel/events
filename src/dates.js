@@ -77,6 +77,33 @@ const DMY_RANGE = new RegExp(`${DMY}${AT}${DASH}${DMY}${AT}`);
 const TIME_RE = /(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?:\s*(?:h|hod\.?)?\s*[-–—]\s*([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d))?/;
 const TIME_H_RE = /(?<![\d.])([01]?\d|2[0-3])\.([0-5]\d)(?:\s*[-–—]\s*([01]?\d|2[0-3])\.([0-5]\d))?\s*(?:h\b|hod)/;
 
+// Relative dates are read against today every time, never stored as a day: the format "dnes N:N" is
+// learned once (the parser reads it), and "dnes 19:00" is a different day tomorrow.
+const DAY_WORDS = { dnes: 0, today: 0, zajtra: 1, zitra: 1, tomorrow: 1, pozajtra: 2, pozitri: 2, vcera: -1,
+  yesterday: -1, predvcerom: -2, predevcirem: -2 };
+const UNIT_DAYS = [[/^(min|hod|sek)/, 0], [/^(den|dn|dni|day)/, 1], [/^(tyzd|tydn|tyden|week)/, 7], [/^(mesia|mesic|month)/, 30], [/^(rok|let|year)/, 365]];
+const NUMBER_WORDS = { jednym: 1, jednou: 1, jeden: 1, jedna: 1, dvoma: 2, dvomi: 2, dvema: 2, dva: 2, dve: 2, tromi: 3, troma: 3, tri: 3, a: 1, an: 1 };
+// Full weekday names only: two-letter ones ("so", "ne") are everyday words.
+const WEEKDAY_NUM = { nedela: 0, nedelu: 0, nedele: 0, sunday: 0, pondelok: 1, pondeli: 1, monday: 1, utorok: 2, utery: 2,
+  tuesday: 2, streda: 3, stredu: 3, wednesday: 3, stvrtok: 4, ctvrtek: 4, thursday: 4, piatok: 5, patek: 5, friday: 5,
+  sobota: 6, sobotu: 6, saturday: 6 };
+
+/** Days from today that a relative text means, or undefined. */
+function relativeDays(t, now) {
+  for (const [w, d] of Object.entries(DAY_WORDS)) if (new RegExp(`\\b${w}\\b`).test(t)) return d;
+  // "pred 2 dnami", "pred tyzdnom", "2 days ago"; "o 3 dni", "za tyzden", "in 3 days"
+  const m = t.match(/\b(pred|pred|o|za|in)\s+(\d+|[a-z]+\s+)?\s*([a-z]+)|\b(\d+|a|an)\s+([a-z]+)\s+ago\b/);
+  if (m) {
+    const [num, unit, back] = m[4] ? [m[4], m[5], true] : [m[2]?.trim(), m[3], m[1] === 'pred'];
+    const per = UNIT_DAYS.find(([re]) => re.test(unit))?.[1];
+    const n = num === undefined ? 1 : /^\d+$/.test(num) ? +num : NUMBER_WORDS[num];
+    if (per !== undefined && n !== undefined) return (back ? -1 : 1) * n * per;
+  }
+  // "v piatok 19:00": the next such day (today counts)
+  for (const [w, d] of Object.entries(WEEKDAY_NUM)) if (new RegExp(`\\b${w}\\b`).test(t)) return (d - now.getDay() + 7) % 7;
+  return undefined;
+}
+
 /** Parse free-form (mostly Slovak) date text into { start, end?, time?, endTime? } or null. */
 export function parseDateText(text, now = new Date()) {
   const t = fold(text);
@@ -108,7 +135,14 @@ export function parseDateText(text, now = new Date()) {
     // 3.10.2026, 3. 10.
     start = makeDate(m[1], m[2], m[3], now);
   }
-  if (!start) return null;
+  if (!start) {
+    // No date written out: maybe one relative to today ("dnes 19:00", "pred 1 tyzdnom").
+    const days = relativeDays(t, now);
+    if (days === undefined) return null;
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + days);
+    start = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    m = null;
+  }
 
   const rest = m ? t.slice(m.index + m[0].length) + ' ' + t.slice(0, m.index) : t;
   const tm = rest.match(TIME_RE) || rest.match(TIME_H_RE);
@@ -118,16 +152,37 @@ export function parseDateText(text, now = new Date()) {
 // ---------------------------------------------------------------- learned formats
 
 export const FORMAT_RECHECK_DAYS = 14;
-const RETRY_DAYS = 1; // a format AI couldn't write a working rule for is tried again soon
+const RETRY_DAYS = 1; // a format AI couldn't write a working rule for is tried again soon, then less often
+const MAX_RETRY_DAYS = 30;
+const NOT_DATE_RECHECK_DAYS = 60; // text AI said holds no date (a byline, an e-mail, a headline)
+const OK_RECHECK_DAYS = 60; // the built-in parser reads it: it only changes with PARSER_VERSION
 const MAX_SAMPLES = 5;
 const MAX_ANSWERS = 50;
 
 // shape -> { samples, uses, status, rule, unsure, checkedAt, nextCheckAt, checks, history }
 //   status: "new" (not checked yet) | "ok" (built-in parser agrees with AI) | "rule" (AI's rule)
 //           | "ai" (no working rule: AI's answers for the exact texts it saw)
+//           | "none" (not a date at all: recipes sometimes point at a byline or an e-mail)
 let formats = {};
 /** Use (and fill) this object for learned formats: state.dateFormats. */
-export function useDateFormats(obj) { formats = obj; }
+export function useDateFormats(obj) {
+  formats = obj;
+  for (const [shape, f] of Object.entries(formats)) {
+    // Answers cached before relative dates were understood ("dnes 09:54" stored as one fixed day):
+    // asked again, and now the parser reads them against today.
+    if (f.status === 'ai' && RELATIVE.test(shape)) { delete formats[shape]; continue; }
+    // Stored before "none" existed: AI found no date in any sample, and it was asked again daily.
+    if (f.status === 'ai' && !Object.values(f.answers || {}).some(Boolean)) {
+      f.status = 'none';
+      delete f.answers;
+      f.nextCheckAt = new Date(Date.now() + NOT_DATE_RECHECK_DAYS * 864e5).toISOString();
+    }
+  }
+}
+const RELATIVE = /\b(dnes|zajtra|vcera|pred|today|tomorrow|yesterday)\b/;
+
+/** Text that can't hold a date: no digit and no month name ("Termín konania", "Zdroj: TASR"). */
+const dateless = (text) => !/\d/.test(text) && !new RegExp(`\\b(${MONTH_RE})\\b`).test(fold(text));
 
 const WEEKDAYS = /\b(pondelok|utorok|streda|stvrtok|piatok|sobota|nedela|pondelka|utorka|stredy|stvrtka|piatku|soboty|nedele|stredu|sobotu|nedelu|po|ut|st|stv|pi|so|ne|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\b\.?/g;
 const MONTH_WORD = new RegExp(`\\b(${MONTH_RE})\\b`, 'g');
@@ -191,7 +246,7 @@ export function readDateText(text, now = new Date(), { note = true } = {}) {
   if (!text || text.length > 160) return builtin; // prose: read on the detail page instead
   const shape = dateShape(text);
   if (!note) return readKnown(formats[shape], text, now) || builtin;
-  const f = (formats[shape] ??= { shape, samples: [], uses: 0, status: 'new', firstSeenAt: new Date().toISOString() });
+  const f = (formats[shape] ??= { shape, samples: [], uses: 0, status: dateless(text) ? 'none' : 'new', firstSeenAt: new Date().toISOString() });
   f.uses++;
   f.lastSeenAt = new Date().toISOString();
   if (!f.samples.includes(text)) f.samples = [text, ...f.samples].slice(0, MAX_SAMPLES);
@@ -203,14 +258,14 @@ export function readDateText(text, now = new Date(), { note = true } = {}) {
 function readKnown(f, text, now) {
   if (f?.status === 'rule') return applyRule(f.rule, text, now);
   if (f?.status === 'ai') return f.answers?.[text] || null;
-  return null;
+  return null; // "none": not a date; "new"/"ok": the built-in parser's reading is used
 }
 
 /** Formats due for an AI check: new ones (unsure first), then ones due for a re-check. */
 export function formatsDue(limit) {
   const now = Date.now();
   return Object.values(formats)
-    .filter((f) => f.samples.length && (f.status === 'new' || Date.parse(f.nextCheckAt || 0) <= now))
+    .filter((f) => f.samples.length && (f.status === 'new' || (f.status !== 'none' || f.nextCheckAt) && Date.parse(f.nextCheckAt || 0) <= now))
     .sort((a, b) => (a.status === 'new') - (b.status === 'new') || Boolean(a.unsure) - Boolean(b.unsure) || b.uses - a.uses)
     .reverse()
     .slice(0, limit);
@@ -226,7 +281,10 @@ export function learnFormat(f, answers, rule, now = new Date()) {
   const builtinOk = texts.every((t) => sameDate(parseDateText(t, now), norm[t]));
   const ruleOk = (r) => r && texts.every((t) => sameDate(applyRule(r, t, now), norm[t]));
   const before = f.status;
-  if (f.status === 'rule' && ruleOk(f.rule)) {
+  if (texts.every((t) => !norm[t]) && texts.every((t) => !parseDateText(t, now))) {
+    f.status = 'none'; // neither AI nor the parser finds a date in any sample
+    delete f.rule;
+  } else if (f.status === 'rule' && ruleOk(f.rule)) {
     // the rule still holds
   } else if (builtinOk) {
     f.status = 'ok';
@@ -246,11 +304,15 @@ export function learnFormat(f, answers, rule, now = new Date()) {
   const at = new Date();
   f.checks = (f.checks || 0) + 1;
   f.checkedAt = at.toISOString();
-  f.nextCheckAt = new Date(at.getTime() + (f.status === 'ai' ? RETRY_DAYS : FORMAT_RECHECK_DAYS) * 864e5).toISOString();
+  // A format still without a working rule is retried after 1, 2, 4… days (its answers are used meanwhile).
+  const days = { ai: Math.min(MAX_RETRY_DAYS, RETRY_DAYS * 2 ** ((f.fails = before === 'ai' ? (f.fails || 0) + 1 : 0))),
+    none: NOT_DATE_RECHECK_DAYS, ok: OK_RECHECK_DAYS }[f.status] ?? FORMAT_RECHECK_DAYS;
+  f.nextCheckAt = new Date(at.getTime() + days * 864e5).toISOString();
   const said = {
     ok: 'built-in parser agrees',
     rule: before === 'rule' ? 'learned rule still agrees' : 'built-in parser was wrong: AI rule saved, used from now on',
     ai: 'built-in parser was wrong and AI rule did not reproduce its answers: using AI answers, will retry',
+    none: 'not a date (the recipe points at other text); not asked again for 60 days',
   }[f.status];
   f.history = [{ at: f.checkedAt, from: before, to: f.status, unsure: f.unsure }, ...(f.history || [])].slice(0, 5);
   delete f.unsure;

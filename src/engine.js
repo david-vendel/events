@@ -8,8 +8,35 @@ import {
 import { facebookEnabled } from './corroborate.js';
 import { domainOf, hostOf } from './urls.js';
 import { activeRuleCount, tagSources } from './tags.js';
-import { parseLocation } from './geo.js';
+import { parseLocation, venueKey } from './geo.js';
 import { linkBonus, patternKeys } from './learn.js';
+
+/**
+ * Where and when an event is on, day by day, when that's more than one place or time (a film at two
+ * cinemas in town): { "2026-10-03": [{ venue: "CINEMAX", times: ["13:10", "18:20"] }, …] }. Places
+ * are told apart by address, since sites write one cinema differently.
+ */
+function showings(e) {
+  const days = {};
+  for (const r of e.sources) {
+    if (r.linked || !r.start || r.end) continue;
+    const loc = r.location || e.location;
+    const key = (loc && venueKey(loc)) || loc || '';
+    const day = (days[r.start] ??= new Map());
+    // A location that's only the town names no venue.
+    const name = (loc && parseLocation(loc).name) || '';
+    const v = day.get(key) || { venue: name, times: new Set() };
+    if (name && (!v.venue || name.length < v.venue.length)) v.venue = name; // the shortest way the sites write it
+    if (r.time) v.times.add(r.time);
+    day.set(key, v);
+  }
+  const out = {};
+  for (const [d, m] of Object.entries(days)) {
+    const list = [...m.values()].map((v) => ({ venue: v.venue, times: [...v.times].sort() }));
+    if (list.length > 1 || list[0].times.length > 1) out[d] = list.sort((a, b) => (a.times[0] || '').localeCompare(b.times[0] || ''));
+  }
+  return Object.keys(out).length ? out : undefined;
+}
 
 // Fields of an event, and of each of its source rows, that the public website uses.
 const PUBLIC_EVENT = ['id', 'title', 'start', 'end', 'time', 'endTime', 'location', 'description', 'url', 'source',
@@ -289,6 +316,7 @@ export class Engine {
     for (const [host, h] of Object.entries(s.hosts)) {
       Object.assign(row(host), {
         visits: h.visits, errors: h.errors, failStreak: h.failStreak, lastError: h.lastError,
+        downUntil: Date.parse(h.downUntil || 0) > Date.now() ? h.downUntil : undefined, lastTrouble: h.lastTrouble,
         events: h.events, added: h.added, lastVisitAt: h.lastVisitAt,
       });
     }
@@ -374,7 +402,7 @@ export class Engine {
         // Only what the website shows: the full record (AI inputs, row descriptions…) is several MB.
         const pick = (o, keys) => Object.fromEntries(keys.filter((k) => o[k] !== undefined).map((k) => [k, o[k]]));
         return {
-          ...pick(e, PUBLIC_EVENT), tags: Object.keys(tagFrom), tagFrom, city,
+          ...pick(e, PUBLIC_EVENT), tags: Object.keys(tagFrom), tagFrom, city, showings: showings(e),
           sources: e.sources.map((r) => pick(r, r.title === e.title ? PUBLIC_ROW.filter((k) => k !== 'title') : PUBLIC_ROW)),
         };
       })
