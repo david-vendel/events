@@ -47,6 +47,7 @@ const TEMPLATE_DEAD_AFTER = 5; // visits of a template without any event before 
 const EMPTY_READS_BEFORE_REST = 3; // a listing page empty this many reads in a row is read only now and then
 const EMPTY_LISTING_REST = 14 * DAY;
 const NOT_LISTING_FOR = 30 * DAY; // a page AI said lists no events isn't taken as a listing again for this long
+const AI_MISSES_PER_SITE = 3; // AI looks at a site's pages that found nothing before it stops looking at more
 const CRASHES_BEFORE_GIVING_UP = 10;
 // Errors that mean "we can't reach the internet" rather than "this site is down".
 const NET_DOWN = /ENOTFOUND|EAI_AGAIN|ENETUNREACH|ENETDOWN|EHOSTUNREACH|UND_ERR_CONNECT_TIMEOUT|fetch failed/;
@@ -433,9 +434,13 @@ async function readPage(state, url, ctx, job) {
     && Date.now() - Date.parse(listing?.analyzedAt || 0) > RELEARN_AFTER
     && (listing || ctx.seeds.has(url) || !(tplAsked || tplDead))
     && (!tpl.structured || partial)
+    // Pages found while exploring: one look per site a cycle, and none after several found nothing
+    // there (a festival's gallery, info and about pages are all different templates).
+    && (listing || ctx.seeds.has(url) || (!ctx.aiSites.has(source.origin) && !(source.aiMisses >= AI_MISSES_PER_SITE)))
     && source.kind !== 'irrelevant';
 
   if (wantsAi) {
+    if (!listing) ctx.aiSites.add(source.origin);
     ctx.budget.ai--;
     ctx.used.ai++;
     health.ai++;
@@ -452,6 +457,7 @@ async function readPage(state, url, ctx, job) {
       const outcome = learnFromAnalysis(state, source, url, a, $, res.url, events, report, tpl);
       if (call) call.outcome = outcome;
       how = source.pages[url]?.recipe ? 'AI → recipe' : 'AI';
+      source.aiMisses = events.length ? 0 : (source.aiMisses || 0) + 1;
       if (tpl.recipe && how === 'AI → recipe') health.aiRecipes++;
     }
   } else if (isListing(events, ctx.today) && source.kind !== 'irrelevant') {
@@ -724,6 +730,7 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
       withEvents: 0, events: 0, added: 0, ai: 0, aiRecipes: 0, sitemapFiles: 0, sitemapQueued: 0,
     },
     hostVisits: {}, // host -> pages fetched this cycle
+    aiSites: new Set(), // sites whose explored pages AI looked at this cycle
     netFails: [], offline: false, // network errors in a row; set when we found we're offline
     today, seeds, control, eventPages, index: new EventIndex(state),
   };
