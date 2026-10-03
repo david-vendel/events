@@ -25,7 +25,12 @@ const fold = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,
 // A film screening: cinema venue, cinema programme page, or "2D/3D" in the title. Film titles
 // would trip the keyword rules ("Zápas storočia" is not a sports match), so these get only "cinema".
 const CINEMA_PLACE = /\bkin[oa]\b|cinemax|cinema ?city|\bsterio\b|program-kina|\/kin[oa]\//;
-const CINEMA_TITLE = /\b[234]d\b|\b(dabing|titulky)\b|\bimax\b|\bfilm(ov[ya]?)?\b|projekci/;
+const CINEMA_TITLE = /\b[234]d\b|\b(dabing|titulky)\b|\bimax\b|\bfilm(ov[ya]?)?\b|projekci|\bkino\b/;
+// A live show at a cinema venue (a concert, a play) is not a screening, unless the title says it is
+// one ("MET Opera – záznam", "Balet 2D").
+const LIVE_TITLE = /koncert|concert|divadl|predstaveni|inscenac|\bopera\b|balet|muzikal|stand.?up|recital/;
+const SCREENED = /\b[234]d\b|\b(dabing|titulky)\b|\bimax\b|projekci|zaznam|prenos|live in hd|\bmet\b/;
+const isLiveShow = (name) => LIVE_TITLE.test(name) && !SCREENED.test(name);
 
 // The only keyword tags a screening keeps: a kids' film, a film festival.
 const FILM_EXTRA = ['kids', 'festival'];
@@ -49,6 +54,8 @@ export function guessTags({ title, description, location, url, via, source }) {
   const name = fold(title);
   const text = fold(`${title} ${description} ${location}`);
   const tags = RULES.filter(([, re]) => re.test(text)).map(([tag]) => tag);
+  // A cinema's descriptions are written for films; for a live show there, trust only its title.
+  if (isLiveShow(name)) return CINEMA_PLACE.test(place) ? RULES.filter(([, re]) => re.test(name)).map(([tag]) => tag) : tags;
   if (CINEMA_PLACE.test(place) || CINEMA_TITLE.test(name)) return ['cinema', ...tags.filter((t) => FILM_EXTRA.includes(t))];
   return tags;
 }
@@ -143,7 +150,9 @@ export function tagSources(ev, rules) {
   if (!Object.keys(from).length) put(learnedTags(rules, ev), 'learned');
   if (!Object.keys(from).length) put(ev.aiTags, 'ai');
   // Something a source calls cinema is a screening; drop tags the film's title happened to match.
-  if (from.cinema) for (const t of Object.keys(from)) if (t !== 'cinema' && !FILM_EXTRA.includes(t)) delete from[t];
+  // A live show on a cinema's programme is the exception.
+  if (from.cinema && isLiveShow(fold(ev.title))) delete from.cinema;
+  else if (from.cinema) for (const t of Object.keys(from)) if (t !== 'cinema' && !FILM_EXTRA.includes(t)) delete from[t];
   return Object.fromEntries(TAGS.filter((t) => from[t]).map((t) => [t, from[t]]));
 }
 

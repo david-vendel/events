@@ -12,7 +12,7 @@ const fold = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase().no
 
 // Bump when date parsing changes: listing pages are then re-read even if unchanged, so events
 // already stored get the corrected dates.
-export const PARSER_VERSION = 6;
+export const PARSER_VERSION = 7;
 
 const MONTHS = {
   januar: 1, februar: 2, marec: 3, marca: 3, april: 4, maj: 5, jun: 6, jul: 7, august: 8,
@@ -74,14 +74,19 @@ export function finishDate({ start, end, time, endTime }) {
 const DMY = String.raw`(?<![\d.])(0?[1-9]|[12]\d|3[01])\.\s*(0?[1-9]|1[0-2])(?![\d:])\.?\s*(\d{4})?`;
 const AT = String.raw`(?:\s*,?\s*(?:o\s*)?([01]?\d|2[0-3]):([0-5]\d))?`;
 // (the end may repeat a weekday: "pi 2. 10. 18:00 – ne 4. 10. 20:00")
-const DASH = String.raw`\s*(?:h|hod\.?)?\s*[-–—]\s*(?:[a-z]{2,8}\.?,?\s*)?`;
+// ("od 1.9.2026 08:00 do 31.10.2026 18:00": "do" is a dash too)
+const DASH = String.raw`\s*(?:h|hod\.?)?\s*(?:[-–—]|\bdo\b)\s*(?:[a-z]{2,8}\.?,?\s*)?`;
 // 02.10.2026 10:00 - 03.10.2026 18:00, 09.10 - 11.10.2026
 const DMY_RANGE = new RegExp(`${DMY}${AT}${DASH}${DMY}${AT}`);
+// 5. októbra – 9. decembra, 1. augusta 2023 0:00 - 6. septembra 2023 0:00 (no weekday after the dash:
+// "– nám. 29. augusta" is a street)
+const DMONTH = String.raw`(?<![\d.])(0?[1-9]|[12]\d|3[01])\.?\s*\b(${MONTH_RE})\b\.?\s*(\d{4})?`;
+const DMONTH_RANGE = new RegExp(`${DMONTH}${AT}\\s*(?:h|hod\\.?)?\\s*(?:[-–—]|\\bdo\\b)\\s*${DMONTH}${AT}`);
 // 17:00 - 23:59, 10.00 – 18.00 hod.
-const TIME_RE = /(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?:\s*(?:h|hod\.?)?\s*[-–—]\s*([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d))?/;
+const TIME_RE = /(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?:\s*(?:h|hod\.?)?\s*(?:[-–—]|\bdo\b)\s*([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d))?/;
 // "27 říjen Út | 19.00", "piatok o 19.30": a dotted time after "|" or "o" (at); not after a comma,
 // where it's as likely a price or another part's time ("Vernisáž: 28. 10. 2026, 18.00 … Trvanie: …")
-const TIME_AFTER_SEP = /(?:\||\bo)\s*([01]?\d|2[0-3])\.([0-5]\d)(?![\d.,])/;
+const TIME_AFTER_SEP = /(?:\||\bo|\bod)\s*([01]?\d|2[0-3])\.([0-5]\d)(?![\d.,])(?:\s*(?:[-–—]|\bdo\b)\s*([01]?\d|2[0-3])\.([0-5]\d)(?![\d.,]))?/;
 const TIME_H_RE = /(?<![\d.])([01]?\d|2[0-3])\.([0-5]\d)(?:\s*[-–—]\s*([01]?\d|2[0-3])\.([0-5]\d))?\s*(?:h\b|hod)/;
 
 // Relative dates are read against today every time, never stored as a day: the format "dnes N:N" is
@@ -144,6 +149,14 @@ export function parseDateText(text, now = new Date()) {
       const to = t.slice(m.index + m[0].length).match(/^\s*(?:h|hod\.?)?\s*[-–—]\s*([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d)/);
       return finishDate({ start, end, time: hhmm(m[9], m[10]), endTime: to ? hhmm(to[1], to[2]) : undefined });
     }
+  } else if ((m = t.match(DMONTH_RANGE))) {
+    const y = m[3] || m[8];
+    start = makeDate(m[1], MONTHS[m[2]], y, now);
+    // No year: the end is in the start's year, or the next one ("20. júla – 24. augusta", "5. dec – 9. jan").
+    end = !y && start ? makeDate(m[6], MONTHS[m[7]], start.slice(0, 4), now) : makeDate(m[6], MONTHS[m[7]], m[8] || y, now);
+    if (!y && end && end < start) end = makeDate(m[6], MONTHS[m[7]], String(+start.slice(0, 4) + 1), now);
+    if (start && m[4]) return finishDate({ start, end, time: hhmm(m[4], m[5]), endTime: hhmm(m[9], m[10]) });
+    if (start && m[9]) return finishDate({ start, end, time: hhmm(m[9], m[10]) });
   } else if ((m = t.match(/(\d{1,2})\.\s*[-–—]\s*(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})?/))) {
     // 9. - 11. 10. 2026
     start = makeDate(m[1], m[3], m[4], now);
@@ -242,6 +255,9 @@ export function unsureReason(text, r) {
 }
 
 const TIMES = /(?<!\d)([01]?\d|2[0-3]):[0-5]\d(?!\d)|(?<![\d.])([01]?\d|2[0-3])\.[0-5]\d\s*(?:h\b|hod)|\b(?:od|do|o)\s+([01]?\d|2[0-3])\.[0-5]\d(?!\d)/g;
+// Only clock times and words ("Dóm sv. Alžbety, Košice 18:00 – 19:30"): a recipe's date points at the
+// place-and-time line. Each place name makes a new shape, so these are settled here, not by AI.
+const timesOnly = (text) => !/\d/.test(fold(text).replace(TIMES, ''));
 export const countTimes = (t) => (fold(t).match(TIMES) || []).length;
 export const countWeekdays = (t) => (fold(t).match(WEEKDAYS) || []).length;
 
@@ -278,7 +294,7 @@ export function readDateText(text, now = new Date(), { note = true } = {}) {
   if (!text || text.length > 160) return builtin; // prose: read on the detail page instead
   const shape = dateShape(text);
   if (!note) return readKnown(formats[shape], text, now) || builtin;
-  const f = (formats[shape] ??= { shape, samples: [], uses: 0, status: dateless(text) ? 'none' : 'new', firstSeenAt: new Date().toISOString() });
+  const f = (formats[shape] ??= { shape, samples: [], uses: 0, status: dateless(text) || (!builtin && timesOnly(text)) ? 'none' : 'new', firstSeenAt: new Date().toISOString() });
   f.uses++;
   f.lastSeenAt = new Date().toISOString();
   if (!f.samples.includes(text)) f.samples = [text, ...f.samples].slice(0, MAX_SAMPLES);
