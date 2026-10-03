@@ -12,7 +12,7 @@ const fold = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase().no
 
 // Bump when date parsing changes: listing pages are then re-read even if unchanged, so events
 // already stored get the corrected dates.
-export const PARSER_VERSION = 4;
+export const PARSER_VERSION = 5;
 
 const MONTHS = {
   januar: 1, februar: 2, marec: 3, marca: 3, april: 4, maj: 5, jun: 6, jul: 7, august: 8,
@@ -38,11 +38,17 @@ function makeDate(d, m, y, now) {
 }
 
 const dayBefore = (iso) => new Date(Date.parse(`${iso}T12:00Z`) - 864e5).toISOString().slice(0, 10);
+const dayAfter = (iso) => new Date(Date.parse(`${iso}T12:00Z`) + 864e5).toISOString().slice(0, 10);
 const hhmm = (h, m) => (h === undefined ? undefined : `${pad(h)}:${m}`);
 
 // An end years after the start ("2.1.2026 – 31.12.9999 00:59") is a site's way of saying "no end".
 const MAX_RUN_DAYS = 2 * 366;
 export const placeholderEnd = (start, end) => Boolean(end && start) && (Date.parse(end) - Date.parse(start)) / 864e5 > MAX_RUN_DAYS;
+
+// Listings rarely go more than a year ahead; starts beyond that are generated repeats ("every
+// 19 September" up to 2038), test entries or typos ("13.11.2058").
+const MAX_AHEAD_DAYS = 400;
+export const tooFarAhead = (start, now = new Date()) => (Date.parse(start) - now.getTime()) / 864e5 > MAX_AHEAD_DAYS;
 
 // Listings often pad all-day or open-ended entries with placeholder times: "01.10. 00:00 –
 // 05.10. 00:00" is 1–4 October with no time; "17:00 – 23:59" just means "from 17:00".
@@ -54,8 +60,10 @@ export function finishDate({ start, end, time, endTime }) {
     if (end && end > start) end = dayBefore(end);
     endTime = undefined;
   }
+  // "Fri 22:00 – Sat 04:00" is one night out, not two days.
+  if (end && time && endTime && endTime <= '06:00' && end === dayAfter(start)) end = undefined;
   if (end === start) end = undefined;
-  if (!time) endTime = undefined;
+  if (!time || (!end && endTime === time)) endTime = undefined; // "08:00 08:00" is a start time, twice
   return { start, end, time, endTime };
 }
 

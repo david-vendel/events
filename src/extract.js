@@ -2,9 +2,9 @@
 // schema.org Event JSON-LD, learned CSS "recipes", links and page scoring. Dates: dates.js.
 import * as cheerio from 'cheerio';
 import { sha1 } from './fetcher.js';
-import { normalizeUrl } from './urls.js';
+import { coarsePattern, normalizeUrl, urlKey } from './urls.js';
 import { TAGS, tagsFromSchemaTypes } from './tags.js';
-import { MONTH_RE, finishDate, parseDateText, readDateText } from './dates.js';
+import { MONTH_RE, finishDate, parseDateText, readDateText, tooFarAhead } from './dates.js';
 
 export { PARSER_VERSION, parseDateText } from './dates.js';
 
@@ -14,6 +14,17 @@ export function plain(s) {
   let t = String(s || '');
   for (let i = 0; i < 2 && /[<&]/.test(t); i++) t = cheerio.load(t, null, false).text();
   return clean(t.replace(/\\[nrt]/g, ' ')).replace(/\s*(Read More|Čítať viac|Viac)\s*(…|\.\.\.)?$/i, '');
+}
+/**
+ * A location as a place: without the date and the labels some sites put in the same box
+ * ("Termín: 03.10.2026 a ďalšie Mesto: Badín" → "Badín").
+ */
+export function cleanLocation(s) {
+  return plain(s)
+    .replace(/(termín|dátum|kedy|začiatok)\s*:.*?(?=(mesto|miesto konania|miesto|adresa)\s*:|$)/gi, '')
+    .replace(/(miesto konania|mesto|miesto|adresa)\s*:\s*/gi, '')
+    .replace(/(?<![\d.])\d{1,2}\.\s*\d{1,2}\.\s*(\d{4})?(\s*,?\s*\d{1,2}[:.]\d{2})?\s*[|,–-]?\s*/g, '') // "04.10.2026 10:30 | BDNR"
+    .replace(/\s+/g, ' ').trim();
 }
 const fold = (s) => clean(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 
@@ -46,7 +57,7 @@ export function makeEvent(raw, sourceUrl, now = new Date()) {
   const title = plain(raw.title);
   // Free-form text (from a recipe) goes through the learned formats; structured dates don't need to.
   const date = raw.start ? structuredDate(raw.start, now) : readDateText(clean(raw.dateText), now);
-  if (!title || !date) return null;
+  if (!title || !date || tooFarAhead(date.start, now)) return null;
   const endDate = raw.end ? structuredDate(raw.end, now) : null;
   const time = raw.time || date.time;
   const fin = finishDate({
@@ -63,7 +74,7 @@ export function makeEvent(raw, sourceUrl, now = new Date()) {
     time: fin.time,
     endTime: fin.endTime,
     dateText: raw.start ? undefined : clean(raw.dateText), // kept so the date can be read again when a format is learned
-    location: plain(raw.location).slice(0, 200) || undefined,
+    location: cleanLocation(raw.location).slice(0, 200) || undefined,
     description: plain(raw.description).slice(0, 500) || undefined,
     url: raw.url || sourceUrl,
     source: sourceUrl,
@@ -98,7 +109,7 @@ export function jsonLdEvents($, pageUrl) {
         end: n.endDate,
         location: [loc.name, addr].filter(Boolean).join(', '),
         description: n.description,
-        url: n.url ? absolutize(n.url, pageUrl) : undefined,
+        url: n.url || n.URL ? absolutize(n.url || n.URL, pageUrl) : undefined, // some sites write "URL"
         tags: tagsFromSchemaTypes(types),
       }, pageUrl);
       // Coordinates, when the page gives them (Place.geo): the best location there is.
@@ -165,7 +176,7 @@ const KOSICE_WORDS = /kosic|kosice|cassovia|kassa|kaschau/;
 const SK_PLACES = /kosic|bratislav|zilin|presov|banska.?bystric|nitr[ae]|trnav|trencin|poprad|martin|michalovc|spisska|bardejov|humenn|levic|komarn|piestan|zvolen|ruzomberok|liptov|tatr|senec|pezinok|prievidz|lucenec|roznav|trebisov|dunajska|nove.?zamky|topolcan|skalic|senic|sabinov|kezmarok|stara.?lubovn|vranov/;
 // News and discussion pages rarely list events; archives and other-language copies repeat what we have.
 const NEWSY = /\/(clanky|clanok|spravy|sprava|news|novinky|article|articles|blog|diskusia|debata|komentare|forum|magazin|tlacove-spravy)(\/|$)/;
-const ARCHIVE = /archiv|archive|historia\b|history\b|vysledky|results/;
+const ARCHIVE = /archiv|archive|historia\b|history\b|vysledky|results|eventdisplay=past|past-events|minule-(podujatia|akcie)|probehle/;
 const OTHER_LANG_PATH = /^\/(en|pl|hu|de|uk|ua|ru|fr|it|es|cs)(\/|$)/i;
 const OTHER_LANG_QUERY = /[?&](lang|language|locale|hl)=(en|pl|hu|de|uk|ua|ru|fr|it|es|cs)\b/i;
 
@@ -180,6 +191,12 @@ export function pastDated(text, now = new Date()) {
     if (+m[1] < now.getFullYear()) past = true; else future = true;
   }
   return past && !future;
+}
+
+/** Does the text carry only years well ahead (a calendar paged to "…/oktober-2031/")? */
+export function farDated(text, now = new Date()) {
+  const years = [...text.matchAll(/(?<!\d)(20\d{2})(?!\d)/g)].map((m) => +m[1]);
+  return years.length > 0 && years.every((y) => y > now.getFullYear() + 1);
 }
 
 /** Facebook event id from a facebook.com/events/<id> URL, or 'short' for fb.me/e/… links. */
@@ -208,6 +225,8 @@ export function scoreLink(url, anchorText) {
   try { u = new URL(url); } catch { return -1; }
   if (!/^https?:$/.test(u.protocol) || SKIP_EXT.test(u.pathname) || SKIP_HOSTS.test(u.hostname)) return -1;
   if (/login|signin|register|cart|kosik|wp-admin|secret=|token=|api\/|live-preview|\/tag\/|\/author\/|print=|share=|mailto:|cdn-cgi|\/(prihlasenie|registracia|cookies?|gdpr|ochrana-osobnych-udajov|privacy|kontakt|contact)(\/|$)/i.test(url)) return -1;
+  // Calendar exports, feeds, and e-mail addresses written as links: never a page to read.
+  if (/[?&](ical|outlook-ical|ics)=|\/(feed|rss|ical)\/?$|@/i.test(u.pathname + u.search)) return -1;
   let path;
   try { path = decodeURIComponent(u.pathname + u.search); } catch { path = u.pathname + u.search; }
   path = fold(path);
@@ -222,7 +241,7 @@ export function scoreLink(url, anchorText) {
   if (NEWSY.test(path)) score -= 2;
   if (ARCHIVE.test(hay)) score -= 2;
   if (OTHER_LANG_PATH.test(u.pathname) || OTHER_LANG_QUERY.test(u.search)) score -= 2;
-  if (pastDated(`${path} ${fold(anchorText)}`)) score -= 3;
+  if (pastDated(`${path} ${fold(anchorText)}`) || farDated(`${path} ${fold(anchorText)}`)) score -= 3;
   return score;
 }
 
@@ -245,6 +264,21 @@ export function pageSignals($) {
   // A page that declares itself an article (news, blog post) is rarely a listing, even with many dates.
   const article = /article|blog/i.test($('meta[property="og:type"]').attr('content') || '');
   return { dates, eventWords, kosice, article, looksLikeListing: dates >= 5 && eventWords >= 3 && !article };
+}
+
+/**
+ * Does the page's structured data cover only some of its events ("4 of 20 films today")? Judged by
+ * the links: the page links to many more pages like the structured events' own pages
+ * (…/film/<name>/) than it has structured events.
+ */
+export function partialStructured(events, links, pageUrl) {
+  const page = urlKey(pageUrl);
+  const own = events.filter((e) => e.url && urlKey(e.url) !== page);
+  if (!own.length) return false;
+  const shapes = new Set(own.map((e) => coarsePattern(e.url)));
+  const like = new Set([...links.keys()].filter((h) => urlKey(h) !== page && shapes.has(coarsePattern(h))).map(urlKey));
+  for (const e of own) like.add(urlKey(e.url));
+  return like.size >= 2 * new Set(own.map((e) => urlKey(e.url))).size + 3;
 }
 
 /** Strip a page down to structure + text so the AI sees the DOM cheaply. */

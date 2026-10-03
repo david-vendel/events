@@ -29,24 +29,36 @@ export function notePatternVisit(state, url, { events = 0, added = 0 } = {}, at 
     p.visits++;
     if (events > 0) p.withEvents++;
     p.events += events;
+    // How often a visit lately found something new (a moving average): filter and sort variants
+    // of one listing (…/koncerty:vstup-zdarma/, ?sort=…) keep showing events, but no new ones.
+    p.newRate = 0.7 * newRate(p) + 0.3 * (added > 0 ? 1 : 0);
     p.added += added;
     p.lastAt = at;
     if (events > 0 || !p.example) p.example = url; // a sample page for the admin panel
   }
 }
 
+// Records from before newRate existed: new events per visit, as a rate.
+const newRate = (p) => p.newRate ?? Math.min(0.5, p.visits ? p.added / p.visits : 0);
+
 // What a template's record says about the next page from it: up to +8 for one that nearly always
 // has events, down to -6 for one visited often without any. Events we already had (a detail page
-// of an event its listing gave us) are worth little: after 5 visits without a new event, at most +1.
+// of an event its listing gave us, the same listing filtered another way) are worth little: once
+// visited 5 times, a template that has lately rarely found a new event gets at most +1.
 function yieldScore(p) {
   if (!p.withEvents) return -Math.min(6, 1 + Math.floor(p.visits / 3));
   const score = Math.min(7, Math.round(1 + 6 * (p.withEvents / p.visits))) + (p.added > 0 ? 1 : 0);
-  return p.added === 0 && p.visits >= 5 ? Math.min(1, score) : score;
+  return p.visits >= 5 && newRate(p) < 0.1 ? Math.min(1, score) : score;
 }
 
-/** How a host has done so far: +2 (many new events), +1 (some events), 0 (unknown), down to -5. */
+/**
+ * How a host has done so far: +2 (many new events), +1 (some events), 0 (unknown), down to -5.
+ * A host whose pages lately bring nothing new (the same events under endless filter and date
+ * combinations) gets no bonus, whatever it found before.
+ */
 export function hostBonus(h) {
   if (!h) return 0;
+  if ((h.newRate ?? 1) < 0.05) return 0;
   if (h.added >= 10) return 2;
   if (h.added > 0 || h.withEvents > 0) return 1;
   const read = (h.ok || 0) + (h.unchanged || 0);
@@ -92,7 +104,9 @@ export const MAX_BONUS = 10;
 
 /** Pages of one host a cycle may explore: more for hosts that produce events, 1 for dead ones. */
 export function hostCap(state, host) {
-  const b = hostBonus(state.hosts[host]);
+  const h = state.hosts[host];
+  if ((h?.newRate ?? 1) < 0.05) return 3; // lately nothing new
+  const b = hostBonus(h);
   return b >= 2 ? 15 : b >= 1 ? 8 : b < 0 ? 1 : 3;
 }
 

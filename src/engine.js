@@ -11,6 +11,11 @@ import { activeRuleCount, tagSources } from './tags.js';
 import { parseLocation } from './geo.js';
 import { linkBonus, patternKeys } from './learn.js';
 
+// Fields of an event, and of each of its source rows, that the public website uses.
+const PUBLIC_EVENT = ['id', 'title', 'start', 'end', 'time', 'endTime', 'location', 'description', 'url', 'source',
+  'place', 'schedule', 'firstSeenAt'];
+const PUBLIC_ROW = ['url', 'site', 'kind', 'linked', 'status', 'note', 'title', 'start', 'end', 'time', 'endTime'];
+
 export const DEFAULT_SETTINGS = {
   concurrency: 5, // pages fetched in parallel
   pagesPerCycle: 60,
@@ -366,7 +371,12 @@ export class Engine {
         const tagFrom = tagSources(e, this.state.tagRules);
         // The town, for the website's filter (the map step stores it; older events get it here).
         const city = e.place?.city ?? parseLocation(e.location).city;
-        return { ...e, tags: Object.keys(tagFrom), tagFrom, city };
+        // Only what the website shows: the full record (AI inputs, row descriptions…) is several MB.
+        const pick = (o, keys) => Object.fromEntries(keys.filter((k) => o[k] !== undefined).map((k) => [k, o[k]]));
+        return {
+          ...pick(e, PUBLIC_EVENT), tags: Object.keys(tagFrom), tagFrom, city,
+          sources: e.sources.map((r) => pick(r, r.title === e.title ? PUBLIC_ROW.filter((k) => k !== 'title') : PUBLIC_ROW)),
+        };
       })
       .sort((a, b) => a.start.localeCompare(b.start) || (a.time || '').localeCompare(b.time || ''));
   }

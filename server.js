@@ -6,6 +6,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { Engine } from './src/engine.js';
 
 const arg = (name) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
@@ -17,9 +18,16 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '
 const engine = new Engine();
 if (process.argv.includes('--start')) engine.start();
 
-function json(res, body, status = 200) {
+function json(req, res, body, status = 200) {
+  const text = JSON.stringify(body);
+  // The events list is large; browsers all accept gzip.
+  if (text.length > 10_000 && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' });
+    res.end(zlib.gzipSync(text));
+    return;
+  }
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-  res.end(JSON.stringify(body));
+  res.end(text);
 }
 
 async function readBody(req) {
@@ -64,10 +72,10 @@ http.createServer(async (req, res) => {
   const aiDetail = pathname.match(/^\/api\/ai\/([\w-]+)$/);
   if (aiDetail && req.method === 'GET') {
     const call = engine.aiCall(aiDetail[1]);
-    return call ? json(res, call) : json(res, { error: 'not found' }, 404);
+    return call ? json(req, res, call) : json(req, res, { error: 'not found' }, 404);
   }
   const route = routes[`${req.method} ${pathname}`];
-  if (route) return json(res, await route(req.method === 'POST' ? await readBody(req) : undefined));
+  if (route) return json(req, res, await route(req.method === 'POST' ? await readBody(req) : undefined));
 
   const file = path.join(PUBLIC, pathname === '/' ? 'index.html' : pathname);
   if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {

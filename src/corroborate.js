@@ -77,18 +77,21 @@ async function readWeb(url, event) {
   const res = await fetchPage(url, {});
   if (res.error) return { status: 'error', note: `${res.status || ''} ${res.error}`.trim() };
   const $ = cheerio.load(res.html);
-  const best = bestMatch(jsonLdEvents($, res.url), event.title);
-  if (!best) return { status: 'no_date', note: 'no structured date on page' };
+  const best = bestMatch(jsonLdEvents($, res.url), event);
+  if (!best) return { status: 'no_date', note: 'no structured date for this event on page' };
   return { title: best.title, start: best.start, end: best.end, time: best.time, endTime: best.endTime, location: best.location, status: 'ok' };
 }
 
-function bestMatch(candidates, title) {
+// The page's event that is this event: a similar title, or the page's only event if its dates fit
+// (a ticket shop may title it differently, but a page about another event must not count).
+function bestMatch(candidates, ev) {
   let best = null, score = 0;
   for (const c of candidates) {
-    const s = titleSimilarity(c.title, title);
+    const s = titleSimilarity(c.title, ev.title);
     if (s > score) { best = c; score = s; }
   }
-  return score >= 0.3 || candidates.length === 1 ? best : null;
+  if (score >= 0.3) return best;
+  return candidates.length === 1 && dateDistance(candidates[0], ev) <= 3 ? candidates[0] : null;
 }
 
 const PROSE_CHARS = 1500;
@@ -130,13 +133,17 @@ export function headingRange($, ev) {
   return { start: r.start, end: r.end };
 }
 
-/** Links on a detail page that point to the same event elsewhere. */
+/**
+ * Links on a detail page that point to the same event elsewhere. Links within the page's own site
+ * are its other events (a ticket shop's "you may also like"), not this one elsewhere.
+ */
 function linkedSources($, pageUrl) {
   const out = new Map();
+  const own = host(pageUrl).replace(/^www\./, '');
   for (const [href] of extractLinks($, pageUrl)) {
     const fb = facebookEvent(href);
     if (fb) out.set(fb === 'short' ? href : `https://www.facebook.com/events/${fb}/`, 'facebook');
-    else if (TICKET_SITES.test(host(href)) && new URL(href).pathname.length > 1) out.set(href, 'web');
+    else if (TICKET_SITES.test(host(href)) && host(href).replace(/^www\./, '') !== own && new URL(href).pathname.length > 1) out.set(href, 'web');
     if (out.size >= MAX_LINKED) break;
   }
   return out;
@@ -166,7 +173,7 @@ export async function verifyEvent(index, ev, report) {
     const res = await fetchPage(primary.url, {});
     if (res.html) {
       const $ = cheerio.load(res.html);
-      const own = bestMatch(jsonLdEvents($, res.url), ev.title);
+      const own = bestMatch(jsonLdEvents($, res.url), ev);
       if (own) ({ event: ev } = index.add({ ...primary, start: own.start, end: own.end, time: own.time || primary.time, endTime: own.endTime || primary.endTime }, ev));
       const range = own ? null : headingRange($, ev);
       if (range) ev.pageRange = { url: res.url, ...range }; else delete ev.pageRange;
@@ -176,8 +183,8 @@ export async function verifyEvent(index, ev, report) {
       if (prose && prose.hash !== ev.prose?.hash) ev.prose = { url: res.url, ...prose };
       else if (!prose && !own) { delete ev.prose; delete ev.schedule; }
       for (const [url, kind] of linkedSources($, res.url)) {
-        // Skip short links we've already resolved to a canonical row.
-        if (!ev.sources.some((s) => s.from === url)) linked.set(url, kind);
+        // Skip short links we've already resolved to a canonical row, and pages that didn't confirm it.
+        if (!ev.sources.some((s) => s.from === url) && !ev.unconfirmed?.includes(url)) linked.set(url, kind);
       }
     } else if (res.error) {
       notes.push(`detail page: ${res.status || ''} ${res.error}`.trim());
@@ -195,6 +202,15 @@ export async function verifyEvent(index, ev, report) {
         : { status: 'not_checked', note: 'Facebook disallows crawlers; set EVENTS_FACEBOOK=on to read it' };
     } else {
       found = await readWeb(url, ev);
+      // A page that doesn't confirm the event (usually a link to a different one) isn't listed as a
+      // source; it's remembered so it isn't fetched again on every verification (an unreachable
+      // one is tried again next time).
+      if (found.status !== 'ok') {
+        if (found.status === 'no_date') ev.unconfirmed = [...new Set([...(ev.unconfirmed || []), url])].slice(-20);
+        ev.sources = ev.sources.filter((s) => s.url !== url);
+        notes.push(`${host(url).replace(/^www\./, '')}: ${found.status}`);
+        continue;
+      }
     }
     const row = { kind, linked: true, via: primary.url, url, title: ev.title, ...found };
     // A resolved fb.me short link replaces its placeholder row.

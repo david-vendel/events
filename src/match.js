@@ -1,5 +1,8 @@
 // Deciding whether two sightings (from different websites) are the same event.
-// Heuristic: dates must be close and titles must share most of their meaningful words.
+// Heuristic: dates must be close, titles must share most of their meaningful words, and the towns
+// must not differ (one film plays in many towns the same day).
+import { knownTown } from './geo.js';
+
 const STOPWORDS = new Set(`a i o u v vo na do od po pri pre s so z zo za k ku je sa si to aj ale
   alebo ako the of and in at on for with to by an kosice kosiciach kosic event podujatie`.split(/\s+/));
 
@@ -39,6 +42,12 @@ export function dateDistance(a, b) {
  * listed once per day): it joins the event and widens its dates. Two or three days apart on the
  * same site are separate performances, not a mismatch.
  */
+/** Both places are known and they're different towns. */
+export const differentTowns = (a, b) => {
+  const x = knownTown(a.location), y = knownTown(b.location);
+  return Boolean(x && y && x !== y);
+};
+
 export function findSameEvent(events, s) {
   let best = null, bestScore = 0;
   for (const ev of events) {
@@ -47,7 +56,7 @@ export function findSameEvent(events, s) {
     const sim = titleSimilarity(ev.title, s.title);
     const ok = dist === 0 ? sim >= 0.5 : sim >= 0.85;
     const score = sim - dist * 0.05;
-    if (ok && score > bestScore) { best = ev; bestScore = score; }
+    if (ok && score > bestScore && !differentTowns(ev, s)) { best = ev; bestScore = score; }
   }
   return best;
 }
@@ -57,4 +66,4 @@ export function findSameEvent(events, s) {
  * detail pages link to generic pages ("/program?institutionId=7") and to other events, and listings
  * may give many events one link.
  */
-export const couldBeSame = (a, b) => titleSimilarity(a.title, b.title) >= 0.5 && dateDistance(a, b) <= 3;
+export const couldBeSame = (a, b) => titleSimilarity(a.title, b.title) >= 0.5 && dateDistance(a, b) <= 3 && !differentTowns(a, b);

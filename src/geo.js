@@ -117,6 +117,22 @@ export function parseLocation(text, cityHint) {
   return { name, street, postcode, city: city || cityHint || undefined, district };
 }
 
+const townCache = new Map();
+/**
+ * The town a location is in, only when it's a known town ("Štátna filharmónia Košice, Dom umenia" →
+ * Košice); undefined when unsure or when it names several. For telling events apart, so it never
+ * guesses.
+ */
+export function knownTown(text) {
+  if (!text) return undefined;
+  if (townCache.has(text)) return townCache.get(text);
+  const p = parseLocation(text);
+  const town = p.multi ? undefined : TOWNS.has(fold(p.city)) ? TOWNS.get(fold(p.city)) : townIn(text);
+  if (townCache.size > 20000) townCache.clear();
+  townCache.set(text, town);
+  return town;
+}
+
 /** Cache key for a place: its street (or name) and city, so spelling variants share one lookup. */
 export function venueKey(text, cityHint) {
   const p = parseLocation(text, cityHint);
@@ -161,37 +177,46 @@ const nameWords = (s) => fold(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3
  * finds a hall of that name in Bratislava. The hit's own name must share a word with the venue's,
  * and its address must be in the town we expect.
  */
-function plausible(hit, p) {
+function plausible(hit, p, { town = true, name = true } = {}) {
   const label = fold(hit.label);
-  if (p.city && TOWNS.has(fold(p.city)) && !label.includes(fold(p.city))) return false;
+  if (town && p.city && TOWNS.has(fold(p.city)) && !label.includes(fold(p.city))) return false;
+  if (!name) return true;
   const words = nameWords(p.name || '');
   if (!words.length || hit.area) return true;
   const own = fold(hit.label.split(',')[0]);
   return words.some((w) => own.includes(w));
 }
 
+// How a hit is checked: the town and the venue's name, the town only, or (when the town is only
+// the site's guess) the name only.
+const CHECKS = { venue: {}, town: { name: false }, name: { town: false } };
+
 /** Look one place up: street address, then venue name, then the city. */
 async function geocode(text, cityHint) {
   const p = parseLocation(text, cityHint);
   if (p.multi) return null;
   const city = p.city;
-  const tries = []; // [precision, query, check the hit against the venue name?]
+  // The town came from the site, not from the location: the location may name another place
+  // ("Stará Hora - Sebechleby" on a site about Banská Bystrica).
+  const hinted = Boolean(city) && !parseLocation(text).city;
+  const tries = []; // [precision, query, check (see CHECKS; none: any hit)]
   if (p.street && city) {
-    tries.push(['address', { street: p.street, city, ...(p.postcode && { postalcode: p.postcode }) }]);
-    if (p.postcode) tries.push(['address', { street: p.street, city }]); // postcodes are often wrong
+    tries.push(['address', { street: p.street, city, ...(p.postcode && { postalcode: p.postcode }) }, 'town']);
+    if (p.postcode) tries.push(['address', { street: p.street, city }, 'town']); // postcodes are often wrong
   } else if (p.street && p.postcode) {
     tries.push(['address', { q: `${p.street}, ${p.postcode}` }]);
   }
-  if (p.name) tries.push(['venue', { q: [p.name, city].filter(Boolean).join(', ') }, true]);
+  if (p.name) tries.push(['venue', { q: [p.name, city].filter(Boolean).join(', ') }, 'venue']);
+  if (p.name && hinted) tries.push(['venue', { q: p.name }, 'name']);
   // A location that's only a name ("Výmenník Važecká Košice") may be a venue or a city: ask as is;
   // last of all, the town itself (the map then shows the town centre, marked as approximate).
   if (city) {
-    if (fold(text) !== fold(city)) tries.push(['venue', { q: text }, true]);
+    if (fold(text) !== fold(city)) tries.push(['venue', { q: text }, 'venue']);
     tries.push(['city', { q: [p.district, city].filter(Boolean).join(', ') }]);
   }
   for (const [kind, params, check] of tries) {
     const hit = await nominatim(params);
-    if (!hit || (check && !plausible(hit, p))) continue;
+    if (!hit || (check && !plausible(hit, p, CHECKS[check]))) continue;
     // Precision from what OpenStreetMap found: a town or district only gives the area's centre
     // (and asking for just the town counts as that, even if the best hit is a building named after it).
     return { ...hit, precision: hit.area || kind === 'city' ? 'city' : kind };
@@ -212,6 +237,12 @@ function venueFor(state, ev) {
 /** Coordinates written on the event's pages (schema.org geo), if any source had them. */
 function pageGeo(ev) {
   return ev.sources?.find((s) => Number.isFinite(s.geo?.lat) && Number.isFinite(s.geo?.lon))?.geo;
+}
+
+/** A cached lookup whose address isn't in the town its location names. */
+function outOfTown(v) {
+  const city = parseLocation(v.text).city;
+  return Boolean(city && TOWNS.has(fold(city)) && v.label && !fold(v.label).includes(fold(city)));
 }
 
 /**
@@ -255,7 +286,8 @@ export async function locateEvents(state, today, budget, report) {
     if (pageGeo(ev)) continue;
     const [key, v] = venueFor(state, ev);
     if (!key) continue;
-    const due = !v || (v.status === 'not_found' && Date.now() - Date.parse(v.checkedAt) > RETRY_NOT_FOUND);
+    const due = !v || (v.status === 'not_found' && Date.now() - Date.parse(v.checkedAt) > RETRY_NOT_FOUND)
+      || (v.status === 'ok' && v.precision !== 'page' && outOfTown(v)); // found before lookups checked the town
     if (!due) continue;
     const t = todo.get(key) || { text: ev.location, hint: cityHint(state, ev), events: 0 };
     t.events++;

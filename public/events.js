@@ -19,7 +19,7 @@ const sameTitle = (a, b) => (a || '').trim().toLowerCase() === (b || '').trim().
 const isRunDay = (r, p) => r !== p && !r.linked && r.start && r.site === p.site && sameTitle(r.title, p.title);
 
 function sourcesTable(e) {
-  const all = e.sources || [];
+  const all = (e.sources || []).map((r) => ({ title: e.title, ...r })); // the server leaves out titles equal to the event's
   if (!all.length) return '';
   const p = all[0];
   const days = new Set(all.filter((r) => r === p || isRunDay(r, p)).map((r) => r.start)).size;
@@ -159,9 +159,17 @@ function renderEvents() {
     : dayFmt.format(new Date(`${d}T12:00`));
   const shortFmt = new Intl.DateTimeFormat('sk-SK', { day: 'numeric', month: 'numeric' });
   const dayAgo = Date.now() - 864e5;
+  // Events that started before the range (exhibitions, runs) come after the day's own, ending soonest first.
+  const byTime = (a, b) => (a.time || '99').localeCompare(b.time || '99');
+  const ordered = (d) => {
+    const all = byDay.get(d);
+    const running = all.filter((e) => e.start < d).sort((a, b) => (a.end || a.start).localeCompare(b.end || b.start) || byTime(a, b));
+    return [...all.filter((e) => e.start >= d).sort(byTime), ...running];
+  };
   $('#list').innerHTML = days.length ? days.map((d) => `
     <h4 class="day">${esc(dayLabel(d))}</h4>
-    ${byDay.get(d).sort((a, b) => (a.time || '99').localeCompare(b.time || '99')).map((e) => `
+    ${ordered(d).map((e, i, list) => `
+      ${e.start < d && !(list[i - 1]?.start < d) ? '<h5 class="running">Still running</h5>' : ''}
       <article class="event">
         ${timeCell(e, d)}
         <div>
@@ -170,7 +178,7 @@ function renderEvents() {
           ${(e.tags || []).map((t) => tagChip(e, t)).join('')}
           <div class="meta">
             ${e.end && e.end !== e.start ? `until ${esc(shortFmt.format(new Date(`${e.end}T12:00`)))} · ` : ''}
-            ${e.schedule?.length > 1 ? `${e.schedule.map((x) => esc(`${weekday.format(new Date(`${x.date}T12:00`))} ${[x.time, x.endTime].filter(Boolean).join('–')}`)).join(', ')} · ` : ''}
+            ${e.schedule?.length > 1 && new Set(e.schedule.map((x) => `${x.time}–${x.endTime}`)).size > 1 ? `${e.schedule.map((x) => esc(`${weekday.format(new Date(`${x.date}T12:00`))} ${[x.time, x.endTime].filter(Boolean).join('–')}`)).join(', ')} · ` : ''}
             ${e.location ? `${esc(e.location)} · ` : ''}via ${esc(host(e.source))}
           </div>
           ${e.description ? `<div class="desc">${esc(e.description)}</div>` : ''}

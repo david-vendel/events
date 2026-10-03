@@ -16,7 +16,8 @@ import dns from 'node:dns/promises';
 import * as cheerio from 'cheerio';
 import { fetchPage } from './fetcher.js';
 import {
-  PARSER_VERSION, applyRecipe, clean, extractLinks, makeEvent, isSocial, jsonLdEvents, pageSignals, scoreLink, simplifyHtml,
+  PARSER_VERSION, applyRecipe, clean, extractLinks, makeEvent, isSocial, jsonLdEvents, pageSignals, partialStructured, scoreLink,
+  simplifyHtml,
 } from './extract.js';
 import { checkDates } from './datecheck.js';
 import { useDateFormats } from './dates.js';
@@ -43,11 +44,14 @@ const MAX_FRONTIER = 5000;
 const SITEMAP_SITES_PER_CYCLE = 4;
 const RECHECK_PAGES = 12; // listing pages re-read per due source per cycle
 const TEMPLATE_DEAD_AFTER = 5; // visits of a template without any event before AI stops looking at it
+const EMPTY_READS_BEFORE_REST = 3; // a listing page empty this many reads in a row is read only now and then
+const EMPTY_LISTING_REST = 14 * DAY;
+const NOT_LISTING_FOR = 30 * DAY; // a page AI said lists no events isn't taken as a listing again for this long
 const CRASHES_BEFORE_GIVING_UP = 10;
 // Errors that mean "we can't reach the internet" rather than "this site is down".
 const NET_DOWN = /ENOTFOUND|EAI_AGAIN|ENETUNREACH|ENETDOWN|EHOSTUNREACH|UND_ERR_CONNECT_TIMEOUT|fetch failed/;
 const NET_FAILS_BEFORE_CHECK = 6; // network errors in a row before checking whether we're offline
-const SCORE_VERSION = 2; // bump when scoreLink() changes a lot: queued links get scored again // crawler bugs in one cycle (more than pages read) end the cycle
+const SCORE_VERSION = 3; // bump when scoreLink() changes a lot: queued links get scored again
 const TAG_BATCH = 40; // events per cheap-AI tagging call
 const TAG_BATCHES = 2; // tagging calls per cycle
 
@@ -192,6 +196,8 @@ function recordVisit(state, ctx, url, r) {
   if (r.status === 'unchanged') h.unchanged++;
   else h.ok++;
   h.events += r.events || 0; // upcoming events read
+  // How often a visit lately found something new (moving average; see hostBonus).
+  if (r.status === 'ok') h.newRate = 0.85 * (h.newRate ?? 0.5) + 0.15 * (r.added > 0 ? 1 : 0);
   if (r.events > 0) h.withEvents = (h.withEvents || 0) + 1;
   h.added += r.added || 0;
   h.linksQueued += r.links || 0;
@@ -375,6 +381,12 @@ async function readPage(state, url, ctx, job) {
   const links = extractLinks($, res.url);
 
   const events = jsonLdEvents($, res.url);
+  const structured = events.length;
+  const signals = pageSignals($);
+  // Some sites give structured data for only the first few items ("4 of 20 films today"): then the
+  // page is read like one without it, and the structured events are kept too.
+  const partial = events.length > 0 && partialStructured(events, links, res.url);
+  const unread = !events.length || partial;
   let recipeBroken = false;
   let how = events.length ? 'json-ld' : undefined;
   let aiCall = null;
@@ -390,34 +402,37 @@ async function readPage(state, url, ctx, job) {
   // sibling template of the same site (same depth): no AI needed here. A sibling's recipe that
   // works is kept for this template.
   const tpl = templateOf(state, url);
-  if (!events.length && !listing?.recipe && tpl.recipe) {
+  if (unread && !listing?.recipe && tpl.recipe) {
     const found = withTags(applyRecipe($, tpl.recipe, res.url), tpl.tags);
     events.push(...found);
-    if (found.length) how = 'template recipe';
+    if (found.length) how = partial ? 'json-ld + template recipe' : 'template recipe';
   }
-  if (!events.length && !listing?.recipe && !tpl.recipe) {
+  if (unread && !listing?.recipe && !tpl.recipe) {
     for (const sib of siblingRecipes(state, url)) {
       const found = applyRecipe($, sib.recipe, res.url);
       if (!found.length) continue;
       Object.assign(tpl, { recipe: sib.recipe, recipeFrom: sib.key });
       events.push(...found);
-      how = 'template recipe';
+      how = partial ? 'json-ld + template recipe' : 'template recipe';
       break;
     }
   }
 
-  const signals = pageSignals($);
   // The AI looks at one page per template a week, and not at templates that never have events
   // (listing pages it named itself and seeds are always worth a look).
   const tplAsked = Date.now() - Date.parse(tpl.aiAt || 0) < RELEARN_AFTER;
   const tplDead = tpl.visits >= TEMPLATE_DEAD_AFTER && !tpl.withEvents;
+  // Pages of this template carry structured data: one without any just has nothing listed yet
+  // (a cinema's programme for next week), and AI would find nothing either.
+  if (structured && !partial) tpl.structured = true;
   const wantsAi = aiAvailable('analyze')
     && (!listing?.recipe || recipeBroken)
     && (signals.looksLikeListing || ctx.seeds.has(url) || listing)
-    && events.length === 0
+    && (events.length === 0 || (partial && how === 'json-ld'))
     && ctx.budget.ai > 0
     && Date.now() - Date.parse(listing?.analyzedAt || 0) > RELEARN_AFTER
     && (listing || ctx.seeds.has(url) || !(tplAsked || tplDead))
+    && (!tpl.structured || partial)
     && source.kind !== 'irrelevant';
 
   if (wantsAi) {
@@ -439,9 +454,8 @@ async function readPage(state, url, ctx, job) {
       how = source.pages[url]?.recipe ? 'AI → recipe' : 'AI';
       if (tpl.recipe && how === 'AI → recipe') health.aiRecipes++;
     }
-  } else if (events.length >= 2 && source.kind !== 'irrelevant') {
-    // Several structured events without AI: treat this page as a listing worth re-checking.
-    // (A single event is usually a detail page; we keep the event but don't schedule the page.)
+  } else if (isListing(events, ctx.today) && source.kind !== 'irrelevant') {
+    // Several upcoming events without AI: treat this page as a listing worth re-checking.
     source.kind = 'events';
     source.pages[url] ??= {};
   }
@@ -450,14 +464,21 @@ async function readPage(state, url, ctx, job) {
     source.nextCheckAt = iso(Date.now() + source.intervalHours * HOUR);
   }
   // How this listing page was read last time, for the Sources tab ("json-ld · 19 events").
-  if (source.pages[url]) {
-    source.pages[url].lastRead = { how: how || 'nothing found', events: events.length, at: iso(Date.now()) };
-    source.pages[url].parsedWith = PARSER_VERSION;
+  // Only upcoming events count: a page full of past events (an archive) is not a good page.
+  const upcoming = events.filter((e) => (e.end || e.start) >= ctx.today);
+  const page = source.pages[url];
+  if (page) {
+    page.lastRead = { how: how || 'nothing found', events: events.length, at: iso(Date.now()) };
+    page.parsedWith = PARSER_VERSION;
+    page.emptyReads = upcoming.length ? 0 : (page.emptyReads || 0) + 1;
+    // A "listing" that is one event's own page (with its past dates, or "more events" alongside) is
+    // read through that event's verification instead. (Events without their own link get the page's,
+    // so a listing of those has many such events, not one.)
+    const own = upcoming.filter((e) => urlKey(e.url) === urlKey(res.url)).length;
+    if (!page.recipe && !page.analyzedAt && own === 1) delete source.pages[url];
   }
   // A listing whose heading names one kind ("Program kina CINEMAX") gives that tag to all its events.
   if (events.length >= 2) withTags(events, headingTags(`${$('title').first().text()} ${$('h1').first().text()}`));
-  // Only upcoming events count: a page full of past events (an archive) is not a good page.
-  const upcoming = events.filter((e) => (e.end || e.start) >= ctx.today);
   const added = upsertEvents(state, upcoming, source, ctx);
   const queued = harvestLinks(state, links, source, res.url, ctx, upcoming.length);
   cache.readAt = iso(Date.now());
@@ -508,7 +529,10 @@ function learnFromAnalysis(state, source, url, a, $, pageUrl, events, report, tp
       const ev = makeEvent({ ...e, url: e.url || undefined, tags: [...new Set([...(e.tags || []), ...(listing.tags || [])])] }, pageUrl);
       if (ev) events.push(ev);
     }
-    if (!a.pageListsEvents) delete source.pages[url];
+    if (!a.pageListsEvents) {
+      delete source.pages[url];
+      (source.notListings ??= {})[url] = iso(Date.now());
+    }
   }
   if (listing.tags) said.push(`every event here: ${listing.tags.join(', ')}`);
   if (source.venue && a.venue?.name) said.push(`venue: ${source.venue}`);
@@ -516,7 +540,7 @@ function learnFromAnalysis(state, source, url, a, $, pageUrl, events, report, tp
   if (a.publishesEvents) {
     for (const u of a.eventListUrls.slice(0, 5)) {
       try {
-        if (originOf(u) !== source.origin) continue;
+        if (originOf(u) !== source.origin || notListing(source, u)) continue;
         source.pages[u] ??= {};
         addToFrontier(state, u, 8, url);
       } catch {}
@@ -531,6 +555,17 @@ function withTags(events, tags) {
   if (tags?.length) for (const ev of events) ev.tags = [...new Set([...(ev.tags || []), ...tags])];
   return events;
 }
+
+/** Several different upcoming events: a listing (one event's page may also show its past dates). */
+function isListing(events, today) {
+  return new Set(events.filter((e) => (e.end || e.start) >= today).map((e) => e.title)).size >= 2;
+}
+
+/** AI said recently that this page lists no events. */
+const notListing = (source, url) => Date.now() - Date.parse(source.notListings?.[url] || 0) < NOT_LISTING_FOR;
+
+/** A listing page that has been empty for several reads is read again only every couple of weeks. */
+const resting = (p) => p.emptyReads >= EMPTY_READS_BEFORE_REST && Date.now() - Date.parse(p.lastRead?.at || 0) < EMPTY_LISTING_REST;
 
 // "Next page" links of a listing: rel=next style anchor texts, or a page number in the URL.
 const NEXT_TEXT = /^(›|»|>|→|ďalš(ia|ie)|nasledujúc[aie]|next|older|staršie|viac|zobraziť viac|načítať viac)\b/i;
@@ -723,7 +758,7 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
       // The listing pages read longest ago first, so a site with many (one per town and kind of
       // event) gets all of them re-read over a few checks.
       const pages = Object.entries(source.pages)
-        .filter(([, p]) => !(p.failures >= 5)) // dead listing page
+        .filter(([, p]) => !(p.failures >= 5) && !resting(p)) // dead, or empty for a while
         .sort((a, b) => (a[1].lastRead?.at || '').localeCompare(b[1].lastRead?.at || ''))
         .slice(0, RECHECK_PAGES);
       for (const [url] of pages) {

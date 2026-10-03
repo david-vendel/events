@@ -76,6 +76,20 @@ export async function fetchText(url, maxBytes = 30_000_000) {
 }
 
 /**
+ * Page bytes as text, in the charset the server or the page declares (older Slovak sites use
+ * windows-1250 and say so only in a <meta> tag); UTF-8 otherwise.
+ */
+export function decodeHtml(buf, contentType = '') {
+  const label = contentType?.match(/charset=["']?([\w-]+)/i)?.[1]
+    || buf.subarray(0, 4096).toString('latin1').match(/<meta[^>]+charset=["']?([\w-]+)/i)?.[1];
+  try {
+    return new TextDecoder(label || 'utf-8').decode(buf);
+  } catch {
+    return new TextDecoder('utf-8').decode(buf); // unknown label
+  }
+}
+
+/**
  * Fetch a URL. Returns { status, url, html, hash, changed } or { status, error }.
  * `cache` is the stored record for this URL (from state.pages), updated in place.
  * `ignoreRobots` is only for sources the user explicitly opted into (see corroborate.js).
@@ -103,7 +117,7 @@ export async function fetchPage(url, cache = {}, { ignoreRobots = false } = {}) 
     return { status: res.status, error: 'not html' };
   }
 
-  const html = (await res.text()).slice(0, MAX_BYTES);
+  const html = decodeHtml(Buffer.from(await res.arrayBuffer()), res.headers.get('content-type')).slice(0, MAX_BYTES);
   // Hash only the visible text: scripts and attributes often carry per-request
   // nonces/timestamps that would make every fetch look like a change.
   const hash = sha1(
