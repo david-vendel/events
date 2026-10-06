@@ -208,3 +208,9 @@ select#city { padding: 8px 10px; border: 1px solid var(--line); border-radius: 1
 .pop li { padding: 4px 0; border-top: 1px solid #e4e2dc; }
 .pop li b { font-variant-numeric: tabular-nums; }
 .pop .warn { color: #8a5a00; font-size: 12px; margin-bottom: 6px; }
+.info-btn { width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--info); background: var(--info-bg); color: var(--info);
+  font: italic 600 12px/16px Georgia, serif; padding: 0; margin-left: 4px; cursor: pointer; vertical-align: 1px; }
+.info-btn[aria-expanded="true"] { background: var(--info); color: var(--bg); }
+.help { grid-column: 1 / -1; max-width: 640px; font-size: 13px; line-height: 1.5; background: var(--info-bg); border-radius: 8px; padding: 4px 14px; }
+.help p, .help ol { margin: 8px 0; }
+.help ol { padding-left: 20px; }

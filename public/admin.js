@@ -6,6 +6,7 @@ const PHASE_TAG = { recheck: 'info', verify: 'warn', explore: '', discover: 'inf
 let snap = null;
 let tab = 'overview';
 let tabData = null; // data for queue/sources/ai tabs
+const openHelp = new Set(); // settings whose explanation is open
 let selectedAi = null; // id of the AI call whose details are open
 let openSource = null; // origin whose pages are expanded
 let openDomain = null; // domain whose subdomains are expanded
@@ -575,10 +576,66 @@ async function showAiDetail(id) {
   box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+// What each setting does, how and why: shown under the field when its ⓘ is pressed.
+const SETTING_HELP = {
+  cycle: `<p>The crawler works in <b>cycles</b>. <b>Start</b> runs one, waits, runs the next, until you press Stop
+      (<b>Run once</b> runs a single cycle). Each cycle goes through these steps in order:</p>
+    <ol>
+      <li><b>Re-check sources</b>: event sources that are due get their listing pages read again (up to 12 per source,
+        the ones read longest ago first). A source that keeps giving new events is checked more often, one that doesn't
+        less often (every 12 hours to 7 days).</li>
+      <li><b>Verify events</b>: upcoming events re-read their own page and the Facebook / ticket pages they link to.</li>
+      <li><b>AI discovery</b>: every 6 hours, one AI web search for new event sites.</li>
+      <li><b>Sitemaps</b>: up to 4 sites that have events get their sitemap read, to find event pages no listing links to.</li>
+      <li><b>Explore</b>: whatever page budget is left goes to the queue of links found so far, best-scoring first.</li>
+      <li><b>Check dates</b>, <b>tag</b> and <b>locate</b> the events, so the ones found this cycle are finished this cycle.</li>
+    </ol>
+    <p>The numbers below are the limits for one cycle. A cycle ends when its work is done or its budget is spent,
+      whichever comes first. Changes are saved for good and apply from the next cycle (parallel pages: right away).</p>`,
+  concurrency: `<p><b>What:</b> how many pages are fetched at the same time (1–50, default 5).</p>
+    <p><b>How:</b> a pool of workers; each takes the next page as soon as it's free. Changing it takes effect within half a
+      second, even in the middle of a cycle.</p>
+    <p><b>Why it doesn't hammer sites:</b> every site still gets at most one request every 2 seconds, however many workers
+      there are, and robots.txt is obeyed. More workers help when the work is spread over many sites; on one big site
+      they just wait their turn. AI calls also run strictly one at a time, so more workers don't mean more AI.</p>
+    <p><b>Raise it</b> to finish cycles faster; <b>lower it</b> if the server is slow or short on memory or network.</p>`,
+  pagesPerCycle: `<p><b>What:</b> the most pages one cycle may fetch (1–2000, default 60). This is the main size of a cycle.</p>
+    <p><b>Counts:</b> listing pages re-checked, sitemap files, and pages explored from the queue. Re-checking known sources
+      goes first, then sitemaps, then exploring gets what's left, so with a small number new sites are found slowly.</p>
+    <p><b>Doesn't count:</b> the pages read to verify events (they have their own limit below) and robots.txt.</p>
+    <p><b>Why a limit:</b> it keeps each cycle short and predictable, and spreads the crawling out over time. A page that hasn't
+      changed since last time (same ETag or content) still counts as fetched but is processed in no time.</p>`,
+  aiPerCycle: `<p><b>What:</b> the most calls to the bigger AI model in one cycle (0–100, default 5). 0 means no such calls.</p>
+    <p><b>Used by:</b> reading a page the crawler can't parse on its own, to learn a <i>recipe</i> for it (after which pages
+      like it are read without AI); the discovery web search; and checking date formats and schedules written as text
+      (at most 2 calls a cycle).</p>
+    <p><b>Not counted:</b> the cheap pre-check that first asks whether a page lists events at all (up to 60 a cycle) and
+      tagging events (2 calls of 40 events a cycle). Switch those off in the AI tab if you want none.</p>
+    <p><b>Why a limit:</b> AI calls use your Claude plan and take tens of seconds each. The crawler also holds back by itself:
+      one look per site per cycle, one per page template per week, and none at sites where AI found nothing 3 times.
+      The AI tab shows every call, what it cost and what came of it.</p>`,
+  verifyPerCycle: `<p><b>What:</b> how many upcoming events get re-checked in one cycle (0–500, default 15).</p>
+    <p><b>How:</b> an event is due when it was last checked more than 3 days ago; the soonest events go first. Its own detail
+      page is read again (dates and times may have changed, a schedule may have appeared) and the Facebook and
+      ticket-shop pages it links to (up to 4) are checked to confirm the date. Events whose site is down wait until it's back.</p>
+    <p><b>Why:</b> listings often show only a title and a day; the detail and ticket pages confirm it and add the time,
+      which is what the public site shows as sources. These fetches don't count towards <i>Pages per cycle</i>.</p>
+    <p><b>Raise it</b> if many events show as unconfirmed; 0 switches verifying off.</p>`,
+  cycleEveryMin: `<p><b>What:</b> how long to wait after a cycle ends before the next one starts (1–1440 minutes, default 60).</p>
+    <p><b>How:</b> the wait is counted from the end of a cycle, so a long cycle doesn't make the next one start right away.
+      A new value applies from the next wait; to skip the current wait press <b>Start next cycle now</b>.</p>
+    <p><b>Why not shorter:</b> sources decide themselves when they are due (every 12 hours to 7 days), so cycles more often
+      than that mostly explore the queue. Shorter = new sites found sooner, but more requests and more AI use per day.</p>`,
+};
+
 function settingsTab() {
   const s = snap.settings;
-  const field = (key, label) => `<label for="set-${key}">${label}</label><input id="set-${key}" type="number" min="0" value="${s[key]}">`;
-  return `<div class="form">
+  const info = (key) => `<button class="info-btn" data-help="${key}" aria-expanded="${openHelp.has(key)}" title="What this does">i</button>`;
+  const help = (key) => `<div class="help" data-help-box="${key}"${openHelp.has(key) ? '' : ' hidden'}>${SETTING_HELP[key]}</div>`;
+  const field = (key, label) => `<label for="set-${key}">${label} ${info(key)}</label>
+    <input id="set-${key}" type="number" min="0" value="${s[key]}">${help(key)}`;
+  return `<p class="muted">How a crawl cycle works ${info('cycle')}</p>${help('cycle')}
+    <div class="form">
       ${field('concurrency', 'Parallel pages')}
       ${field('pagesPerCycle', 'Pages per cycle')}
       ${field('aiPerCycle', 'AI calls per cycle')}
@@ -664,6 +721,14 @@ $('#tab').onclick = (e) => {
   if (src) {
     openSource = openSource === src.dataset.origin ? null : src.dataset.origin;
     renderTab();
+  }
+  const helpBtn = e.target.closest('[data-help]');
+  if (helpBtn) {
+    const key = helpBtn.dataset.help;
+    if (openHelp.has(key)) openHelp.delete(key); else openHelp.add(key);
+    $(`[data-help-box="${key}"]`).hidden = !openHelp.has(key);
+    helpBtn.setAttribute('aria-expanded', openHelp.has(key));
+    return;
   }
   if (e.target.id === 'save-settings') {
     const patch = {};
