@@ -352,5 +352,9 @@ async function loadEvents() {
 }
 document.querySelectorAll('#views button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.view === view));
 loadEvents();
-// The admin page reloads when the crawler finds events (admin.js); the public page checks now and then.
-if (!$('#admin')) setInterval(loadEvents, 5 * 60e3);
+// The admin page reloads when the crawler finds events (admin.js); the public page checks every
+// minute while it's visible, and right away when you come back to the tab.
+if (!$('#admin')) {
+  setInterval(() => { if (!document.hidden) loadEvents(); }, 60e3);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) loadEvents(); });
+}
