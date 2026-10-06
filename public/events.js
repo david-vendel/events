@@ -334,7 +334,7 @@ $('#q').addEventListener('input', renderEvents);
 
 async function loadEvents() {
   try {
-    const [ev, sources] = await Promise.all([getJson('/api/events'), getJson('/api/sources')]);
+    const [ev, sources] = await Promise.all([getJson('api/events'), getJson('api/sources')]);
     const live = sources.filter((s) => s.kind === 'events');
     events = ev;
     const towns = new Set(ev.map((e) => e.city).filter(Boolean)).size;

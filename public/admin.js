@@ -52,12 +52,12 @@ function renderHeader() {
     <div class="track"><div style="width:${total ? Math.min(100, (used / total) * 100) : 0}%"></div></div></div>`).join('');
 }
 
-$('#start').onclick = () => postJson('/api/start').then(apply);
-$('#once').onclick = () => postJson('/api/run-once').then(apply);
-$('#stop').onclick = () => postJson('/api/stop').then(apply);
+$('#start').onclick = () => postJson('api/start').then(apply);
+$('#once').onclick = () => postJson('api/run-once').then(apply);
+$('#stop').onclick = () => postJson('api/stop').then(apply);
 $('#workers').onclick = (e) => {
   const n = e.target.closest('button')?.dataset.n;
-  if (n) postJson('/api/settings', { concurrency: Number(n) }).then(apply);
+  if (n) postJson('api/settings', { concurrency: Number(n) }).then(apply);
 };
 
 // ---------------------------------------------------------------- tabs
@@ -542,7 +542,7 @@ async function showAiDetail(id) {
     return;
   }
   box.innerHTML = '<div class="detail muted">Loading…</div>';
-  const c = await getJson(`/api/ai/${id}`);
+  const c = await getJson(`api/ai/${id}`);
   const u = c.usage || {};
   box.innerHTML = `<div class="detail">
     <dl>
@@ -592,7 +592,7 @@ function settingsTab() {
 }
 
 const TABS = { overview, queue: queueTab, templates: templatesTab, sources: sourcesTab, domains: domainsTab, ai: aiTab, settings: settingsTab };
-const TAB_DATA = { queue: '/api/queue', templates: '/api/patterns', sources: '/api/sources', domains: '/api/domains', ai: '/api/ai' };
+const TAB_DATA = { queue: 'api/queue', templates: 'api/patterns', sources: 'api/sources', domains: 'api/domains', ai: 'api/ai' };
 
 function renderTab() {
   if (!snap) return;
@@ -638,7 +638,7 @@ $('#tab').onclick = (e) => {
   }
   if (e.target.closest('[data-plan-refresh]')) {
     e.target.textContent = 'Checking…';
-    return postJson('/api/plan').then((s) => { apply(s); renderTab(); });
+    return postJson('api/plan').then((s) => { apply(s); renderTab(); });
   }
   const filter = e.target.closest('[data-aifilter]');
   if (filter) {
@@ -671,7 +671,7 @@ $('#tab').onclick = (e) => {
       const input = $(`#set-${key}`);
       if (input) patch[key] = Number(input.value);
     }
-    postJson('/api/settings', patch).then((s) => { apply(s); $('#saved').textContent = 'Saved.'; });
+    postJson('api/settings', patch).then((s) => { apply(s); $('#saved').textContent = 'Saved.'; });
   }
 };
 
@@ -682,7 +682,7 @@ $('#tab').addEventListener('change', (e) => {
   if (t.matches('[data-ai-master]')) ai = { enabled: t.checked };
   else if (t.dataset.aiJob) ai = { jobs: { [t.dataset.aiJob]: { on: t.checked } } };
   else if (t.dataset.aiModel) ai = { jobs: { [t.dataset.aiModel]: { model: t.value } } };
-  if (ai) postJson('/api/settings', { ai }).then((s) => { apply(s); renderTab(); });
+  if (ai) postJson('api/settings', { ai }).then((s) => { apply(s); renderTab(); });
 });
 
 // ---------------------------------------------------------------- live updates
@@ -705,7 +705,7 @@ function apply(s) {
 }
 
 function connect() {
-  const es = new EventSource('/api/stream');
+  const es = new EventSource('api/stream');
   es.onmessage = (m) => apply(JSON.parse(m.data));
   es.onerror = () => {
     $('#state').className = 'pill stopping';
