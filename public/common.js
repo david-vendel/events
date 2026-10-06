@@ -5,8 +5,10 @@ const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0
 const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
-const getJson = (url) => fetch(url).then((r) => r.json());
-const postJson = (url, body) => fetch(url, {
+// API urls are relative ('api/…'). The admin page lives one level down (admin/) and says so in <html data-api>.
+const API_BASE = document.documentElement.dataset.api || '';
+const getJson = (url) => fetch(API_BASE + url).then((r) => r.json());
+const postJson = (url, body) => fetch(API_BASE + url, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
 }).then((r) => r.json());
 

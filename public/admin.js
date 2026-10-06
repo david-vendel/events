@@ -1,4 +1,4 @@
-// Left column: live crawler dashboard. Status arrives once a second over /api/stream;
+// Left column of the admin page: live crawler dashboard. Status arrives once a second over api/stream;
 // the Queue, Sources, Domains and AI tabs fetch their own data while open.
 const WORKER_PRESETS = [1, 2, 5, 10, 20];
 const PHASE_TAG = { recheck: 'info', verify: 'warn', explore: '', discover: 'info', tag: 'ai', locate: 'ok', sitemap: 'info' };
@@ -705,7 +705,7 @@ function apply(s) {
 }
 
 function connect() {
-  const es = new EventSource('api/stream');
+  const es = new EventSource(`${API_BASE}api/stream`);
   es.onmessage = (m) => apply(JSON.parse(m.data));
   es.onerror = () => {
     $('#state').className = 'pill stopping';

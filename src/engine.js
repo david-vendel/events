@@ -304,6 +304,11 @@ export class Engine {
       .sort((a, b) => (a.kind === b.kind ? (b.stats.events - a.stats.events) : a.kind === 'events' ? -1 : 1));
   }
 
+  /** For the public page: the sites events come from, without the crawler's notes about them. */
+  sites() {
+    return Object.values(this.state.sources).filter((x) => x.kind === 'events').map((x) => ({ origin: x.origin }));
+  }
+
   /**
    * Crawl activity grouped by domain, with each subdomain inside: visits (all time and this
    * cycle), errors, events found, pages known and links waiting in the queue.

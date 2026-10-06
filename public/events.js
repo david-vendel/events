@@ -1,5 +1,6 @@
-// Right column: upcoming events as a list (each with the table of sources that confirm it) or on a
-// map. Both views share the filters: dates, search, town and kind of event.
+// The public page (and the admin page's right column): upcoming events as a list (each with the table
+// of sources that confirm it) or on a map. Both views share the filters: dates, search, town and kind
+// of event.
 const shortDate = new Intl.DateTimeFormat('sk-SK', { day: 'numeric', month: 'numeric', year: 'numeric' });
 const fmtDate = (s) => s.start
   ? shortDate.format(new Date(`${s.start}T12:00`)) + (s.end && s.end !== s.start ? ` – ${shortDate.format(new Date(`${s.end}T12:00`))}` : '')
@@ -334,8 +335,7 @@ $('#q').addEventListener('input', renderEvents);
 
 async function loadEvents() {
   try {
-    const [ev, sources] = await Promise.all([getJson('api/events'), getJson('api/sources')]);
-    const live = sources.filter((s) => s.kind === 'events');
+    const [ev, live] = await Promise.all([getJson('api/events'), getJson('api/sites')]);
     events = ev;
     const towns = new Set(ev.map((e) => e.city).filter(Boolean)).size;
     const located = ev.filter((e) => e.place).length;
@@ -352,3 +352,5 @@ async function loadEvents() {
 }
 document.querySelectorAll('#views button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.view === view));
 loadEvents();
+// The admin page reloads when the crawler finds events (admin.js); the public page checks now and then.
+if (!$('#admin')) setInterval(loadEvents, 5 * 60e3);

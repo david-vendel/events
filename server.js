@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Serves the events website and the admin panel, and runs the crawler in-process.
+// Serves the events website (/) and the admin dashboard (/admin/), and runs the crawler in-process.
 //   node server.js [--port 3000]       (HOST=0.0.0.0 to listen beyond localhost)
 //   --start                            start crawling right away
 // The admin API has no authentication, so by default it only listens on localhost.
@@ -12,22 +12,40 @@ import { Engine } from './src/engine.js';
 const arg = (name) => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : undefined; };
 const port = Number(arg('port') || process.env.PORT || 3000);
 const host = process.env.HOST || '127.0.0.1';
-const PUBLIC = path.resolve('public');
+const STATIC = path.resolve('public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
 
 const engine = new Engine();
 if (process.argv.includes('--start')) engine.start();
 
 function json(req, res, body, status = 200) {
+  send(req, res, encode(body), status);
+}
+
+// The events list is large; browsers all accept gzip.
+function encode(body) {
   const text = JSON.stringify(body);
-  // The events list is large; browsers all accept gzip.
-  if (text.length > 10_000 && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+  return { text, gzip: text.length > 10_000 ? zlib.gzipSync(text) : null };
+}
+
+function send(req, res, { text, gzip }, status = 200) {
+  if (gzip && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' });
-    res.end(zlib.gzipSync(text));
+    res.end(gzip);
     return;
   }
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(text);
+}
+
+// What the public page reads is built at most every 30 s, however many people open it.
+const PUBLIC = { 'GET /api/events': () => engine.events(), 'GET /api/sites': () => engine.sites() };
+const PUBLIC_CACHE_MS = 30_000;
+const publicCache = new Map();
+function publicJson(key) {
+  let c = publicCache.get(key);
+  if (!c || Date.now() - c.at > PUBLIC_CACHE_MS) publicCache.set(key, (c = { at: Date.now(), ...encode(PUBLIC[key]()) }));
+  return c;
 }
 
 async function readBody(req) {
@@ -44,8 +62,8 @@ setInterval(() => {
   for (const res of streams) res.write(data);
 }, 1000).unref();
 
+// Admin API. Behind a proxy, only the PUBLIC routes above should be reachable without a login.
 const routes = {
-  'GET /api/events': () => engine.events(),
   'GET /api/sources': () => engine.sources(),
   'GET /api/status': () => engine.snapshot(),
   'GET /api/queue': () => engine.queue(),
@@ -74,13 +92,21 @@ http.createServer(async (req, res) => {
     const call = engine.aiCall(aiDetail[1]);
     return call ? json(req, res, call) : json(req, res, { error: 'not found' }, 404);
   }
+  if (PUBLIC[`${req.method} ${pathname}`]) return send(req, res, publicJson(`${req.method} ${pathname}`));
   const route = routes[`${req.method} ${pathname}`];
   if (route) return json(req, res, await route(req.method === 'POST' ? await readBody(req) : undefined));
 
-  const file = path.join(PUBLIC, pathname === '/' ? 'index.html' : pathname);
-  if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+  // The website at /, the admin dashboard at /admin/ (index.html in each folder).
+  let file = path.join(STATIC, pathname);
+  if (!file.startsWith(STATIC) || !fs.existsSync(file)) {
     res.writeHead(404).end('Not found');
     return;
+  }
+  if (fs.statSync(file).isDirectory()) {
+    // Relative, so it also works behind a proxy that serves us under a path (/events/admin → /events/admin/).
+    if (!pathname.endsWith('/')) return res.writeHead(301, { Location: `${path.basename(pathname)}/` }).end();
+    file = path.join(file, 'index.html');
+    if (!fs.existsSync(file)) return res.writeHead(404).end('Not found');
   }
   res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
   fs.createReadStream(file).pipe(res);

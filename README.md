@@ -10,7 +10,7 @@ Requires Node 18+.
 ```sh
 npm install
 claude                         # log in to Claude Code once, if you haven't (AI uses it)
-npm run serve                  # website + admin panel on http://localhost:3000
+npm run serve                  # website on http://localhost:3000, admin on /admin/
 npm run dev                    # same, but restarts the server when its code changes
 ```
 
@@ -18,7 +18,8 @@ npm run dev                    # same, but restarts the server when its code cha
 changes. A restart stops a crawl that is running. Files in `public/` are read on every request,
 so after you edit them you only need to reload the page. Changes to `data/` never cause a restart.
 
-The page has two halves. The **right** half lists the events. The **left** half is the admin panel
+There are two pages. `/` is the public website: the events, as a list or a map. `/admin/` is the
+admin dashboard. Its **right** half is the same events list, and its **left** half is the admin panel
 that controls the crawler, which runs inside the server:
 
 - **Start / Run once / Stop.** Start repeats cycles every *N* minutes (see Settings). Stop lets the
@@ -37,7 +38,9 @@ that controls the crawler, which runs inside the server:
   returned), and *Settings*.
 
 The admin API has no login, so the server listens only on localhost unless you set
-`HOST=0.0.0.0`. Add authentication before you put it on the internet. `node server.js --start`
+`HOST=0.0.0.0`. To put it on the internet, use a proxy that leaves only the public page's files and
+`GET /api/events` and `GET /api/sites` open and asks for a password for `/admin/` and every other
+`/api/` route. Those two public answers are rebuilt at most every 30 seconds. `node server.js --start`
 starts crawling right away.
 
 Without the server: `npm run crawl` runs one cycle in the terminal and `npm run watch` keeps
@@ -173,7 +176,7 @@ clear. Every upcoming event gets `place: { lat, lon, precision, name, address, k
 
 ### The website: list and map
 
-The right half lists upcoming events by day, or shows them on a **map** (List / Map at the top;
+The website lists upcoming events by day, or shows them on a **map** (List / Map at the top;
 `?view=map` opens the map directly). Both use the same filters: dates, search, **town** (towns with
 events, most first) and kind of event. The map ([public/events.js](public/events.js)) uses
 [Leaflet](https://leafletjs.com) with OpenStreetMap tiles, loaded only when the map is opened. Each
