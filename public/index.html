@@ -12,31 +12,50 @@
     <div class="titlebar">
       <h2 class="title">What's on in Slovakia</h2>
       <div class="chips views" id="views" role="group" aria-label="View">
+        <button data-view="admin">Admin</button>
         <button data-view="list" aria-pressed="true">List</button>
         <button data-view="map">Map</button>
       </div>
     </div>
     <p class="sub" id="summary">Loading…</p>
-    <div class="controls">
-      <input type="search" id="q" placeholder="Search events, places…" aria-label="Search">
-      <select id="city" aria-label="Town"><option value="">All towns</option></select>
-      <div class="chips" id="ranges">
-        <button data-range="today">Today</button>
-        <button data-range="weekend">Weekend</button>
-        <button data-range="week" aria-pressed="true">7 days</button>
-        <button data-range="all">All</button>
+    <!-- Admin view: the crawler dashboard, read only (admin.js; api/ro/). -->
+    <div id="adminview" hidden>
+      <div class="bar"><span class="pill" id="state">…</span> <span class="muted">Crawler, read only</span></div>
+      <div class="phase" id="phase"></div>
+      <div class="progress" id="progress"></div>
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-tab="overview">Overview</button>
+        <button role="tab" data-tab="queue">Queue</button>
+        <button role="tab" data-tab="sources">Sources</button>
+        <button role="tab" data-tab="domains">Domains</button>
+        <button role="tab" data-tab="coverage" aria-selected="true">Coverage</button>
+        <button role="tab" data-tab="ai">AI</button>
+      </nav>
+      <div id="tab"></div>
+    </div>
+    <div id="eventsview">
+      <div class="controls">
+        <input type="search" id="q" placeholder="Search events, places…" aria-label="Search">
+        <select id="city" aria-label="Town"><option value="">All towns</option></select>
+        <div class="chips" id="ranges">
+          <button data-range="today">Today</button>
+          <button data-range="weekend">Weekend</button>
+          <button data-range="week" aria-pressed="true">7 days</button>
+          <button data-range="all">All</button>
+        </div>
       </div>
+      <div class="tagfilter" id="tags" aria-label="Filter by kind of event"></div>
+      <div id="mapview" hidden>
+        <div class="mapbar"><span class="muted" id="mapnote"></span><button class="btn" id="fit">Zoom to events</button></div>
+        <div id="map" role="region" aria-label="Map of events"></div>
+      </div>
+      <div id="list"></div>
     </div>
-    <div class="tagfilter" id="tags" aria-label="Filter by kind of event"></div>
-    <div id="mapview" hidden>
-      <div class="mapbar"><span class="muted" id="mapnote"></span><button class="btn" id="fit">Zoom to events</button></div>
-      <div id="map" role="region" aria-label="Map of events"></div>
-    </div>
-    <div id="list"></div>
     <footer id="footer"></footer>
   </section>
 </div>
 <script src="common.js"></script>
 <script src="events.js"></script>
+<script src="admin.js"></script>
 </body>
 </html>

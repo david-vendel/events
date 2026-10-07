@@ -232,6 +232,7 @@ select#city { padding: 8px 10px; border: 1px solid var(--line); border-radius: 1
 @media (max-width: 600px) { .treemap { height: 340px; } }
 .tm-group, .tm-leaf { position: absolute; border-radius: 4px; cursor: pointer; overflow: hidden; }
 .tm-group { background: var(--panel); }
+a.tm-group, a.tm-leaf { color: inherit; text-decoration: none; }
 .tm-group:hover { outline: 2px solid var(--text); outline-offset: -2px; }
 .tm-leaf:hover { filter: brightness(1.12); }
 .tm-head { font-size: 12px; font-weight: 600; padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }

@@ -1,10 +1,14 @@
 // Left column of the admin page: live crawler dashboard. Status arrives once a second over api/stream;
 // the Queue, Sources, Domains and AI tabs fetch their own data while open.
+// The public page has the same dashboard, read only, as its Admin view (#adminview): no controls, no
+// Templates or Settings tab, no AI switches or plan; it polls the cached copies at api/ro/ while the view is open.
+const READONLY = !!$('#adminview');
+const API = READONLY ? 'api/ro/' : 'api/';
 const WORKER_PRESETS = [1, 2, 5, 10, 20];
 const PHASE_TAG = { learn: 'ai', recheck: 'info', verify: 'warn', explore: '', discover: 'info', tag: 'ai', locate: 'ok', sitemap: 'info' };
 
 let snap = null;
-let tab = 'overview';
+let tab = READONLY ? 'coverage' : 'overview';
 let tabData = null; // data for queue/sources/ai tabs
 const openHelp = new Set(); // settings whose explanation is open
 let selectedAi = null; // id of the AI call whose details are open
@@ -24,19 +28,7 @@ function renderHeader() {
   pill.className = `pill ${state}`;
   pill.textContent = state;
 
-  $('#start').disabled = s.running && !waiting;
-  $('#start').textContent = waiting ? 'Start next cycle now' : 'Start';
-  $('#once').disabled = s.running;
-  $('#stop').disabled = !s.running || s.stopping;
-
-  const workers = $('#workers');
-  const presets = WORKER_PRESETS.includes(s.settings.concurrency) ? WORKER_PRESETS : [...WORKER_PRESETS, s.settings.concurrency].sort((a, b) => a - b);
-  const key = presets.join() + s.settings.concurrency;
-  if (workers.dataset.key !== key) {
-    workers.dataset.key = key;
-    workers.innerHTML = `<span>Parallel pages</span>${presets.map((n) =>
-      `<button data-n="${n}" aria-pressed="${n === s.settings.concurrency}">${n}</button>`).join('')}`;
-  }
+  if (!READONLY) renderControls(s, waiting);
 
   const detail = waiting && s.nextCycleAt ? `next cycle in ${until(s.nextCycleAt)}` : s.phase.detail;
   $('#phase').innerHTML = `<b>${esc(s.phase.name)}</b>${detail ? ` <span class="muted">— ${esc(detail)}</span>` : ''}` +
@@ -53,13 +45,32 @@ function renderHeader() {
     <div class="track"><div style="width:${total ? Math.min(100, (used / total) * 100) : 0}%"></div></div></div>`).join('');
 }
 
-$('#start').onclick = () => postJson('api/start').then(apply);
-$('#once').onclick = () => postJson('api/run-once').then(apply);
-$('#stop').onclick = () => postJson('api/stop').then(apply);
-$('#workers').onclick = (e) => {
-  const n = e.target.closest('button')?.dataset.n;
-  if (n) postJson('api/settings', { concurrency: Number(n) }).then(apply);
-};
+// Start / Run once / Stop and the parallel pages: the admin page only.
+function renderControls(s, waiting) {
+  $('#start').disabled = s.running && !waiting;
+  $('#start').textContent = waiting ? 'Start next cycle now' : 'Start';
+  $('#once').disabled = s.running;
+  $('#stop').disabled = !s.running || s.stopping;
+
+  const workers = $('#workers');
+  const presets = WORKER_PRESETS.includes(s.settings.concurrency) ? WORKER_PRESETS : [...WORKER_PRESETS, s.settings.concurrency].sort((a, b) => a - b);
+  const key = presets.join() + s.settings.concurrency;
+  if (workers.dataset.key !== key) {
+    workers.dataset.key = key;
+    workers.innerHTML = `<span>Parallel pages</span>${presets.map((n) =>
+      `<button data-n="${n}" aria-pressed="${n === s.settings.concurrency}">${n}</button>`).join('')}`;
+  }
+}
+
+if (!READONLY) {
+  $('#start').onclick = () => postJson('api/start').then(apply);
+  $('#once').onclick = () => postJson('api/run-once').then(apply);
+  $('#stop').onclick = () => postJson('api/stop').then(apply);
+  $('#workers').onclick = (e) => {
+    const n = e.target.closest('button')?.dataset.n;
+    if (n) postJson('api/settings', { concurrency: Number(n) }).then(apply);
+  };
+}
 
 // ---------------------------------------------------------------- tabs
 
@@ -126,7 +137,7 @@ function aiBox(s) {
     <span class="muted">${j.todayCalls ? `${fmtInt(j.todayCalls)} today · ${fmtTokens(j.todayTokens)} tokens` : 'not used today'}</span></div>`).join('');
   return `<div class="aibox ${a.busy ? 'busy' : ''}"><span class="dot"></span>
     <div class="grow">${now}${queue}${jobs}${planLine(a.plan)}</div>
-    <button class="btn" data-go="ai">AI settings & log ›</button></div>`;
+    <button class="btn" data-go="ai">${READONLY ? 'AI log' : 'AI settings & log'} ›</button></div>`;
 }
 
 // Is the crawl working, and is it finding events? Crawler bugs first, in red: a bug that hits every
@@ -192,7 +203,7 @@ function overview() {
     ${stepsStrip(s)}
     ${healthBox(s)}
     ${aiBox(s)}
-    <div class="tiles">${tiles.map(([label, n, go]) => go
+    <div class="tiles">${tiles.map(([label, n, go]) => TABS[go]
       ? `<button class="tile" data-go="${go}"><div class="n">${n}</div><div class="k">${label} ›</div></button>`
       : `<div class="tile"><div class="n">${n}</div><div class="k">${label}</div></div>`).join('')}</div>
 
@@ -202,7 +213,7 @@ function overview() {
         <td>${tag(j.phase, PHASE_TAG[j.phase])}${j.ai ? `<br>${tag(j.ai === 'running' ? 'AI working' : 'AI queue', 'ai')}` : ''}</td>
         <td class="url">${jobLabel(j)}${j.note ? `<div class="muted">${esc(j.note)}</div>` : ''}</td>
         <td class="num">${ago(j.startedAt)}</td></tr>`).join('')
-      : `<tr><td class="empty-row">${s.running ? 'Between tasks…' : 'Not running. Press Start.'}</td></tr>`}
+      : `<tr><td class="empty-row">${s.running ? 'Between tasks…' : `Not running.${READONLY ? '' : ' Press Start.'}`}</td></tr>`}
     </table></div>
 
     <h3>Recently scanned ${found ? `<span style="text-transform:none;letter-spacing:0">· this cycle: ${found}</span>` : ''}</h3>
@@ -495,29 +506,34 @@ function drawTreemap() {
   const H = box.clientHeight;
   const html = [];
   const share = (v) => (total ? `${((100 * v) / total).toFixed(v / total < 0.01 ? 2 : 1)} %` : '');
-  const tip = (n, names) => {
+  const tip = (n, names, opens) => {
     const jobs = Object.entries(n.jobs).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
     tmTips.push(`<b>${esc(names.join(' › '))}</b>
       <div>${fmtTokens(n.tokens)} tokens · ${fmtUsd(n.usd)} · ${fmtInt(n.calls)} call${n.calls === 1 ? '' : 's'}</div>
       <div class="muted">${share(usageValue(n))} of all AI use in this range</div>
+      ${opens ? '<div class="muted">Click to open the page in a new window</div>' : ''}
       ${jobs.length > 1 ? `<div class="tm-jobs">${jobs.map(([j, v]) => `<span><i style="background:${swatch(j)}"></i>${esc(aiJobName(j))} ${fmtUsage(v)}</span>`).join('')}</div>` : ''}`);
     return tmTips.length - 1;
   };
   // Lay out a node's children inside a rectangle; groups get a header and their own children inside.
-  const lay = (node, x, y, w, h, names, zoom) => {
+  const lay = (node, x, y, w, h, names, zoom, url) => {
     const kids = [...node.kids.values()].map((n) => ({ n, v: usageValue(n) })).filter((k) => k.v > 0).sort((a, b) => b.v - a.v);
     for (const { item: { n }, x: cx, y: cy, w: cw, h: ch } of squarify(kids, x, y, w, h)) {
       const path = [...names, n.name];
-      const z = zoom || (n.kids.size ? path.slice(trail.length) : null); // clicking zooms into the top-level block
+      // A page among the top-level blocks opens in a new window (so do the blocks inside it); any other
+      // block zooms into its top-level block.
+      const opens = url || (!zoom && n.url);
+      const z = opens ? null : zoom || (n.kids.size ? path.slice(trail.length) : null);
       const zi = z ? tmZoom.push([...trail, ...z]) - 1 : -1;
-      const ti = tip(n, path);
+      const ti = tip(n, path, opens);
       const style = `left:${cx + 1}px;top:${cy + 1}px;width:${Math.max(0, cw - 2)}px;height:${Math.max(0, ch - 2)}px`;
       const label = `${esc(n.name)} <span>${fmtUsage(usageValue(n))}</span>`;
+      const [open, close] = opens ? [`<a href="${esc(opens)}" target="_blank" rel="noopener"`, '</a>'] : ['<div', '</div>'];
       if (n.kids.size && cw >= 48 && ch >= 40) {
-        html.push(`<div class="tm-group" style="${style}" data-tmtip="${ti}" data-tm="${zi}"><div class="tm-head">${label}</div></div>`);
-        lay(n, cx + 3, cy + 20, cw - 6, ch - 23, path, z);
+        html.push(`${open} class="tm-group" style="${style}" data-tmtip="${ti}" data-tm="${zi}"><div class="tm-head">${label}</div>${close}`);
+        lay(n, cx + 3, cy + 20, cw - 6, ch - 23, path, z, opens);
       } else {
-        html.push(`<div class="tm-leaf" style="${style};background:${swatch(mainJob(n))}" data-tmtip="${ti}" data-tm="${zi}">${cw >= 64 && ch >= 30 ? `<div class="tm-label">${label}</div>` : ''}</div>`);
+        html.push(`${open} class="tm-leaf" style="${style};background:${swatch(mainJob(n))}" data-tmtip="${ti}" data-tm="${zi}">${cw >= 64 && ch >= 30 ? `<div class="tm-label">${label}</div>` : ''}${close}`);
       }
     }
   };
@@ -572,7 +588,7 @@ function usageBox() {
 async function refreshUsage(force) {
   if (!force && Date.now() - usageAt < 60_000) return;
   usageAt = Date.now();
-  usage = await getJson('api/ai-usage');
+  usage = await getJson(`${API}ai-usage`);
 }
 
 const PLAN_NAMES = { pro: 'Pro', max: 'Max', team: 'Team', enterprise: 'Enterprise' };
@@ -660,9 +676,9 @@ function aiTab() {
     ['Failed', fmtInt(a.errors)],
   ];
   const jobName = (c) => a.jobs[c.kind === 'classify' ? 'tag' : c.kind]?.label || c.kind;
-  return `${planBox(a)}
+  return `${READONLY ? '' : `${planBox(a)}
     ${aiJobsPanel(a)}
-    <p class="note">Changes apply from the next AI call.</p>
+    <p class="note">Changes apply from the next AI call.</p>`}
     ${aiQueueBox(a)}
     <div class="tiles">${tiles.map(([k, n]) => `<div class="tile"><div class="n">${n}</div><div class="k">${k}</div></div>`).join('')}</div>
     ${usageBox()}
@@ -760,7 +776,7 @@ const AI_VIEWS = { analyze: analyzeView, tag: tagView, classify: tagView, discov
 
 async function showAiDetail(id) {
   selectedAi = id;
-  history.replaceState(null, '', `#ai/${id}`);
+  setHash(`ai/${id}`);
   const box = $('#ai-detail');
   if (!box) return;
   // The tab re-renders every few seconds: put the open call back as it was, without a reload or a jump.
@@ -770,7 +786,7 @@ async function showAiDetail(id) {
     return;
   }
   box.innerHTML = '<div class="detail muted">Loading…</div>';
-  const c = await getJson(`api/ai/${id}`);
+  const c = await getJson(`${API}ai/${id}`);
   const u = c.usage || {};
   box.innerHTML = `<div class="detail">
     <dl>
@@ -970,8 +986,16 @@ function coverageTab() {
     </table></div>`;
 }
 
-const TABS = { overview, queue: queueTab, templates: templatesTab, sources: sourcesTab, domains: domainsTab, coverage: coverageTab, ai: aiTab, settings: settingsTab };
-const TAB_DATA = { queue: 'api/queue', templates: 'api/patterns', sources: 'api/sources', domains: 'api/domains', coverage: 'api/coverage', ai: 'api/ai' };
+const TABS = { overview, queue: queueTab, sources: sourcesTab, domains: domainsTab, coverage: coverageTab, ai: aiTab };
+if (!READONLY) Object.assign(TABS, { templates: templatesTab, settings: settingsTab });
+const TAB_DATA = { queue: 'queue', templates: 'patterns', sources: 'sources', domains: 'domains', coverage: 'coverage', ai: 'ai' };
+const DEFAULT_TAB = READONLY ? 'coverage' : 'overview';
+
+// The open tab is in the URL: #queue, #ai/<call id>; on the public page #admin/queue (#admin alone: the default tab).
+function setHash(name) {
+  if (READONLY) return history.replaceState(null, '', `${location.pathname}${location.search}#admin${name === DEFAULT_TAB ? '' : `/${name}`}`);
+  history.replaceState(null, '', name === DEFAULT_TAB ? location.pathname : `#${name}`);
+}
 
 function renderTab() {
   if (!snap) return;
@@ -982,15 +1006,15 @@ function renderTab() {
 
 async function refreshTabData() {
   if (!TAB_DATA[tab]) return;
-  const [data] = await Promise.all([getJson(TAB_DATA[tab]), tab === 'ai' ? refreshUsage() : null]);
+  const [data] = await Promise.all([getJson(API + TAB_DATA[tab]), tab === 'ai' ? refreshUsage() : null]);
   tabData = data;
   renderTab();
 }
 
 function selectTab(name) {
-  if (!TABS[name]) name = 'overview';
+  if (!TABS[name]) name = DEFAULT_TAB;
   tab = name;
-  history.replaceState(null, '', name === 'overview' ? location.pathname : `#${name}`);
+  setHash(name);
   tabData = null;
   document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', b.dataset.tab === name));
   renderTab();
@@ -1014,7 +1038,7 @@ $('#tab').onclick = (e) => {
   if (ai) return showAiDetail(ai.dataset.ai);
   if (e.target.closest('[data-ai-close]')) {
     selectedAi = null;
-    history.replaceState(null, '', '#ai');
+    setHash('ai');
     return renderTab();
   }
   if (e.target.closest('[data-plan-refresh]')) {
@@ -1127,22 +1151,44 @@ function apply(s) {
   }
 }
 
+function disconnected() {
+  $('#state').className = 'pill stopping';
+  $('#state').textContent = 'disconnected';
+}
+
 function connect() {
   const es = new EventSource(`${API_BASE}api/stream`);
   es.onmessage = (m) => apply(JSON.parse(m.data));
-  es.onerror = () => {
-    $('#state').className = 'pill stopping';
-    $('#state').textContent = 'disconnected';
-  };
+  es.onerror = disconnected;
 }
-connect();
-{
-  const [name, id] = location.hash.slice(1).split('/'); // e.g. #ai/<call id>
+
+function openFromHash() {
+  const [name, id] = location.hash.slice(1).replace(/^admin\/?/, '').split('/'); // e.g. #ai/<call id>, #admin/ai/<call id>
   if (name === 'ai' && id) selectedAi = id;
   selectTab(name);
 }
+
+// The public page's Admin view: called by events.js when it opens or closes. Status every 2 s
+// while it's open (the server caches it), nothing while it's closed.
+let shown = !READONLY;
+let poll = null;
+function adminShown(on) {
+  if (!READONLY || on === shown) return;
+  shown = on;
+  clearInterval(poll);
+  if (!on) return history.replaceState(null, '', location.pathname + location.search);
+  const status = () => getJson(`${API}status`).then(apply, disconnected);
+  status();
+  poll = setInterval(status, 2000);
+  openFromHash();
+}
+
+if (!READONLY) {
+  connect();
+  openFromHash();
+}
 // Queue, sources and AI tabs refresh while open (not every second: they can be large).
 // Coverage is computed over all events and changes slowly: loaded when its tab is opened.
-setInterval(() => { if (!['overview', 'settings', 'coverage'].includes(tab)) refreshTabData(); }, 5000);
+setInterval(() => { if (shown && !['overview', 'settings', 'coverage'].includes(tab)) refreshTabData(); }, 5000);
 // Verification updates existing events without changing the count; refresh while crawling.
-setInterval(() => { if (snap?.running) loadEvents(); }, 30000);
+setInterval(() => { if (shown && snap?.running) loadEvents(); }, 30000);

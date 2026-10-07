@@ -42,11 +42,23 @@ function send(req, res, { text, gzip }, status = 200) {
 const PUBLIC = { 'GET /api/events': () => engine.events(), 'GET /api/sites': () => engine.sites() };
 const PUBLIC_CACHE_MS = 30_000;
 const publicCache = new Map();
-function publicJson(key) {
+function cachedJson(key, ms, build) {
   let c = publicCache.get(key);
-  if (!c || Date.now() - c.at > PUBLIC_CACHE_MS) publicCache.set(key, (c = { at: Date.now(), ...encode(PUBLIC[key]()) }));
+  if (!c || Date.now() - c.at > ms) publicCache.set(key, (c = { at: Date.now(), ...encode(build()) }));
   return c;
 }
+
+// The public page's Admin view: read-only copies of the admin GET routes, at api/ro/<name> (one path
+// prefix to open in the proxy). No settings to change, and nothing about the Claude account (plan usage).
+const READONLY = {
+  status: [2_000, () => { const s = engine.snapshot(); return { ...s, ai: { ...s.ai, plan: undefined } }; }],
+  queue: [5_000, () => engine.queue()],
+  domains: [5_000, () => engine.domains()],
+  sources: [5_000, () => engine.sources()],
+  coverage: [30_000, () => engine.coverage()],
+  ai: [5_000, () => engine.aiCalls()],
+  'ai-usage': [30_000, () => engine.aiUsage()],
+};
 
 async function readBody(req) {
   let body = '';
@@ -62,7 +74,7 @@ setInterval(() => {
   for (const res of streams) res.write(data);
 }, 1000).unref();
 
-// Admin API. Behind a proxy, only the PUBLIC routes above should be reachable without a login.
+// Admin API. Behind a proxy, only the PUBLIC and api/ro/ routes above should be reachable without a login.
 const routes = {
   'GET /api/sources': () => engine.sources(),
   'GET /api/status': () => engine.snapshot(),
@@ -89,12 +101,15 @@ http.createServer(async (req, res) => {
     req.on('close', () => streams.delete(res));
     return;
   }
-  const aiDetail = pathname.match(/^\/api\/ai\/([\w-]+)$/);
+  const aiDetail = pathname.match(/^\/api\/(?:ro\/)?ai\/([\w-]+)$/); // read-only too
   if (aiDetail && req.method === 'GET') {
     const call = engine.aiCall(aiDetail[1]);
     return call ? json(req, res, call) : json(req, res, { error: 'not found' }, 404);
   }
-  if (PUBLIC[`${req.method} ${pathname}`]) return send(req, res, publicJson(`${req.method} ${pathname}`));
+  const pub = PUBLIC[`${req.method} ${pathname}`];
+  if (pub) return send(req, res, cachedJson(pathname, PUBLIC_CACHE_MS, pub));
+  const ro = req.method === 'GET' && pathname.match(/^\/api\/ro\/([\w-]+)$/);
+  if (ro && READONLY[ro[1]]) return send(req, res, cachedJson(`ro ${ro[1]}`, ...READONLY[ro[1]]));
   const route = routes[`${req.method} ${pathname}`];
   if (route) return json(req, res, await route(req.method === 'POST' ? await readBody(req) : undefined));
 

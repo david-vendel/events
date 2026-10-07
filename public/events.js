@@ -48,7 +48,9 @@ let range = 'week';
 const remember = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 const recall = (k) => { try { return localStorage.getItem(k) || ''; } catch { return ''; } };
 // ?view=map opens the map (a link someone can share); otherwise the last view used here.
-let view = (new URLSearchParams(location.search).get('view') || recall('view')) === 'map' ? 'map' : 'list';
+// #admin… opens the public page's read-only crawler dashboard (admin.js).
+let view = location.hash.startsWith('#admin') && $('#adminview') ? 'admin'
+  : (new URLSearchParams(location.search).get('view') || recall('view')) === 'map' ? 'map' : 'list';
 let city = recall('city');
 
 // Kinds of event (same list as src/tags.js); "other" is an event with none of them.
@@ -139,6 +141,7 @@ function renderCities() {
 const fmtCount = (n) => n.toLocaleString('sk-SK');
 
 function renderEvents() {
+  if (view === 'admin') return;
   const [from] = rangeBounds();
   const inRange = inFilters();
   renderTagFilter(inRange);
@@ -310,9 +313,16 @@ $('#fit').addEventListener('click', () => {
 
 function setView(v) {
   view = v;
-  remember('view', v);
-  document.querySelectorAll('#views button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.view === v));
+  if (v !== 'admin') remember('view', v);
+  showView();
   renderEvents();
+}
+function showView() {
+  document.querySelectorAll('#views button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.view === view));
+  if (!$('#adminview')) return;
+  $('#adminview').hidden = view !== 'admin';
+  $('#eventsview').hidden = view === 'admin';
+  adminShown(view === 'admin'); // admin.js
 }
 document.querySelectorAll('#views button').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
 $('#city').addEventListener('change', (e) => {
@@ -350,8 +360,8 @@ async function loadEvents() {
     $('#summary').textContent = 'Could not load events. Is the server running?';
   }
 }
-document.querySelectorAll('#views button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.view === view));
 loadEvents();
+addEventListener('DOMContentLoaded', showView); // after admin.js has loaded
 // The admin page reloads when the crawler finds events (admin.js); the public page checks every
 // minute while it's visible, and right away when you come back to the tab.
 if (!$('#admin')) {
