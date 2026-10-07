@@ -17,7 +17,7 @@ import * as cheerio from 'cheerio';
 import { fetchPage } from './fetcher.js';
 import {
   PARSER_VERSION, applyRecipe, clean, extractLinks, makeEvent, isArchiveUrl, isSocial, jsonLdEvents, pageSignals, pageText,
-  partialStructured, scoreLink,
+  partialStructured, scoreLink, scriptCalendar,
   simplifyHtml,
 } from './extract.js';
 import { checkDates } from './datecheck.js';
@@ -37,6 +37,7 @@ import {
 } from './learn.js';
 import { readSitemaps, sitemapsDue } from './sitemaps.js';
 import { downUntil, noteFetch, serverTrouble } from './hosthealth.js';
+import { renderPage } from './browser.js';
 import { coverageReport, discoveryEveryHours, noteDiscovery, pickDiscoveryTarget } from './coverage.js';
 
 const HOUR = 3600e3;
@@ -54,6 +55,7 @@ const EMPTY_READS_BEFORE_REST = 3; // a listing page empty this many reads in a 
 const EMPTY_LISTING_REST = 14 * DAY;
 const NOT_LISTING_FOR = 30 * DAY; // a page AI said lists no events isn't taken as a listing again for this long
 const AI_MISSES_PER_SITE = 3;
+const AI_MISSES_FORGET = 30 * DAY; // after this, a site AI gave up on gets one more look (a month apart)
 const TRIAGE_PER_CYCLE = 60; // cheap pre-checks, on top of the AI budget for the bigger model
 // A template recipe that finds events on fewer than 10 % of at least 10 pages read the wrong pages
 // (an event page's recipe borrowed by the same site's news articles reads their publish time).
@@ -437,6 +439,15 @@ async function readPage(state, url, ctx, job) {
     if (res.error || !res.html) return { status: 'error', http: res.status, note: res.error || 'no page' };
   }
 
+  // A calendar filled by script (EventON…) is empty in the HTML: listing pages and pages AI is about
+  // to see are read as Chrome renders them. Without Chrome, AI doesn't look (it would see it empty).
+  const calendar = scriptCalendar(res.html);
+  let blind = false;
+  if (calendar && (listing || forAi || ctx.seeds.has(url))) {
+    const rendered = await renderPage(res.url);
+    if (rendered) res = { ...res, html: rendered };
+    else blind = true;
+  }
   const $ = cheerio.load(res.html);
   const links = extractLinks($, res.url);
 
@@ -498,7 +509,7 @@ async function readPage(state, url, ctx, job) {
   // goes to the AI queue (aiqueue.js), and the queue step of the cycle visits it again with AI.
   const aiWorthy = aiAvailable('analyze')
     && (!listing?.recipe || recipeBroken || recipeProblem)
-    && (signals.looksLikeListing || ctx.seeds.has(url) || listing)
+    && (signals.looksLikeListing || ctx.seeds.has(url) || listing || calendar)
     && (events.length === 0 || (partial && how === 'json-ld') || recipeProblem)
     // A recipe that broke is repaired after a day; other pages are looked at once a week at most.
     && Date.now() - Date.parse(listing?.analyzedAt || 0) > (recipeProblem ? DAY : RELEARN_AFTER)
@@ -507,8 +518,10 @@ async function readPage(state, url, ctx, job) {
     // None at sites where several looks found nothing (a festival's gallery, info and about pages
     // are all different templates, and AI may have named them as listings). Archives of past
     // events are never worth a look.
-    && (ctx.seeds.has(url) || listing?.recipe || !(source.aiMisses >= AI_MISSES_PER_SITE))
+    && (ctx.seeds.has(url) || listing?.recipe || !aiGaveUp(source))
     && !isArchiveUrl(url)
+    // A calendar filled by script that Chrome couldn't render: AI would see it empty too.
+    && !blind
     && source.kind !== 'irrelevant';
   const viaQueue = forAi;
   if (aiWorthy && !viaQueue) {
@@ -521,6 +534,9 @@ async function readPage(state, url, ctx, job) {
         : ctx.seeds.has(url) ? 8 : listing ? 6 : 3 + (signals.looksLikeListing ? 1 : 0),
     });
     if (queued) how = how ? `${how}; queued for AI` : 'queued for AI';
+  }
+  if (blind) {
+    how = how ? `${how}; ${calendar.name} calendar: needs Chrome` : `${calendar.name} calendar: needs Chrome`;
   }
   if (viaQueue) ctx.aiJob.worthy = aiWorthy;
   // Pages without a working recipe: one look per site a cycle (repairs and seeds aside).
@@ -536,14 +552,14 @@ async function readPage(state, url, ctx, job) {
     ctx.aiSites.add(source.origin);
     report.update?.(job, { note: 'waiting for AI…', ai: 'waiting' });
     precheck = await triagePage({
-      url: res.url, title: clean($('title').first().text()), text: pageText($), today: ctx.today,
+      url: res.url, title: clean($('title').first().text()), text: pageText($, undefined, calendar?.root), today: ctx.today,
       onStart: () => report.update?.(job, { note: 'AI pre-check…', ai: 'running' }),
     });
     aiCall = precheck.call;
     if (precheck.listsEvents === false) {
       tpl.aiAt = iso(Date.now()); // counts as this template's look for the week
       tpl.aiSaid = `pre-check: no upcoming events (${precheck.reason || ''})`;
-      source.aiMisses = (source.aiMisses || 0) + 1;
+      aiMissed(source);
       how = 'pre-check: no events';
       ctx.aiJob.answer = 'ok';
     } else if (precheck.listsEvents === null) {
@@ -571,7 +587,8 @@ async function readPage(state, url, ctx, job) {
       const outcome = learnFromAnalysis(state, source, url, a, $, res.url, events, report, tpl);
       if (call) call.outcome = outcome;
       how = source.pages[url]?.recipe ? 'AI → recipe' : 'AI';
-      source.aiMisses = events.length ? 0 : (source.aiMisses || 0) + 1;
+      if (events.length) source.aiMisses = 0;
+      else aiMissed(source);
       if (tpl.recipe && how === 'AI → recipe') health.aiRecipes++;
     }
   } else if (isListing(events, ctx.today) && source.kind !== 'irrelevant') {
@@ -687,6 +704,14 @@ function isListing(events, today) {
 
 /** AI said recently that this page lists no events. */
 const notListing = (source, url) => Date.now() - Date.parse(source.notListings?.[url] || 0) < NOT_LISTING_FOR;
+
+/** AI looked at several of the site's pages and found nothing: it looks at no more for a month. */
+const aiGaveUp = (source) => source.aiMisses >= AI_MISSES_PER_SITE
+  && Date.now() - Date.parse(source.aiMissAt || 0) < AI_MISSES_FORGET;
+function aiMissed(source) {
+  source.aiMisses = (source.aiMisses || 0) + 1;
+  source.aiMissAt = iso(Date.now());
+}
 
 /** A listing page that has been empty for several reads is read again only every couple of weeks. */
 const resting = (p) => p.emptyReads >= EMPTY_READS_BEFORE_REST && Date.now() - Date.parse(p.lastRead?.at || 0) < EMPTY_LISTING_REST;

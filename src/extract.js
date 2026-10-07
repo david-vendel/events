@@ -287,9 +287,22 @@ export function partialStructured(events, links, pageUrl) {
   return like.size >= 2 * new Set(own.map((e) => urlKey(e.url))).size + 3;
 }
 
-/** A page's visible text (no scripts, menus or footers), for a quick AI look. */
-export function pageText($, maxChars = 6000) {
-  const $b = $('body').clone();
+// Calendar plugins whose events a script loads after the page arrives: the HTML has only an empty
+// calendar, so rules and AI both see no events (gemercan.sk's EventON calendar). Such pages are
+// read in Chrome instead.
+// `root` is the calendar's element, whose text is what a quick look needs (the page's own header
+// and teasers can fill the start of its text).
+const SCRIPT_CALENDARS = [
+  { name: 'EventON', test: /ajde_evcal_calendar/, root: '.ajde_evcal_calendar' },
+  { name: 'FullCalendar', test: /fullcalendar(\.min)?\.js|new FullCalendar\.Calendar/, root: '.fc' },
+];
+
+/** The calendar plugin that fills this page by script, if any: { name, root }. */
+export const scriptCalendar = (html) => SCRIPT_CALENDARS.find((c) => c.test.test(html || ''));
+
+/** A page's visible text (no scripts, menus or footers), for a quick AI look; `root` narrows it to a part. */
+export function pageText($, maxChars = 6000, root = 'body') {
+  const $b = ($(root).length ? $(root) : $('body')).clone();
   $b.find('script, style, noscript, svg, iframe, template, nav, footer, [role=navigation], [id*=cookie i], [class*=cookie i]').remove();
   return clean($b.text()).slice(0, maxChars);
 }

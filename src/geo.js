@@ -53,6 +53,17 @@ const TOWN_NAMES = [
   'Miskolc', 'Užhorod', 'Uzhhorod',
 ];
 const TOWNS = new Map(TOWN_NAMES.map((n) => [fold(n), n]));
+// The towns outside Slovakia, by country; lookups for a known town search only its country, so
+// "Športová hala, Martin" can't land in Martin County, Texas.
+const ABROAD = { cz: ['praha', 'brno', 'ostrava', 'olomouc'], hu: ['budapest', 'miskolc'], at: ['wien', 'vieden', 'vienna'],
+  pl: ['krakow', 'krakov'], ua: ['uzhorod', 'uzhhorod'] };
+const COUNTRY = new Map(Object.entries(ABROAD).flatMap(([cc, towns]) => towns.map((t) => [t, cc])));
+const countryOf = (city) => (TOWNS.has(fold(city)) ? COUNTRY.get(fold(city)) || 'sk' : undefined);
+// One town's names in other languages, as OpenStreetMap may write it in an address ("Wien" → "Viedeň").
+const SAME_TOWN = [['wien', 'vieden', 'vienna'], ['krakow', 'krakov'], ['uzhorod', 'uzhhorod']];
+const townNames = (town) => SAME_TOWN.find((names) => names.includes(town)) || [town];
+// All our known towns are this close to Košice; a hit for one of them farther away is another place.
+const MAX_KM = 800;
 // Town names that are also everyday words or first names ("sála" = hall, "svit" = light, Martin):
 // they count only as a whole part of the location ("…, Martin"), never inside a venue's name.
 const AMBIGUOUS = new Set(['sala', 'svit', 'modra', 'martin', 'turany', 'rajec', 'sahy', 'sered', 'detva', 'holic',
@@ -180,14 +191,29 @@ const FILLER = new Set(['the', 'and', 'pre', 'pri', 'nad', 'pod', 'mesto', 'star
 const nameWords = (s) => fold(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !FILLER.has(w) && !TOWNS.has(w));
 
 /**
+ * Is an address in this town? One of its parts must be the town ("…, Podháj, Martin, okres Martin,
+ * …"), the town and its district ("Košice-Juh"), or the town's okres (a village "near Košice" is in
+ * "okres Košice-okolie"). "Martin County, Texas" is not Martin.
+ */
+function inTown(label, city) {
+  const names = townNames(fold(city));
+  return fold(label).split(/\s*,\s*/).some((part) => names.some((t) => part === t
+    || new RegExp(`^(okres )?${t}( ?[-–]|$| [ivx]+$)`).test(part)));
+}
+
+/** A hit that can't be the known town it's meant to be in: wrong town, or far from all of ours. */
+const awayFrom = (hit, city) => Boolean(city && TOWNS.has(fold(city))
+  && ((hit.label && !inTown(hit.label, city)) || distanceKm(KOSICE, hit) > MAX_KM));
+
+/**
  * Is a venue-name hit really that venue? Free-text search falls back to whatever matches part of the
  * query: "Yama Event Place, Košice" finds the railway station called "Košice", "Sobášna sieň, Košice"
  * finds a hall of that name in Bratislava. The hit's own name must share a word with the venue's,
  * and its address must be in the town we expect.
  */
 function plausible(hit, p, { town = true, name = true } = {}) {
-  const label = fold(hit.label);
-  if (town && p.city && TOWNS.has(fold(p.city)) && !label.includes(fold(p.city))) return false;
+  if (town && awayFrom(hit, p.city)) return false;
+  if (p.city && TOWNS.has(fold(p.city)) && distanceKm(KOSICE, hit) > MAX_KM) return false;
   if (!name) return true;
   const words = nameWords(p.name || '');
   if (!words.length || hit.area) return true;
@@ -207,6 +233,7 @@ async function geocode(text, cityHint) {
   // The town came from the site, not from the location: the location may name another place
   // ("Stará Hora - Sebechleby" on a site about Banská Bystrica).
   const hinted = Boolean(city) && !parseLocation(text).city;
+  const country = countryOf(city);
   const tries = []; // [precision, query, check (see CHECKS; none: any hit)]
   if (p.street && city) {
     tries.push(['address', { street: p.street, city, ...(p.postcode && { postalcode: p.postcode }) }, 'town']);
@@ -220,10 +247,10 @@ async function geocode(text, cityHint) {
   // last of all, the town itself (the map then shows the town centre, marked as approximate).
   if (city) {
     if (fold(text) !== fold(city)) tries.push(['venue', { q: text }, 'venue']);
-    tries.push(['city', { q: [p.district, city].filter(Boolean).join(', ') }]);
+    tries.push(['city', { q: [p.district, city].filter(Boolean).join(', ') }, 'town']);
   }
   for (const [kind, params, check] of tries) {
-    const hit = await nominatim(params);
+    const hit = await nominatim(country ? { ...params, countrycodes: country } : params);
     if (!hit || (check && !plausible(hit, p, CHECKS[check]))) continue;
     // Precision from what OpenStreetMap found: a town or district only gives the area's centre
     // (and asking for just the town counts as that, even if the best hit is a building named after it).
@@ -247,10 +274,9 @@ function pageGeo(ev) {
   return ev.sources?.find((s) => Number.isFinite(s.geo?.lat) && Number.isFinite(s.geo?.lon))?.geo;
 }
 
-/** A cached lookup whose address isn't in the town its location names. */
+/** A cached lookup that isn't in the town its location names (found before lookups checked that). */
 function outOfTown(v) {
-  const city = parseLocation(v.text).city;
-  return Boolean(city && TOWNS.has(fold(city)) && v.label && !fold(v.label).includes(fold(city)));
+  return Number.isFinite(v.lat) && awayFrom(v, parseLocation(v.text).city);
 }
 
 /**
@@ -299,7 +325,7 @@ export async function locateEvents(state, today, budget, report) {
     const [key, v] = venueFor(state, ev);
     if (!key) continue;
     const due = !v || (v.status === 'not_found' && Date.now() - Date.parse(v.checkedAt) > RETRY_NOT_FOUND)
-      || (v.status === 'ok' && v.precision !== 'page' && outOfTown(v)); // found before lookups checked the town
+      || (v.status === 'ok' && v.precision !== 'page' && outOfTown(v)); // found before lookups checked the town well
     if (!due) continue;
     const t = todo.get(key) || { text: ev.location, hint: cityHint(state, ev), events: 0 };
     t.events++;
