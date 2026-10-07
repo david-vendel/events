@@ -71,6 +71,7 @@ const routes = {
   'GET /api/patterns': () => engine.patterns(),
   'GET /api/coverage': () => engine.coverage(),
   'GET /api/ai': () => engine.aiCalls(),
+  'GET /api/ai-usage': () => engine.aiUsage(),
   'POST /api/plan': () => engine.refreshPlan(),
   'POST /api/start': () => { engine.start(); return engine.snapshot(); },
   'POST /api/run-once': () => { engine.start({ once: true }); return engine.snapshot(); },

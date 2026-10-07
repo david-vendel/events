@@ -220,3 +220,34 @@ select#city { padding: 8px 10px; border: 1px solid var(--line); border-radius: 1
 .covgrid td.cov.warn { background: var(--warn-bg); color: var(--warn); }
 .covgrid td.cov.bad { background: var(--bad-bg); color: var(--bad); }
 .warnbox { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+
+/* ------------------------------------------------ AI usage treemap */
+.usage { margin: 6px 0 18px; }
+.usage h3 { margin: 0 0 8px; font-size: 16px; }
+.treemap { --tm-1: #2a78d6; --tm-2: #eb6834; --tm-3: #1baf7a; --tm-other: #a3a19b;
+  position: relative; height: 440px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+@media (prefers-color-scheme: dark) {
+  .treemap { --tm-1: #3987e5; --tm-2: #d95926; --tm-3: #199e70; --tm-other: #6c6b67; }
+}
+@media (max-width: 600px) { .treemap { height: 340px; } }
+.tm-group, .tm-leaf { position: absolute; border-radius: 4px; cursor: pointer; overflow: hidden; }
+.tm-group { background: var(--panel); }
+.tm-group:hover { outline: 2px solid var(--text); outline-offset: -2px; }
+.tm-leaf:hover { filter: brightness(1.12); }
+.tm-head { font-size: 12px; font-weight: 600; padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.tm-head span, .tm-label span { font-weight: 400; color: var(--muted); }
+.tm-label { display: inline-block; max-width: calc(100% - 8px); margin: 4px; padding: 1px 5px; border-radius: 4px; font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: var(--card); color: var(--text); }
+.tm-empty { padding: 16px; }
+.tm-total { margin: 4px 0 6px; font-size: 13px; }
+.tm-crumbs { font-size: 13px; margin-bottom: 6px; color: var(--muted); }
+.tm-crumbs button { border: 0; background: none; padding: 0; text-decoration: underline; color: var(--text); }
+.tm-sep { width: 8px; }
+.tm-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; margin: 8px 0 10px; color: var(--muted); }
+.tm-legend b { color: var(--text); font-weight: 600; }
+.tm-legend i, .tm-job i, .tm-jobs i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.tm-job { white-space: nowrap; font-size: 12px; }
+.tm-tip { position: fixed; z-index: 50; max-width: 360px; pointer-events: none; background: var(--card); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
+  overflow-wrap: anywhere; }
+.tm-tip .tm-jobs { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }

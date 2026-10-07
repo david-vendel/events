@@ -434,6 +434,27 @@ export class Engine {
     return this.state.ai.slice(-500).reverse().map(({ result, ...r }) => r);
   }
 
+  /**
+   * Where AI tokens went, for the AI tab's treemap: every call ever made, summed per day, job and
+   * page ([day, job, page, calls, tokens, usd]). Jobs not about one page (tagging, discovery, date
+   * checks) have the query or nothing as their page. Tokens count everything the model read and
+   * wrote, cached input included.
+   */
+  aiUsage() {
+    const rows = new Map();
+    for (const c of this.state.ai) {
+      const job = c.kind === 'classify' ? 'tag' : c.kind;
+      const page = /^https?:\/\//.test(c.target || '') ? c.target.replace(/#.*$/, '') : job === 'discover' ? c.target || '' : '';
+      const key = `${c.at.slice(0, 10)}\n${job}\n${page}`;
+      const u = c.usage || {};
+      const r = rows.get(key) || rows.set(key, [c.at.slice(0, 10), job, page, 0, 0, 0]).get(key);
+      r[3]++;
+      r[4] += (u.input || 0) + (u.output || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
+      r[5] += u.costUsd || 0;
+    }
+    return { rows: [...rows.values()].map((r) => [...r.slice(0, 5), Math.round(r[5] * 1e4) / 1e4]) };
+  }
+
   /** One AI call with everything about it: what it was sent (if still kept) and what it answered. */
   aiCall(id) {
     const rec = this.state.ai.find((r) => r.id === id);

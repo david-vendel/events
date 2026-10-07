@@ -366,6 +366,215 @@ function templatesTab() {
 
 let aiFilter = 'all';
 
+// ---------------------------------------------------------------- AI usage treemap
+
+// Where AI tokens went: a treemap by job → site → page (or site → page → job), so a page or site
+// that eats a lot stands out. Data: api/ai-usage, every call summed per day, job and page.
+let usage = null; // { rows: [[day, job, page, calls, tokens, usd]] }
+let usageAt = 0;
+const usageView = { group: 'site', metric: 'tokens', days: 7, path: [] };
+let tmTips = []; // what each drawn block's tooltip says
+let tmZoom = []; // the path each drawn block zooms into
+// Colour by job: the three that matter most get a hue, the rest share grey (a treemap puts any two
+// colours side by side, and only three hues stay distinct for every reader). Names do the rest.
+const JOB_SWATCH = { analyze: 1, triage: 2, dates: 3 };
+const swatch = (job) => `var(--tm-${JOB_SWATCH[job] || 'other'})`;
+const aiJobName = (job) => snap?.ai?.jobs?.[job]?.label || job;
+
+/** The site a call belongs to: the page's host, or the job itself for jobs that aren't about one page. */
+function usageSite(job, page) {
+  if (/^https?:/.test(page)) return host(page) || page;
+  return { discover: 'Web searches', tag: 'Event tagging', dates: 'Date checks' }[job] || aiJobName(job);
+}
+function usagePage(page) {
+  if (!/^https?:/.test(page)) return page;
+  try {
+    const u = new URL(page);
+    return decodeURI(u.pathname + u.search) || '/';
+  } catch { return page; }
+}
+
+function usageRows() {
+  if (!usage?.rows) return [];
+  if (!usageView.days) return usage.rows;
+  const from = ymd(addDays(new Date(), 1 - usageView.days));
+  return usage.rows.filter((r) => r[0] >= from);
+}
+
+/** Where a usage row sits in the tree: [job, site, page] or [site, page, job]. */
+function usagePath(job, page) {
+  const site = usageSite(job, page);
+  const pg = usagePage(page);
+  // Jobs that aren't about a page have no site or page level of their own (discovery: its queries).
+  const isPage = /^https?:/.test(page);
+  return (usageView.group === 'job' ? [aiJobName(job), isPage && site, pg] : [site, pg, isPage && aiJobName(job)]).filter(Boolean);
+}
+
+/** The tree for the current grouping; every node sums calls, tokens and price, per job too. */
+function usageTree(rows) {
+  const root = { name: 'All AI use', kids: new Map(), calls: 0, tokens: 0, usd: 0, jobs: {} };
+  for (const [, job, page, calls, tokens, usd] of rows) {
+    const pg = usagePage(page);
+    let node = root;
+    for (const name of [null, ...usagePath(job, page)]) {
+      if (name !== null) {
+        if (!node.kids.has(name)) node.kids.set(name, { name, kids: new Map(), calls: 0, tokens: 0, usd: 0, jobs: {}, url: undefined });
+        node = node.kids.get(name);
+        if (name === pg && /^https?:/.test(page)) node.url = page;
+      }
+      node.calls += calls;
+      node.tokens += tokens;
+      node.usd += usd;
+      node.jobs[job] = (node.jobs[job] || 0) + (usageView.metric === 'usd' ? usd : tokens);
+    }
+  }
+  return root;
+}
+
+const usageValue = (n) => (usageView.metric === 'usd' ? n.usd : n.tokens);
+const fmtUsage = (v) => (usageView.metric === 'usd' ? fmtUsd(v) : fmtTokens(v));
+const mainJob = (n) => Object.entries(n.jobs).sort((a, b) => b[1] - a[1])[0]?.[0];
+
+/** Squarified treemap layout of `items` ({ v }) in a rectangle: [{ item, x, y, w, h }]. */
+function squarify(items, x, y, w, h) {
+  const total = items.reduce((s, i) => s + i.v, 0);
+  if (!total || w <= 0 || h <= 0) return [];
+  const areas = items.map((i) => (i.v * w * h) / total);
+  const out = [];
+  const worst = (row, side) => {
+    const s = row.reduce((a, b) => a + b, 0);
+    return Math.max((side * side * Math.max(...row)) / (s * s), (s * s) / (side * side * Math.min(...row)));
+  };
+  const place = (from, row) => {
+    const s = row.reduce((a, b) => a + b, 0);
+    if (w >= h) { // a column on the left
+      const cw = s / h;
+      let yy = y;
+      row.forEach((a, k) => { out.push({ item: items[from + k], x, y: yy, w: cw, h: a / cw }); yy += a / cw; });
+      x += cw; w -= cw;
+    } else { // a row on top
+      const rh = s / w;
+      let xx = x;
+      row.forEach((a, k) => { out.push({ item: items[from + k], x: xx, y, w: a / rh, h: rh }); xx += a / rh; });
+      y += rh; h -= rh;
+    }
+  };
+  let row = [];
+  let start = 0;
+  for (let i = 0; i < areas.length; i++) {
+    const side = Math.min(w, h);
+    if (row.length && worst([...row, areas[i]], side) > worst(row, side)) {
+      place(start, row);
+      start = i;
+      row = [];
+    }
+    row.push(areas[i]);
+  }
+  if (row.length) place(start, row);
+  return out;
+}
+
+/** Draw the treemap into #treemap (its size is only known once it's on the page). */
+function drawTreemap() {
+  const box = $('#treemap');
+  if (!box) return;
+  let root = usageTree(usageRows());
+  const total = usageValue(root);
+  // Zoomed in: follow the path as far as it still exists.
+  const trail = [];
+  for (const name of usageView.path) {
+    const next = root.kids.get(name);
+    if (!next) break;
+    trail.push(name);
+    root = next;
+  }
+  usageView.path = trail;
+  tmTips = [];
+  tmZoom = [];
+  const W = box.clientWidth;
+  const H = box.clientHeight;
+  const html = [];
+  const share = (v) => (total ? `${((100 * v) / total).toFixed(v / total < 0.01 ? 2 : 1)} %` : '');
+  const tip = (n, names) => {
+    const jobs = Object.entries(n.jobs).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+    tmTips.push(`<b>${esc(names.join(' › '))}</b>
+      <div>${fmtTokens(n.tokens)} tokens · ${fmtUsd(n.usd)} · ${fmtInt(n.calls)} call${n.calls === 1 ? '' : 's'}</div>
+      <div class="muted">${share(usageValue(n))} of all AI use in this range</div>
+      ${jobs.length > 1 ? `<div class="tm-jobs">${jobs.map(([j, v]) => `<span><i style="background:${swatch(j)}"></i>${esc(aiJobName(j))} ${fmtUsage(v)}</span>`).join('')}</div>` : ''}`);
+    return tmTips.length - 1;
+  };
+  // Lay out a node's children inside a rectangle; groups get a header and their own children inside.
+  const lay = (node, x, y, w, h, names, zoom) => {
+    const kids = [...node.kids.values()].map((n) => ({ n, v: usageValue(n) })).filter((k) => k.v > 0).sort((a, b) => b.v - a.v);
+    for (const { item: { n }, x: cx, y: cy, w: cw, h: ch } of squarify(kids, x, y, w, h)) {
+      const path = [...names, n.name];
+      const z = zoom || (n.kids.size ? path.slice(trail.length) : null); // clicking zooms into the top-level block
+      const zi = z ? tmZoom.push([...trail, ...z]) - 1 : -1;
+      const ti = tip(n, path);
+      const style = `left:${cx + 1}px;top:${cy + 1}px;width:${Math.max(0, cw - 2)}px;height:${Math.max(0, ch - 2)}px`;
+      const label = `${esc(n.name)} <span>${fmtUsage(usageValue(n))}</span>`;
+      if (n.kids.size && cw >= 48 && ch >= 40) {
+        html.push(`<div class="tm-group" style="${style}" data-tmtip="${ti}" data-tm="${zi}"><div class="tm-head">${label}</div></div>`);
+        lay(n, cx + 3, cy + 20, cw - 6, ch - 23, path, z);
+      } else {
+        html.push(`<div class="tm-leaf" style="${style};background:${swatch(mainJob(n))}" data-tmtip="${ti}" data-tm="${zi}">${cw >= 64 && ch >= 30 ? `<div class="tm-label">${label}</div>` : ''}</div>`);
+      }
+    }
+  };
+  lay(root, 0, 0, W, H, trail, null);
+  box.innerHTML = html.join('') || '<p class="muted tm-empty">No AI calls in this range.</p>';
+}
+
+function usageBox() {
+  if (!usage) return '<div class="usage"><h3>Where AI tokens went</h3><p class="muted">Loading…</p></div>';
+  const rows = usageRows();
+  const root = usageTree(rows);
+  const total = usageValue(root);
+  // The pages that cost most, with the jobs that spent it: the same answer as the treemap (and its
+  // zoom), readable as a table.
+  const pages = new Map();
+  const { path } = usageView;
+  for (const [, job, page, calls, tokens, usd] of rows) {
+    if (!/^https?:/.test(page)) continue;
+    if (path.length && usagePath(job, page).slice(0, path.length).join('\n') !== path.join('\n')) continue;
+    const p = pages.get(page) || pages.set(page, { calls: 0, tokens: 0, usd: 0, jobs: {} }).get(page);
+    p.calls += calls; p.tokens += tokens; p.usd += usd;
+    p.jobs[job] = (p.jobs[job] || 0) + calls;
+  }
+  const top = [...pages].sort((a, b) => usageValue(b[1]) - usageValue(a[1])).slice(0, 15);
+  const jobs = Object.entries(root.jobs).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const chips = (key, options) => options.map(([v, label]) =>
+    `<button data-usage="${key}" data-value="${v}" aria-pressed="${String(usageView[key]) === String(v)}">${label}</button>`).join('');
+  const crumbs = [['All AI use', 0], ...usageView.path.map((name, i) => [name, i + 1])];
+  return `<div class="usage">
+    <h3>Where AI tokens went</h3>
+    <div class="sorts">${chips('days', [[1, 'Today'], [7, '7 days'], [30, '30 days'], [0, 'All']])}
+      <span class="tm-sep"></span>${chips('group', [['site', 'Site → page → job'], ['job', 'Job → site → page']])}
+      <span class="tm-sep"></span>${chips('metric', [['tokens', 'Tokens'], ['usd', 'API price']])}</div>
+    <p class="tm-total"><b>${fmtUsage(total)}</b> ${usageView.metric === 'usd' ? 'at API prices' : 'tokens'} · ${fmtInt(root.calls)} calls
+      · <span class="muted">click a block to zoom in</span></p>
+    <nav class="tm-crumbs">${crumbs.map(([name, i], k) => (k === crumbs.length - 1
+      ? `<b>${esc(name)}</b>` : `<button data-tmcrumb="${i}">${esc(name)}</button> ›`)).join(' ')}</nav>
+    <div id="treemap" class="treemap" role="img" aria-label="Treemap of AI token use; the table below lists the same pages"></div>
+    <div class="tm-legend">${jobs.map(([j, v]) => `<span><i style="background:${swatch(j)}"></i>${esc(aiJobName(j))} <b>${fmtUsage(v)}</b></span>`).join('')}</div>
+    <div class="scroll"><table class="grid">
+      <tr><th>Pages that cost most${path.length ? ` in ${esc(path[path.length - 1])}` : ''}</th><th>Jobs (calls)</th><th class="num">Calls</th><th class="num">Tokens</th><th class="num">API price</th></tr>
+      ${top.map(([url, p]) => `<tr><td class="url"><a href="${esc(url)}" target="_blank" rel="noopener">${esc(url.replace(/^https?:\/\/(www\.)?/, ''))}</a></td>
+        <td>${Object.entries(p.jobs).map(([j, n]) => `<span class="tm-job"><i style="background:${swatch(j)}"></i>${esc(aiJobName(j))} ${n}</span>`).join(' ')}</td>
+        <td class="num">${fmtInt(p.calls)}</td><td class="num">${fmtTokens(p.tokens)}</td><td class="num">${p.usd ? fmtUsd(p.usd) : '—'}</td></tr>`).join('')
+      || '<tr><td class="empty-row" colspan="5">No page was shown to AI in this range.</td></tr>'}
+    </table></div>
+    <p class="note">Tokens include cached input. API price is what the calls would cost on the API (they run on your
+      Claude plan); — means older calls that didn't record it.</p>
+  </div>`;
+}
+
+async function refreshUsage(force) {
+  if (!force && Date.now() - usageAt < 60_000) return;
+  usageAt = Date.now();
+  usage = await getJson('api/ai-usage');
+}
+
 const PLAN_NAMES = { pro: 'Pro', max: 'Max', team: 'Team', enterprise: 'Enterprise' };
 
 // Your Claude plan: the only real measure of "how much is left". Plans have no token allowance.
@@ -456,6 +665,7 @@ function aiTab() {
     <p class="note">Changes apply from the next AI call.</p>
     ${aiQueueBox(a)}
     <div class="tiles">${tiles.map(([k, n]) => `<div class="tile"><div class="n">${n}</div><div class="k">${k}</div></div>`).join('')}</div>
+    ${usageBox()}
     <div id="ai-detail"></div>
     <div class="sorts"><span>Show</span>${[['all', 'All jobs'], ...Object.entries(a.jobs).map(([k, j]) => [k, j.label])].map(([k, label]) =>
       `<button data-aifilter="${k}" aria-pressed="${k === aiFilter}">${esc(label)}</button>`).join('')}</div>
@@ -766,12 +976,14 @@ const TAB_DATA = { queue: 'api/queue', templates: 'api/patterns', sources: 'api/
 function renderTab() {
   if (!snap) return;
   $('#tab').innerHTML = TABS[tab]();
+  if (tab === 'ai') drawTreemap();
   if (tab === 'ai' && selectedAi) showAiDetail(selectedAi);
 }
 
 async function refreshTabData() {
   if (!TAB_DATA[tab]) return;
-  tabData = await getJson(TAB_DATA[tab]);
+  const [data] = await Promise.all([getJson(TAB_DATA[tab]), tab === 'ai' ? refreshUsage() : null]);
+  tabData = data;
   renderTab();
 }
 
@@ -808,6 +1020,25 @@ $('#tab').onclick = (e) => {
   if (e.target.closest('[data-plan-refresh]')) {
     e.target.textContent = 'Checking…';
     return postJson('api/plan').then((s) => { apply(s); renderTab(); });
+  }
+  // AI usage treemap: range / grouping / measure, zooming in and back out.
+  const uopt = e.target.closest('[data-usage]');
+  if (uopt) {
+    const { usage: key, value } = uopt.dataset;
+    usageView[key] = key === 'days' ? Number(value) : value;
+    if (key === 'group') usageView.path = [];
+    return renderTab();
+  }
+  const crumb = e.target.closest('[data-tmcrumb]');
+  if (crumb) {
+    usageView.path = usageView.path.slice(0, Number(crumb.dataset.tmcrumb));
+    return renderTab();
+  }
+  const block = e.target.closest('[data-tm]');
+  if (block && tmZoom[block.dataset.tm]) {
+    usageView.path = tmZoom[block.dataset.tm];
+    hideTmTip();
+    return renderTab();
   }
   const filter = e.target.closest('[data-aifilter]');
   if (filter) {
@@ -861,6 +1092,21 @@ $('#tab').addEventListener('change', (e) => {
   else if (t.dataset.aiModel) ai = { jobs: { [t.dataset.aiModel]: { model: t.value } } };
   if (ai) postJson('api/settings', { ai }).then((s) => { apply(s); renderTab(); });
 });
+
+// The treemap's tooltip lives outside the tab, so the tab's refresh every few seconds doesn't drop it.
+const tmTip = document.body.appendChild(Object.assign(document.createElement('div'), { className: 'tm-tip', hidden: true }));
+function hideTmTip() { tmTip.hidden = true; }
+$('#tab').addEventListener('pointermove', (e) => {
+  const el = e.target.closest('[data-tmtip]');
+  if (!el || !tmTips[el.dataset.tmtip]) return hideTmTip();
+  tmTip.innerHTML = tmTips[el.dataset.tmtip];
+  tmTip.hidden = false;
+  const r = tmTip.getBoundingClientRect();
+  tmTip.style.left = `${Math.min(e.clientX + 14, innerWidth - r.width - 8)}px`;
+  tmTip.style.top = `${e.clientY + 16 + r.height > innerHeight ? e.clientY - r.height - 10 : e.clientY + 16}px`;
+});
+$('#tab').addEventListener('pointerleave', hideTmTip);
+window.addEventListener('resize', () => { if (tab === 'ai') drawTreemap(); });
 
 // ---------------------------------------------------------------- live updates
 
