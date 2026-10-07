@@ -147,8 +147,9 @@ pre { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background
 .alert pre { margin-top: 8px; background: var(--card); color: var(--text); max-height: 160px; }
 
 /* ------------------------------------------------ public page: events only */
-.layout.single { grid-template-columns: minmax(0, 1fr); }
-.layout.single > section { max-width: 1100px; width: 100%; margin: 0 auto; }
+.layout.single { grid-template-columns: minmax(0, 1fr); height: auto; }
+/* let the page itself scroll, so the wheel works with the mouse anywhere (not only over the column) */
+.layout.single > section { max-width: 1100px; width: 100%; margin: 0 auto; overflow: visible; }
 
 /* ------------------------------------------------ events */
 #events h2.title { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
