@@ -1,7 +1,7 @@
 // Left column of the admin page: live crawler dashboard. Status arrives once a second over api/stream;
 // the Queue, Sources, Domains and AI tabs fetch their own data while open.
 const WORKER_PRESETS = [1, 2, 5, 10, 20];
-const PHASE_TAG = { recheck: 'info', verify: 'warn', explore: '', discover: 'info', tag: 'ai', locate: 'ok', sitemap: 'info' };
+const PHASE_TAG = { learn: 'ai', recheck: 'info', verify: 'warn', explore: '', discover: 'info', tag: 'ai', locate: 'ok', sitemap: 'info' };
 
 let snap = null;
 let tab = 'overview';
@@ -423,6 +423,22 @@ function aiJobsPanel(a) {
   </div>`;
 }
 
+function aiQueueBox(a) {
+  const q = a.queue;
+  if (!q) return '';
+  const paused = a.pausedUntil ? `<p class="warnbox">AI is paused: the Claude plan's limit was hit. It resumes at ${fmtWhen(a.pausedUntil)};
+    pages wait in the queue meanwhile.</p>` : '';
+  return `<h3>Waiting for AI ${info('aiqueue')}</h3>${help('aiqueue')}${paused}
+    <p class="muted">${fmtInt(q.size)} page${q.size === 1 ? '' : 's'} waiting${q.repairs ? `, ${fmtInt(q.repairs)} of them recipe repairs` : ''};
+      ${fmtInt(q.due)} can run now. Read by AI in the queue step of each cycle.</p>
+    ${q.next.length ? `<div class="scroll"><table class="grid">
+      <tr><th>Page</th><th>Why</th><th class="num">Priority</th><th>Waiting since</th></tr>
+      ${q.next.map((j) => `<tr><td class="url">${esc(j.url)}</td>
+        <td>${j.repair ? tag('repair', 'warn') : ''} ${esc(j.reason)}${j.tries ? `<div class="muted">${j.tries} failed tr${j.tries === 1 ? 'y' : 'ies'}: ${esc(j.lastError || '')}${j.nextTryAt ? `; next ${fmtWhen(j.nextTryAt)}` : ''}</div>` : ''}</td>
+        <td class="num">${Math.round(j.priority)}</td><td>${fmtWhen(j.addedAt)}</td></tr>`).join('')}
+    </table></div>` : ''}`;
+}
+
 function aiTab() {
   const a = snap.ai;
   // A server started before the AI jobs existed sends none: say so instead of failing silently.
@@ -438,6 +454,7 @@ function aiTab() {
   return `${planBox(a)}
     ${aiJobsPanel(a)}
     <p class="note">Changes apply from the next AI call.</p>
+    ${aiQueueBox(a)}
     <div class="tiles">${tiles.map(([k, n]) => `<div class="tile"><div class="n">${n}</div><div class="k">${k}</div></div>`).join('')}</div>
     <div id="ai-detail"></div>
     <div class="sorts"><span>Show</span>${[['all', 'All jobs'], ...Object.entries(a.jobs).map(([k, j]) => [k, j.label])].map(([k, label]) =>
@@ -576,8 +593,8 @@ async function showAiDetail(id) {
   box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// What each setting does, how and why: shown under the field when its ⓘ is pressed.
-const SETTING_HELP = {
+// What a setting or view does, how and why: shown below it when its ⓘ is pressed.
+const HELP = {
   cycle: `<p>The crawler works in <b>cycles</b>. <b>Start</b> runs one, waits, runs the next, until you press Stop
       (<b>Run once</b> runs a single cycle). Each cycle goes through these steps in order:</p>
     <ol>
@@ -585,7 +602,8 @@ const SETTING_HELP = {
         the ones read longest ago first). A source that keeps giving new events is checked more often, one that doesn't
         less often (every 12 hours to 7 days).</li>
       <li><b>Verify events</b>: upcoming events re-read their own page and the Facebook / ticket pages they link to.</li>
-      <li><b>AI discovery</b>: every 6 hours, one AI web search for new event sites.</li>
+      <li><b>AI discovery</b>: every 6 hours, one AI web search for new event sites, aimed at the town and kind of event
+        we cover worst (see the Coverage tab).</li>
       <li><b>Sitemaps</b>: up to 4 sites that have events get their sitemap read, to find event pages no listing links to.</li>
       <li><b>Explore</b>: whatever page budget is left goes to the queue of links found so far, best-scoring first.</li>
       <li><b>Check dates</b>, <b>tag</b> and <b>locate</b> the events, so the ones found this cycle are finished this cycle.</li>
@@ -606,9 +624,10 @@ const SETTING_HELP = {
     <p><b>Why a limit:</b> it keeps each cycle short and predictable, and spreads the crawling out over time. A page that hasn't
       changed since last time (same ETag or content) still counts as fetched but is processed in no time.</p>`,
   aiPerCycle: `<p><b>What:</b> the most calls to the bigger AI model in one cycle (0–100, default 5). 0 means no such calls.</p>
-    <p><b>Used by:</b> reading a page the crawler can't parse on its own, to learn a <i>recipe</i> for it (after which pages
-      like it are read without AI); the discovery web search; and checking date formats and schedules written as text
-      (at most 2 calls a cycle).</p>
+    <p><b>Used by:</b> the AI queue (pages the crawler can't parse on its own get a <i>recipe</i> written for them, after
+      which pages like them are read without AI; recipes that stop working get repaired); the discovery web search; and
+      checking date formats and schedules written as text (at most 2 calls a cycle). Pages that don't fit in this
+      cycle's budget wait in the queue (AI tab) for the next one.</p>
     <p><b>Not counted:</b> the cheap pre-check that first asks whether a page lists events at all (up to 60 a cycle) and
       tagging events (2 calls of 40 events a cycle). Switch those off in the AI tab if you want none.</p>
     <p><b>Why a limit:</b> AI calls use your Claude plan and take tens of seconds each. The crawler also holds back by itself:
@@ -628,10 +647,11 @@ const SETTING_HELP = {
       than that mostly explore the queue. Shorter = new sites found sooner, but more requests and more AI use per day.</p>`,
 };
 
+const info = (key) => `<button class="info-btn" data-help="${key}" aria-expanded="${openHelp.has(key)}" title="What this does">i</button>`;
+const help = (key) => `<div class="help" data-help-box="${key}"${openHelp.has(key) ? '' : ' hidden'}>${HELP[key]}</div>`;
+
 function settingsTab() {
   const s = snap.settings;
-  const info = (key) => `<button class="info-btn" data-help="${key}" aria-expanded="${openHelp.has(key)}" title="What this does">i</button>`;
-  const help = (key) => `<div class="help" data-help-box="${key}"${openHelp.has(key) ? '' : ' hidden'}>${SETTING_HELP[key]}</div>`;
   const field = (key, label) => `<label for="set-${key}">${label} ${info(key)}</label>
     <input id="set-${key}" type="number" min="0" value="${s[key]}">${help(key)}`;
   return `<p class="muted">How a crawl cycle works ${info('cycle')}</p>${help('cycle')}
@@ -648,8 +668,100 @@ function settingsTab() {
       Facebook dates: ${snap.facebook ? 'on' : 'off (set EVENTS_FACEBOOK=on when starting the server)'}.</p>`;
 }
 
-const TABS = { overview, queue: queueTab, templates: templatesTab, sources: sourcesTab, domains: domainsTab, ai: aiTab, settings: settingsTab };
-const TAB_DATA = { queue: 'api/queue', templates: 'api/patterns', sources: 'api/sources', domains: 'api/domains', ai: 'api/ai' };
+HELP.aiqueue = `<p><b>Why a queue:</b> crawling is free, AI isn't. So the crawler never waits for AI and never
+    calls it in the middle of crawling. A page that needs AI is put here, and one step of every cycle works through
+    the queue: within <i>AI calls per cycle</i>, with AI switched on, and not while the Claude plan's limit is hit.</p>
+  <p><b>What needs AI:</b> a page that lists events but that the crawler can't read on its own yet (no structured data,
+    no recipe), and a page whose recipe stopped reading it well. AI then writes a <b>recipe</b>: CSS selectors that say
+    where each event, its title, date, time, place and link are on the page. Every later visit reads the page with the
+    recipe, without AI, and so do the site's other pages built the same way (same URL pattern) and similar sections of
+    the site. Sites are finite, so once their page types have recipes, AI is rarely needed.</p>
+  <p><b>Checking every read:</b> each time a recipe reads a page, the result is compared with how that page usually reads.
+    If it now finds no events, under a third of the usual number, the same title for most events, or has lost the times,
+    places or links it used to give, the site has probably changed its layout. The page is queued for a <b>repair</b>
+    (first in line), and AI is shown the old recipe and what went wrong. Meanwhile the old recipe's events are still used.
+    A new recipe replaces the old one only if it reads the page at least about as well.</p>
+  <p><b>Order and limits:</b> repairs first, then seed pages, then pages AI named as listings, then other promising pages.
+    One new page per URL pattern waits at a time (its recipe will read the others), and one new site's page per cycle.
+    A try that fails because the plan's limit was hit waits until the limit resets and doesn't count; other failures
+    are retried after 1, 2 and 4 hours, then dropped. The queue keeps at most 1,000 pages.</p>`;
+
+HELP.coverage = `<p><b>The question:</b> of everything that's on, how much have we found? Nobody publishes the full list,
+    so it's estimated the way ecologists count fish in a lake: catch some, mark them, catch again, and see how many
+    were already marked.</p>
+  <p><b>How:</b> every site that lists events is a separate catch. An upcoming event found independently on two or more
+    sites was "caught again"; one only one site lists was not. (Pages an event's own page links to, like its Facebook
+    event or ticket shop, don't count: they were found through it, not independently.) If most events in a group show
+    up on several sites, a new site would mostly bring events we already have. If most were seen on one site only,
+    there are probably many that no site we know lists. The Chao1 formula turns that into a number:
+    <i>estimated total = found + (seen on one site)² / (2 × seen on two sites)</i>, and <i>coverage = found ÷ estimated total</i>.</p>
+  <p><b>How far to trust it:</b> sites aren't equally likely to list an event: a club's own page lists only its own shows
+    and nothing else will. So the estimated total is a lower bound and the coverage an upper bound. A low figure is a sure
+    gap; a high one is likely, not certain. Groups with fewer than 8 upcoming events show "?": too few to judge. Event
+    matching across sites matters too: two listings of one concert that we failed to join look like two single-site
+    events and lower the figure.</p>
+  <p><b>What it's used for:</b> the AI web search for new sources (every 6 hours) goes to the town and kind of event with the
+    biggest gap, bigger towns first. The same search isn't repeated for a week, and each time it found no new event
+    source it waits twice as long (up to 8 weeks), so a gap no search can fill stops costing AI calls. Once overall
+    coverage reaches 80 %, searches run every 24 hours instead of 6.</p>
+  <p><b>What it doesn't limit:</b> crawling. Fetching pages costs only time and is polite (one request per site every
+    2 seconds, robots.txt obeyed), so sites keep being re-checked and explored as usual; only AI is aimed by this.</p>`;
+
+const covPct = (x) => `${Math.round(x * 100)} %`;
+// Low coverage = red, high = green; too few events to tell = plain.
+const covClass = (r) => (r?.coverage === undefined ? '' : r.coverage >= 0.6 ? 'ok' : r.coverage >= 0.35 ? 'warn' : 'bad');
+const covTitle = (r, what) => (!r ? `${what}: no upcoming events` : `${what}: ${r.events} upcoming events, ${r.once} on one site, `
+  + `${r.twice} on two, ${r.more} on more; ${r.sites} sites` + (r.coverage === undefined ? '. Too few to estimate.'
+  : `. Estimated total ${fmtInt(r.estimate)}, so about ${covPct(r.coverage)} found.`) + (r.newLastWeek ? ` ${r.newLastWeek} new this week.` : ''));
+const covCell = (r, what) => `<td class="num cov ${covClass(r)}" title="${esc(covTitle(r, what))}">${!r ? '' : r.coverage === undefined
+  ? `<span class="muted">? <small>${r.events}</small></span>` : `${covPct(r.coverage)} <small>${fmtInt(r.events)}</small>`}</td>`;
+const SEARCH_RESULT = { yes: ['found a new source', 'ok'], no: ['nothing new', ''], pending: ['links being explored', 'info'] };
+
+function coverageTab() {
+  if (!tabData) return '<p class="muted">Loading…</p>';
+  const c = tabData;
+  const o = c.overall;
+  const tags = c.tags.map((t) => t.tag);
+  const cell = new Map(c.cells.map((x) => [`${x.town}|${x.tag}`, x]));
+  const nextAt = c.lastDiscoveryAt ? Date.parse(c.lastDiscoveryAt) + c.everyHours * 3600e3 : Date.now();
+  const tiles = [
+    ['Coverage, all', o.coverage === undefined ? '?' : covPct(o.coverage)],
+    ['Upcoming events', fmtInt(o.events)], ['Estimated total', o.estimate ? fmtInt(o.estimate) : '?'],
+    ['On 2+ sites', fmtInt(o.twice + o.more)], ['Listing sites', fmtInt(o.sites)],
+    ['Next search', !c.discoverOn ? 'AI off' : nextAt <= Date.now() ? 'next cycle' : `in ${until(nextAt)}`],
+  ];
+  return `<p class="muted" style="margin-top:0">How much of what's on we've probably found, per town and kind of event,
+      and where the AI search for new sites goes next. ${info('coverage')}</p>${help('coverage')}
+    <div class="tiles">${tiles.map(([k, n]) => `<div class="tile"><div class="n">${n}</div><div class="k">${k}</div></div>`).join('')}</div>
+    <h3>By town and kind</h3>
+    <p class="muted">Share of events found (estimated), with the number found in small print. Hover a cell for details.</p>
+    <div class="scroll"><table class="grid covgrid">
+      <tr><th>Town</th><th class="num">All</th>${tags.map((t) => `<th class="num">${esc(t)}</th>`).join('')}</tr>
+      <tr><td><b>All towns</b></td>${covCell(o, 'All')}${c.tags.map((t) => covCell(t, t.tag)).join('')}</tr>
+      ${c.towns.map((t) => `<tr><td>${t.town === '?' ? '<span class="muted">town unknown</span>' : esc(t.town)}</td>${covCell(t, t.town)}
+        ${tags.map((g) => covCell(cell.get(`${t.town}|${g}`), `${g} in ${t.town}`)).join('')}</tr>`).join('')}
+    </table></div>
+    <h3>Next searches</h3>
+    <p class="muted">The biggest gaps not searched lately, best first; each search picks among the top five.
+      Every ${c.everyHours} hours${c.discoverOn ? '' : ' (the "Find new sources" AI job is off)'}.</p>
+    <div class="scroll"><table class="grid">
+      <tr><th>Search</th><th>Why</th><th class="num">Priority</th></tr>
+      ${c.next.map((x) => `<tr><td>${esc(x.query)}</td><td>${esc(x.why)}${x.fruitless ? ` ${tag(`${x.fruitless}× nothing new before`)}` : ''}</td>
+        <td class="num">${x.score.toFixed(2)}</td></tr>`).join('') || '<tr><td class="empty-row">Every search was done lately.</td></tr>'}
+    </table></div>
+    <h3>Searches so far</h3>
+    <div class="scroll"><table class="grid">
+      <tr><th>Time</th><th>Search → why</th><th class="num">Links / new</th><th>Result</th></tr>
+      ${c.searches.map((d) => `<tr><td class="num">${fmtWhen(d.at)}</td>
+        <td>${esc(d.query)}<div class="muted">${esc(d.why || '')}</div></td>
+        <td class="num">${d.urls} / ${d.queued}</td>
+        <td>${tag(...SEARCH_RESULT[d.result])}${d.found.length ? `<div class="muted">${d.found.map((u) => esc(u.replace(/^https?:\/\/(www\.)?/, ''))).join(', ')}</div>` : ''}</td></tr>`).join('')
+      || '<tr><td class="empty-row">No aimed searches yet: the first runs in the next cycle that is due one.</td></tr>'}
+    </table></div>`;
+}
+
+const TABS = { overview, queue: queueTab, templates: templatesTab, sources: sourcesTab, domains: domainsTab, coverage: coverageTab, ai: aiTab, settings: settingsTab };
+const TAB_DATA = { queue: 'api/queue', templates: 'api/patterns', sources: 'api/sources', domains: 'api/domains', coverage: 'api/coverage', ai: 'api/ai' };
 
 function renderTab() {
   if (!snap) return;
@@ -784,6 +896,7 @@ connect();
   selectTab(name);
 }
 // Queue, sources and AI tabs refresh while open (not every second: they can be large).
-setInterval(() => { if (tab !== 'overview' && tab !== 'settings') refreshTabData(); }, 5000);
+// Coverage is computed over all events and changes slowly: loaded when its tab is opened.
+setInterval(() => { if (!['overview', 'settings', 'coverage'].includes(tab)) refreshTabData(); }, 5000);
 // Verification updates existing events without changing the count; refresh while crawling.
 setInterval(() => { if (snap?.running) loadEvents(); }, 30000);

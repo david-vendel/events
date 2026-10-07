@@ -20,13 +20,13 @@ import { DATA_DIR } from './store.js';
 export const AI_JOBS = {
   analyze: {
     label: 'Read new listing pages',
-    what: 'Reads a promising page once: what the site is, whether it lists events (and in which city), and a recipe '
-      + '(CSS selectors) so later visits need no AI.',
+    what: 'Reads a page from the AI queue once: what the site is, whether it lists events (and in which city), and a '
+      + 'recipe (CSS selectors) so later visits need no AI. Also repairs recipes that stopped reading their page well.',
     model: 'sonnet', // Opus wrote no better recipes; Haiku's were worse (eval, 2 Oct 2026)
   },
   triage: {
     label: 'Pre-check pages',
-    what: 'A quick look at a page found while exploring (its text only) before the page reader sees it: does it '
+    what: 'A quick look at a queued page found while exploring (its text only) before the page reader sees it: does it '
       + 'list upcoming events? Pages that do not are skipped, which spares most of the bigger model\'s calls.',
     model: 'haiku',
   },
@@ -38,7 +38,8 @@ export const AI_JOBS = {
   },
   discover: {
     label: 'Find new sources',
-    what: 'Web search for pages that list events in Slovak towns (a different town and kind each time), every 6 hours.',
+    what: 'Web search for pages that list events, aimed at the town and kind of event we cover worst (see the Coverage '
+      + 'tab); every 6 hours, every 24 once what we have is well covered.',
     model: 'haiku', // found as many new event sites as Sonnet (eval, 2 Oct 2026)
   },
   dates: {
@@ -77,6 +78,26 @@ export const aiConfig = () => structuredClone(config);
 export function aiAvailable(job) {
   return config.enabled && (!job || config.jobs[job]?.on !== false);
 }
+
+// When the Claude plan's limit is hit ("You've hit your session limit · resets 6:50pm"), every call
+// fails until the window resets: AI waits until then instead (work meanwhile waits in the AI queue).
+let pausedUntil = 0;
+const LIMIT_ERROR = /hit your .*limit|session limit|usage limit|weekly limit|rate.?limit/i;
+function pauseForLimit() {
+  const resets = (plan?.windows || []).filter((w) => w.used >= 99 && Date.parse(w.resetsAt) > Date.now())
+    .map((w) => Date.parse(w.resetsAt));
+  pausedUntil = resets.length ? Math.max(...resets) : Date.now() + 3600e3;
+  planUsage({ refresh: true }).then((p) => {
+    const later = (p?.windows || []).filter((w) => w.used >= 99 && Date.parse(w.resetsAt) > Date.now()).map((w) => Date.parse(w.resetsAt));
+    if (later.length) pausedUntil = Math.max(...later);
+  }).catch(() => {});
+}
+/** When AI may be called again after hitting the plan's limit (0: not paused). */
+export const aiPausedUntil = () => (pausedUntil > Date.now() ? pausedUntil : 0);
+/** AI is switched on for this job and not waiting for the plan's limit to reset. */
+/** Did a call fail because the plan's limit was hit? (The page itself was fine: try it again later.) */
+export const isLimitError = (message) => LIMIT_ERROR.test(message || '');
+export const aiReady = (job) => aiAvailable(job) && !aiPausedUntil();
 // ---------------------------------------------------------------- your Claude plan
 
 // What your Claude Code login's plan reports (same data as Claude Code's /usage): plan type,
@@ -242,6 +263,7 @@ export async function ask({ prompt, systemPrompt, schema, tools = [], maxTurns =
   if (!result) throw new Error('no result from Claude');
   if (result.subtype !== 'success' || result.is_error) {
     const err = new Error(result.subtype === 'success' ? result.result : result.subtype);
+    if (LIMIT_ERROR.test(err.message)) { pauseForLimit(); err.limit = true; }
     err.result = result;
     throw err;
   }
@@ -252,10 +274,13 @@ export async function ask({ prompt, systemPrompt, schema, tools = [], maxTurns =
  * @returns {{ analysis, call }}: the parsed Analysis (or null on failure) and the usage record.
  * `onStart` fires when this call's turn comes (calls queue behind each other).
  */
-export function analyzePage({ url, title, html, truncated, links, today, onStart }) {
+export function analyzePage({ url, title, html, truncated, links, today, previous, onStart }) {
   if (!aiAvailable('analyze')) return Promise.resolve({ analysis: null, call: null });
   const linkList = analyzeLinks(url, links).map(([href, text]) => `${href} ${text}`).join('\n');
-  const content = `URL: ${url}\nTitle: ${title}\nToday: ${today}\n` +
+  // Repairing a recipe: what the old one was and what went wrong with it, so the new one avoids that.
+  const repair = previous ? `A recipe written earlier for this page no longer works well: ${previous.problem}. ` +
+    `It was: ${JSON.stringify(previous.recipe)}. Write a recipe that reads the page as it is now.\n` : '';
+  const content = `URL: ${url}\nTitle: ${title}\nToday: ${today}\n${repair}` +
     (truncated ? 'Note: HTML was cut off at the size limit.\n' : '') +
     `\n<links>\n${linkList}\n</links>\n\n<html>\n${html}\n</html>`;
   return oneAtATime({ kind: 'analyze', target: url }, onStart, async () => {
@@ -446,26 +471,13 @@ export function readDates({ formats = [], prose = [], today }, { onStart } = {})
   });
 }
 
-// Discovery covers Slovakia town by town: each search is one kind of event in one place.
-const DISCOVERY_PLACES = [
-  'Košice', 'Bratislava', 'Žilina', 'Prešov', 'Banská Bystrica', 'Nitra', 'Trnava', 'Trenčín', 'Poprad', 'Martin',
-  'Michalovce', 'Spišská Nová Ves', 'Bardejov', 'Humenné', 'Levice', 'Komárno', 'Piešťany', 'Zvolen', 'Ružomberok',
-  'Liptovský Mikuláš', 'Vysoké Tatry', 'Prievidza', 'Lučenec', 'Rožňava', 'Trebišov', 'Nové Zámky', 'Senec', 'Pezinok',
-  'Košický kraj', 'Prešovský kraj', 'Žilinský kraj', 'Banskobystrický kraj', 'Nitriansky kraj', 'Trnavský kraj',
-  'Trenčiansky kraj', 'Bratislavský kraj', 'Slovensko',
-];
-const DISCOVERY_KINDS = [
-  'podujatia kalendár akcií', 'kultúrne podujatia program', 'koncerty program', 'divadlo program', 'výstavy galéria',
-  'festival', 'akcie pre deti', 'trhy jarmok', 'kino program', 'workshop prednáška', 'športové podujatia beh',
-  'mestské kultúrne stredisko program', 'kam ísť tento víkend',
-];
-
-/** Use web search to find pages that list events in some Slovak town. Returns { urls, call }. */
-export function discoverUrls(known = [], { onStart } = {}) {
+/**
+ * Use web search to find pages that list events: `target` is { place, query } (see coverage.js, which
+ * aims each search at the place and kind of event we're missing most). Returns { urls, call }.
+ */
+export function discoverUrls(known = [], target, { onStart } = {}) {
   if (!aiAvailable('discover')) return Promise.resolve({ urls: [], call: null });
-  const pick = (list) => list[Math.floor(Math.random() * list.length)];
-  const place = pick(DISCOVERY_PLACES);
-  const q = `${place} ${pick(DISCOVERY_KINDS)}`;
+  const { place, query: q } = target;
   const month = new Date().toLocaleString('sk-SK', { month: 'long', year: 'numeric' });
   const prompt = `Search the web for: "${q}" (it is ${month}). Find web pages that list upcoming events ` +
     `in ${place}, Slovakia: event calendars of the town and its cultural centre, venues (theatres, clubs, galleries, ` +

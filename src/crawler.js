@@ -22,7 +22,10 @@ import {
 } from './extract.js';
 import { checkDates } from './datecheck.js';
 import { useDateFormats } from './dates.js';
-import { aiAvailable, analyzePage, classifyEvents, discoverUrls, setAiConfig, triagePage } from './ai.js';
+import {
+  aiAvailable, aiPausedUntil, aiReady, analyzePage, classifyEvents, discoverUrls, isLimitError, setAiConfig, triagePage,
+} from './ai.js';
+import { aiJobDone, aiJobFailed, aiJobPostponed, aiJobsDue, enqueueAi } from './aiqueue.js';
 import { eventTags, headingTags, learnTags } from './tags.js';
 import { locateEvents } from './geo.js';
 import { EventIndex, migrate } from './events.js';
@@ -34,6 +37,7 @@ import {
 } from './learn.js';
 import { readSitemaps, sitemapsDue } from './sitemaps.js';
 import { downUntil, noteFetch, serverTrouble } from './hosthealth.js';
+import { coverageReport, discoveryEveryHours, noteDiscovery, pickDiscoveryTarget } from './coverage.js';
 
 const HOUR = 3600e3;
 const DAY = 24 * HOUR;
@@ -311,6 +315,32 @@ async function watchNetwork(state, url, ctx, r) {
   ctx.netFails = [];
 }
 
+/** What a recipe read from a page: how many events, and what share of them have a time, place, link. */
+function recipeStats(found) {
+  const n = found.length;
+  const share = (f) => (n ? Math.round((100 * found.filter(f).length) / n) / 100 : 0);
+  return {
+    count: n, timed: share((e) => e.time), located: share((e) => e.location), linked: share((e) => e.url),
+    titles: n ? new Set(found.map((e) => e.title)).size / n : 0,
+  };
+}
+
+/**
+ * Is a recipe reading this page worse than it used to (`good`: a read that was fine)? The site may
+ * have changed its HTML: a selector now catches the wrong element, or nothing. Returns what's
+ * wrong, in words, or null.
+ */
+function recipeTrouble(now, good) {
+  if (!good?.count) return null;
+  if (!now.count) return `finds no events any more (it found ${good.count})`;
+  if (good.count >= 6 && now.count < good.count * 0.3) return `finds ${now.count} events, it used to find ${good.count}`;
+  if (now.count >= 5 && now.titles < 0.3 && (good.titles ?? 1) >= 0.6) return 'gives most events the same title';
+  for (const [k, what] of [['timed', 'times'], ['located', 'places'], ['linked', 'links']]) {
+    if ((good[k] ?? 0) >= 0.8 && now[k] < 0.3) return `lost the events' ${what} (${Math.round(now[k] * 100)} % have one, it was ${Math.round(good[k] * 100)} %)`;
+  }
+  return null;
+}
+
 /**
  * Visit one URL: fetch, extract events (JSON-LD / recipe / AI), harvest links.
  * Returns the number of new events. A bug in the crawler's own code is caught here: it's counted
@@ -359,7 +389,10 @@ async function readPage(state, url, ctx, job) {
   ctx.budget.pages--;
   ctx.used.pages++;
 
-  const res = await fetchPage(url, cache);
+  // A page from the AI queue is fetched whole (not "unchanged since last time"): AI needs to see it.
+  const forAi = ctx.aiJob?.url === url;
+  if (forAi) { delete cache.etag; delete cache.lastModified; }
+  let res = await fetchPage(url, cache);
   health.fetched++;
   if (res.url && urlKey(res.url) !== urlKey(url)) {
     // Redirected: the target is the same page, so it counts as visited too.
@@ -391,10 +424,17 @@ async function readPage(state, url, ctx, job) {
     if (listing) listing.failures = (listing.failures || 0) + 1;
     return { status: 'error', http: res.status, note: res.error };
   }
-  if (!res.changed && listing?.recipe && listing.parsedWith === PARSER_VERSION) {
+  if (!res.changed && listing?.recipe && listing.parsedWith === PARSER_VERSION && !forAi) {
     health.unchanged++;
     cache.readAt = iso(Date.now());
     return { status: 'unchanged', http: res.status };
+  }
+  if (!res.html) {
+    // "Not modified", but the page has to be read anyway (no recipe yet, or a newer parser): fetch it whole.
+    delete cache.etag;
+    delete cache.lastModified;
+    res = await fetchPage(url, cache);
+    if (res.error || !res.html) return { status: 'error', http: res.status, note: res.error || 'no page' };
   }
 
   const $ = cheerio.load(res.html);
@@ -410,11 +450,15 @@ async function readPage(state, url, ctx, job) {
   let recipeBroken = false;
   let how = events.length ? 'json-ld' : undefined;
   let aiCall = null;
+  let recipeProblem = null; // what's wrong with how the saved recipe reads this page now, if anything
   if (listing?.recipe) {
     const found = withTags(applyRecipe($, listing.recipe, res.url), listing.tags);
+    const stats = recipeStats(found);
+    recipeProblem = recipeTrouble(stats, listing.recipeStats || (listing.lastCount && { count: listing.lastCount }));
     // A recipe that used to work and now finds nothing means the site changed.
     recipeBroken = found.length === 0 && listing.lastCount > 0;
     listing.lastCount = found.length;
+    if (!recipeProblem && found.length) listing.recipeStats = stats; // how a good read of this page looks
     events.push(...found);
     if (found.length) how = 'recipe';
   }
@@ -450,25 +494,43 @@ async function readPage(state, url, ctx, job) {
   // Pages of this template carry structured data: one without any just has nothing listed yet
   // (a cinema's programme for next week), and AI would find nothing either.
   if (structured && !partial) tpl.structured = true;
-  const wantsAi = aiAvailable('analyze')
-    && (!listing?.recipe || recipeBroken)
+  // Worth showing to AI: a promising page without a working recipe. AI isn't called here: the page
+  // goes to the AI queue (aiqueue.js), and the queue step of the cycle visits it again with AI.
+  const aiWorthy = aiAvailable('analyze')
+    && (!listing?.recipe || recipeBroken || recipeProblem)
     && (signals.looksLikeListing || ctx.seeds.has(url) || listing)
-    && (events.length === 0 || (partial && how === 'json-ld'))
-    && ctx.budget.ai > 0
-    && Date.now() - Date.parse(listing?.analyzedAt || 0) > RELEARN_AFTER
+    && (events.length === 0 || (partial && how === 'json-ld') || recipeProblem)
+    // A recipe that broke is repaired after a day; other pages are looked at once a week at most.
+    && Date.now() - Date.parse(listing?.analyzedAt || 0) > (recipeProblem ? DAY : RELEARN_AFTER)
     && (listing || ctx.seeds.has(url) || !(tplAsked || tplDead))
     && (!tpl.structured || partial)
-    // Pages without a working recipe: one look per site a cycle, and none after several found
-    // nothing there (a festival's gallery, info and about pages are all different templates, and AI
-    // may have named them as listings). Archives of past events are never worth a look.
-    && (ctx.seeds.has(url) || listing?.recipe || (!ctx.aiSites.has(source.origin) && !(source.aiMisses >= AI_MISSES_PER_SITE)))
+    // None at sites where several looks found nothing (a festival's gallery, info and about pages
+    // are all different templates, and AI may have named them as listings). Archives of past
+    // events are never worth a look.
+    && (ctx.seeds.has(url) || listing?.recipe || !(source.aiMisses >= AI_MISSES_PER_SITE))
     && !isArchiveUrl(url)
     && source.kind !== 'irrelevant';
+  const viaQueue = forAi;
+  if (aiWorthy && !viaQueue) {
+    const repair = Boolean(listing?.recipe);
+    const queued = enqueueAi(state, {
+      url, origin: source.origin, template: urlPattern(url), repair,
+      reason: repair ? `recipe ${recipeProblem}` : ctx.seeds.has(url) ? 'seed page, no recipe yet'
+        : listing ? 'listing page, no recipe yet' : 'looks like a listing, no recipe yet',
+      priority: repair ? 10 + Math.min(10, (listing.recipeStats?.count || listing.lastCount || 0) / 5)
+        : ctx.seeds.has(url) ? 8 : listing ? 6 : 3 + (signals.looksLikeListing ? 1 : 0),
+    });
+    if (queued) how = how ? `${how}; queued for AI` : 'queued for AI';
+  }
+  if (viaQueue) ctx.aiJob.worthy = aiWorthy;
+  // Pages without a working recipe: one look per site a cycle (repairs and seeds aside).
+  const wantsAi = aiWorthy && viaQueue && ctx.budget.ai > 0 && aiReady('analyze')
+    && (ctx.seeds.has(url) || listing?.recipe || !ctx.aiSites.has(source.origin));
 
   // A page with no recipe and nobody vouching for it (not a seed): the cheap model first says whether
   // it lists upcoming events at all; only then does the page reader (the bigger model) see it.
   let precheck = null;
-  if (wantsAi && !ctx.seeds.has(url) && !listing?.recipe && aiAvailable('triage') && ctx.budget.triage > 0) {
+  if (wantsAi && !ctx.seeds.has(url) && !listing?.recipe && aiReady('triage') && ctx.budget.triage > 0) {
     ctx.budget.triage--;
     ctx.used.triage++;
     ctx.aiSites.add(source.origin);
@@ -483,10 +545,13 @@ async function readPage(state, url, ctx, job) {
       tpl.aiSaid = `pre-check: no upcoming events (${precheck.reason || ''})`;
       source.aiMisses = (source.aiMisses || 0) + 1;
       how = 'pre-check: no events';
+      ctx.aiJob.answer = 'ok';
+    } else if (precheck.listsEvents === null) {
+      ctx.aiJob.answer = precheck.call?.error || 'no answer';
     }
   }
 
-  if (wantsAi && precheck?.listsEvents !== false) {
+  if (wantsAi && precheck?.listsEvents !== false && !isLimitError(precheck?.call?.error)) {
     if (!listing?.recipe) ctx.aiSites.add(source.origin);
     ctx.budget.ai--;
     ctx.used.ai++;
@@ -496,10 +561,12 @@ async function readPage(state, url, ctx, job) {
     const { html, truncated, title } = simplifyHtml(res.html);
     const { analysis: a, call } = await analyzePage({
       url: res.url, title, html, truncated, links, today: ctx.today,
+      previous: listing?.recipe && { recipe: listing.recipe, problem: recipeProblem || 'it finds no events any more' },
       onStart: () => report.update?.(job, { note: 'AI is reading the page…', ai: 'running' }),
     });
     aiCall = call;
-    tpl.aiAt = iso(Date.now());
+    ctx.aiJob.answer = a ? 'ok' : call?.error || 'no answer';
+    if (a || !isLimitError(call?.error)) tpl.aiAt = iso(Date.now());
     if (a) {
       const outcome = learnFromAnalysis(state, source, url, a, $, res.url, events, report, tpl);
       if (call) call.outcome = outcome;
@@ -563,15 +630,19 @@ function learnFromAnalysis(state, source, url, a, $, pageUrl, events, report, tp
   listing.tags = a.pageTags?.length ? a.pageTags : undefined; // e.g. a cinema programme: every event is "cinema"
   if (a.recipe) {
     const found = withTags(applyRecipe($, a.recipe, pageUrl), listing.tags);
-    if (found.length) {
+    // A repair must read the page at least about as well as the recipe it replaces does now.
+    const worse = listing.recipe && found.length < 0.8 * (listing.lastCount || 0);
+    if (worse) said.push(`new recipe finds ${found.length} events, the old one ${listing.lastCount}: kept the old one`);
+    if (found.length && !worse) {
       listing.recipe = a.recipe;
       listing.lastCount = found.length;
+      listing.recipeStats = recipeStats(found);
       // Other pages built from the same template ("…/podujatia/<any event>") get the same recipe.
       tpl.recipe = a.recipe;
       tpl.tags = listing.tags;
       events.push(...found);
       said.push(`recipe saved, finds ${found.length} events (later visits, and pages like ${urlPattern(url)}, need no AI)`);
-    } else {
+    } else if (!worse) {
       report.log(`AI recipe for ${url} matched nothing; keeping AI-extracted events only`);
       said.push('recipe matched nothing, not saved');
     }
@@ -751,6 +822,41 @@ function pruneEvents(state, today) {
   for (const [id, ev] of Object.entries(state.events)) if ((ev.end || ev.start) < cutoff) delete state.events[id];
 }
 
+/**
+ * Work through the AI queue (aiqueue.js): each page is fetched again and read with AI, within the
+ * cycle's AI budget. Pages are read one after another (AI takes one call at a time anyway). A page
+ * that no longer needs AI (its template got a recipe meanwhile) just leaves the queue.
+ */
+async function runAiQueue(state, ctx) {
+  const { report } = ctx.control;
+  const due = aiJobsDue(state);
+  if (!due.length || !aiAvailable('analyze')) return;
+  if (!aiReady('analyze')) {
+    report.log(`AI queue: ${due.length} pages wait; AI is paused by the plan's limit until ${new Date(aiPausedUntil()).toISOString().slice(11, 16)} UTC`);
+    return;
+  }
+  if (ctx.budget.ai <= 0) return;
+  report.phase('AI reading pages', `${due.length} pages waiting`);
+  for (const j of due) {
+    if (ctx.budget.ai <= 0 || ctx.control.stopped() || ctx.offline) break;
+    if (!aiReady('analyze')) {
+      report.log(`AI hit the plan's limit: the rest of the queue waits until ${new Date(aiPausedUntil()).toISOString().slice(11, 16)} UTC`);
+      break;
+    }
+    // A new site's page waits for the next cycle if this cycle already showed AI a page of that site.
+    if (!j.repair && ctx.aiSites.has(j.origin)) continue;
+    if (downUntil(state, j.url)) continue;
+    ctx.aiJob = { url: j.url };
+    await visit(state, j.url, ctx, 'learn');
+    const { worthy, answer } = ctx.aiJob;
+    ctx.aiJob = null;
+    if (worthy === false || answer === 'ok') aiJobDone(state, j.url); // read, or no longer needs AI
+    else if (!answer) aiJobFailed(state, j.url, worthy ? 'skipped' : 'page could not be read');
+    else if (isLimitError(answer)) aiJobPostponed(state, j.url, aiPausedUntil() || Date.now() + 3600e3);
+    else aiJobFailed(state, j.url, answer);
+  }
+}
+
 export async function runCycle(state, options = {}, control = defaultControl()) {
   const { maxPages = 60, maxAi = 5, maxVerify = 15, maxGeocode = 40, seedsFile = 'seeds.json' } = options;
   const { report } = control;
@@ -839,20 +945,28 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
     }, control);
   }
 
-  // 3. Occasional AI web search for new sources.
-  if (!control.stopped() && aiAvailable('discover') && ctx.budget.ai > 0 && Date.now() - Date.parse(state.meta.lastDiscoveryAt || 0) > DISCOVERY_EVERY) {
-    report.phase('AI discovery search');
+  // 3. Occasional AI web search for new sources, aimed at the town and kind we cover worst.
+  const coverage = coverageReport(state, today);
+  const discoverEvery = discoveryEveryHours(coverage, DISCOVERY_EVERY / HOUR) * HOUR;
+  const target = !control.stopped() && aiReady('discover') && ctx.budget.ai > 0
+    && Date.now() - Date.parse(state.meta.lastDiscoveryAt || 0) > discoverEvery && pickDiscoveryTarget(state, coverage);
+  if (target) {
+    report.phase('AI discovery search', target.why);
     ctx.budget.ai--;
     ctx.used.ai++;
-    const known = Object.values(state.sources).filter((s) => s.kind !== 'unknown').map((s) => new URL(s.origin).host);
-    const job = report.start('discover', 'web search');
-    const { urls, call } = await discoverUrls(known, {
+    // The sites we know for that town first, so the search skips them.
+    const known = Object.values(state.sources).filter((s) => s.kind !== 'unknown')
+      .sort((a, b) => (b.city === target.place) - (a.city === target.place))
+      .map((s) => new URL(s.origin).host);
+    const job = report.start('discover', target.query);
+    const { urls, call } = await discoverUrls(known, target, {
       onStart: () => report.update?.(job, { note: 'AI is searching the web…', ai: 'running' }),
     });
     state.meta.lastDiscoveryAt = iso(Date.now());
     let queuedUrls = 0;
     for (const u of urls) if (addToFrontier(state, u, 7, 'ai-discovery')) queuedUrls++;
-    if (call) call.outcome = `found ${urls.length} links, ${queuedUrls} new in the queue`;
+    noteDiscovery(state, target, urls, queuedUrls);
+    if (call) call.outcome = `aimed at ${target.why}; found ${urls.length} links, ${queuedUrls} new in the queue`;
     report.end(job, { status: call?.error ? 'error' : 'ok', links: urls.length, ai: aiSummary(call), note: call?.error });
   }
 
@@ -907,13 +1021,16 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
   }
 
   // Dates, tagging and locating run last, so events found this cycle get done this cycle.
-  // 6. Date formats not confirmed yet (or due for a re-check), and schedules written as prose.
-  if (!control.stopped() && aiAvailable('dates')) await checkDates(state, ctx, report);
+  // 6. Pages waiting for AI: no recipe yet, or one that stopped reading the page well.
+  if (!control.stopped()) await runAiQueue(state, ctx);
 
-  // 7. Tag events the rules couldn't place, with the cheap model; its answers become rules.
-  if (!control.stopped() && aiAvailable('tag')) await tagUncertainEvents(state, today, report);
+  // 7. Date formats not confirmed yet (or due for a re-check), and schedules written as prose.
+  if (!control.stopped() && aiReady('dates')) await checkDates(state, ctx, report);
 
-  // 8. Coordinates for upcoming events (cached per place; OpenStreetMap lookups for new places).
+  // 8. Tag events the rules couldn't place, with the cheap model; its answers become rules.
+  if (!control.stopped() && aiReady('tag')) await tagUncertainEvents(state, today, report);
+
+  // 9. Coordinates for upcoming events (cached per place; OpenStreetMap lookups for new places).
   if (!control.stopped()) {
     report.phase('Locating events');
     const r = await locateEvents(state, today, maxGeocode, report);

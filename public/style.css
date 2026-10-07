@@ -214,3 +214,9 @@ select#city { padding: 8px 10px; border: 1px solid var(--line); border-radius: 1
 .help { grid-column: 1 / -1; max-width: 640px; font-size: 13px; line-height: 1.5; background: var(--info-bg); border-radius: 8px; padding: 4px 14px; }
 .help p, .help ol { margin: 8px 0; }
 .help ol { padding-left: 20px; }
+.covgrid td.cov { white-space: nowrap; }
+.covgrid td.cov small { color: var(--muted); font-size: 11px; }
+.covgrid td.cov.ok { background: var(--ok-bg); color: var(--ok); }
+.covgrid td.cov.warn { background: var(--warn-bg); color: var(--warn); }
+.covgrid td.cov.bad { background: var(--bad-bg); color: var(--bad); }
+.warnbox { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 8px 12px; font-size: 13px; }

@@ -3,13 +3,15 @@
 import { loadState, saveState } from './store.js';
 import { runCycle } from './crawler.js';
 import {
-  AI_JOBS, AI_MODELS, aiAvailable, aiConfig, aiInput, aiStatus, lastPlanUsage, planUsage, setAiConfig, setAiRecorder,
+  AI_JOBS, AI_MODELS, aiAvailable, aiConfig, aiInput, aiPausedUntil, aiStatus, lastPlanUsage, planUsage, setAiConfig, setAiRecorder,
 } from './ai.js';
 import { facebookEnabled } from './corroborate.js';
 import { domainOf, hostOf } from './urls.js';
 import { activeRuleCount, tagSources } from './tags.js';
 import { parseLocation, placeFor, venueKey } from './geo.js';
 import { linkBonus, patternKeys } from './learn.js';
+import { coverageReport, discoveryEveryHours, discoveryTargets, searchResult } from './coverage.js';
+import { aiJobsDue } from './aiqueue.js';
 
 /**
  * Where and when an event is on, day by day, when that's more than one place or time (a film at two
@@ -253,8 +255,24 @@ export class Engine {
         pagesKnown: Object.keys(s.pages).length,
         social: Object.keys(s.social).length,
       },
-      ai: { ...ai, enabled: aiAvailable(), ...aiStatus(), jobs: this.aiJobs(today), models: AI_MODELS, byModel: this.aiByModel(), plan: lastPlanUsage() },
+      ai: { ...ai, enabled: aiAvailable(), ...aiStatus(), jobs: this.aiJobs(today), models: AI_MODELS, byModel: this.aiByModel(), plan: lastPlanUsage(),
+        pausedUntil: aiPausedUntil() || null, queue: this.aiQueue() },
       facebook: facebookEnabled(),
+    };
+  }
+
+  /** Pages waiting for AI (aiqueue.js): how many, why, and the first ones in line. */
+  aiQueue() {
+    const all = Object.values(this.state.aiQueue || {});
+    const due = aiJobsDue(this.state);
+    const order = new Map(due.map((j, i) => [j.url, i]));
+    return {
+      size: all.length,
+      repairs: all.filter((j) => j.repair).length,
+      due: due.length,
+      next: [...all].sort((a, b) => (order.get(a.url) ?? 1e9) - (order.get(b.url) ?? 1e9)).slice(0, 25)
+        .map((j) => ({ url: j.url, reason: j.reason, repair: j.repair, priority: j.priority, addedAt: j.addedAt, tries: j.tries,
+          nextTryAt: j.nextTryAt, lastError: j.lastError })),
     };
   }
 
@@ -386,6 +404,30 @@ export class Engine {
       m.costUsd += r.usage.costUsd || 0;
     }
     return Object.values(by).sort((a, b) => b.costUsd - a.costUsd || b.calls - a.calls);
+  }
+
+  /**
+   * How much of what's on we probably have, per town and kind (coverage.js), and what the discovery
+   * search did about the gaps: the searches so far (did each find a new event source?) and the next ones.
+   */
+  coverage() {
+    const s = this.state;
+    const report = coverageReport(s);
+    const everyHours = discoveryEveryHours(report, Number(process.env.EVENTS_DISCOVERY_HOURS || 6));
+    const searches = (s.meta.discoveries || []).slice(-40).reverse().map((d) => ({
+      at: d.at, place: d.place, tag: d.tag, query: d.query, why: d.why, urls: d.urls, queued: d.queued,
+      result: searchResult(s, d),
+      found: (d.origins || []).filter((o) => s.sources[o]?.kind === 'events'),
+    }));
+    return {
+      ...report,
+      towns: report.towns.slice(0, 40),
+      searches,
+      next: discoveryTargets(s, report).slice(0, 8),
+      everyHours,
+      lastDiscoveryAt: s.meta.lastDiscoveryAt,
+      discoverOn: aiAvailable('discover'),
+    };
   }
 
   aiCalls() {

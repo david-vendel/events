@@ -54,6 +54,8 @@ export function loadState() {
     ai: load('ai', []),
     // crawler settings changed from the admin panel
     settings: load('settings', {}),
+    // pages waiting for the AI page reader: url -> { reason, priority, tries… } (see aiqueue.js)
+    aiQueue: load('aiQueue', {}),
   };
 }
 

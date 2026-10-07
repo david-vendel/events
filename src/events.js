@@ -3,7 +3,9 @@
 // that lists the same thing… Each sighting keeps its own date so the UI can show whether
 // sources agree. sources[0] is the primary source; the event's top-level fields mirror it.
 import { cleanLocation, eventId, facebookEvent } from './extract.js';
-import { couldBeSame, dateDistance, differentTowns, findSameEvent, titleSimilarity, titleTokens } from './match.js';
+import {
+  couldBeSame, dateDistance, differentTowns, findSameEvent, sameEventScore, titleSimilarity, titleTokens, useTitleWeights,
+} from './match.js';
 import { finishDate, readDateText, tooFarAhead } from './dates.js';
 import { eventTags } from './tags.js';
 import { knownTown } from './geo.js';
@@ -35,11 +37,22 @@ const PRIMARY_FIELDS = ['title', 'start', 'location', 'description', 'url'];
 // Copied even when missing, so a corrected reading ("all day", no end) replaces a wrong one.
 const WHEN_FIELDS = ['end', 'time', 'endTime'];
 
-/** Rows of the primary's site with the primary's title on other days: days of one run. */
+/**
+ * Rows of the primary's site with the primary's title on the days next to it: days of one run.
+ * Only back-to-back days chain ("Október v knižnici", listed daily); a weekly event's dates don't.
+ */
 export const runRows = (ev) => {
   const p = ev.sources[0];
-  return ev.sources.filter((r) => r === p
+  const same = ev.sources.filter((r) => r === p
     || (!r.linked && r.start && r.site === p.site && titleSimilarity(r.title, p.title) >= 0.85 && !differentTowns(r, p)));
+  if (!p.start) return same;
+  const run = [p];
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const r of same) if (!run.includes(r) && run.some((x) => dateDistance(x, r) <= 1)) { run.push(r); grew = true; }
+  }
+  return run;
 };
 
 function syncFromPrimary(ev, rules) {
@@ -71,7 +84,8 @@ function syncFromPrimary(ev, rules) {
 }
 
 /** Older data had no sources[] or tags; fill them in. Tags are recomputed as the rules improve. */
-export function migrate(state) {
+export function migrate(state, today = new Date().toISOString().slice(0, 10)) {
+  useTitleWeights(Object.values(state.events).map((e) => e.title || e.sources?.[0]?.title || ''));
   // Sites judged "irrelevant" back when only Košice events counted get judged again.
   for (const s of Object.values(state.sources)) {
     if (s.kind === 'irrelevant' && s.judgedFor !== 'any place') s.kind = 'unknown';
@@ -89,6 +103,67 @@ export function migrate(state) {
   for (const ev of Object.values(state.events)) splitUnrelated(state, ev);
   for (const ev of Object.values(state.events)) syncFromPrimary(ev, state.tagRules);
   joinRuns(state);
+  joinDuplicates(state, today);
+}
+
+/** The town an event is in: from its location, or else the city its listing site covers. */
+export function townOf(state, ev) {
+  const t = knownTown(ev.location);
+  if (t) return t;
+  try { return state.sources[new URL(ev.sources?.[0]?.via || ev.source).origin]?.city || null; } catch { return null; }
+}
+
+const listingSitesOf = (ev) => new Set(ev.sources.filter((r) => !r.linked && r.site).map((r) => r.site));
+
+/**
+ * Would splitUnrelated keep a and b together once joined? Some listing of one must match some
+ * listing of the other, and their listings mustn't name different towns.
+ */
+function rowsConnect(a, b) {
+  const ra = a.sources.filter((r) => !r.linked), rb = b.sources.filter((r) => !r.linked);
+  const towns = (rows) => new Set(rows.map((r) => knownTown(r.location)).filter(Boolean));
+  const ta = towns(ra), tb = towns(rb);
+  if ([...ta].some((t) => tb.size && !tb.has(t)) || [...tb].some((t) => ta.size && !ta.has(t))) return false;
+  return ra.some((x) => rb.some((y) => sameEventRows(x, y)));
+}
+
+/**
+ * Upcoming events from different sites that matching would join today but that were stored apart:
+ * one site's listing came first and the other's title or dates read differently then, or matching
+ * has improved since. Joined into the one seen first, best matches first. Events that share a site
+ * are left alone (one site's listings of a title are separate shows or days of a run, see joinRuns).
+ */
+function joinDuplicates(state, today) {
+  const evs = Object.values(state.events).filter((e) => (e.end || e.start) >= today && e.start)
+    .sort((a, b) => a.start.localeCompare(b.start));
+  const plus3 = (d) => new Date(Date.parse(d) + 3 * 864e5).toISOString().slice(0, 10);
+  const pairs = [];
+  for (let i = 0; i < evs.length; i++) {
+    const a = evs[i], last = plus3(a.end || a.start), sitesA = listingSitesOf(a), townA = townOf(state, a);
+    for (let j = i + 1; j < evs.length && evs[j].start <= last; j++) {
+      const b = evs[j];
+      const score = sameEventScore(a, b);
+      if (!score) continue;
+      const townB = townOf(state, b);
+      if (townA && townB && townA !== townB) continue;
+      if ([...listingSitesOf(b)].some((x) => sitesA.has(x)) || !rowsConnect(a, b)) continue;
+      pairs.push({ a, b, score });
+    }
+  }
+  pairs.sort((x, y) => y.score - x.score);
+  let joined = 0;
+  for (const { a, b } of pairs) {
+    if (!state.events[a.id] || !state.events[b.id]) continue; // already joined into another
+    const [keep, gone] = (a.firstSeenAt || '') <= (b.firstSeenAt || '') ? [a, b] : [b, a];
+    for (const r of gone.sources) if (!keep.sources.some((x) => rowKey(x) === rowKey(r))) keep.sources.push(r);
+    keep.aliases = [...new Set([...(keep.aliases || []), gone.id, ...(gone.aliases || [])])];
+    if (gone.unconfirmed) keep.unconfirmed = [...new Set([...(keep.unconfirmed || []), ...gone.unconfirmed])].slice(-20);
+    delete state.events[gone.id];
+    syncFromPrimary(keep, state.tagRules);
+    joined++;
+  }
+  if (joined) console.log(`  ⇄ joined ${joined} events that other sites list too`);
+  return joined;
 }
 
 /**
@@ -144,8 +219,9 @@ function tidyRows(ev) {
 }
 
 /** Would matching put these two rows in one event today? (See findSameEvent.) */
-const sameEventRows = (a, b) => titleSimilarity(a.title, b.title) >= 0.5 && !differentTowns(a, b)
-  && (!a.start || !b.start || dateDistance(a, b) <= (a.site === b.site ? 1 : 3));
+const sameEventRows = (a, b) => (!a.start || !b.start
+  ? titleSimilarity(a.title, b.title) >= 0.5 && !differentTowns(a, b)
+  : couldBeSame(a, b) && dateDistance(a, b) <= (a.site === b.site ? 1 : 3));
 
 /**
  * Undo merges that matching no longer makes: through a URL that different events share (rows whose
@@ -159,6 +235,13 @@ function splitUnrelated(state, ev) {
   const group = rows.map((_, i) => i);
   const town = rows.map((r) => knownTown(r.location)); // per group, once known
   const root = (i) => (group[i] === i ? i : (group[i] = root(group[i])));
+  // Dates the event's own page gives (a schedule, or a range under its heading): the primary's
+  // site listing it on those days lists the same event.
+  const days = new Set((ev.schedule || []).map((d) => d.date));
+  const range = ev.pageRange;
+  const onItsPage = (r) => r.site === rows[0].site && r.start && titleSimilarity(r.title, rows[0].title) >= 0.85
+    && (days.has(r.start) || (range?.start && r.start >= range.start && r.start <= (range.end || range.start)));
+  for (let i = 1; i < rows.length; i++) if (onItsPage(rows[i])) group[root(i)] = root(0);
   for (let i = 0; i < rows.length; i++) {
     for (let j = i + 1; j < rows.length; j++) {
       const a = root(i), b = root(j);

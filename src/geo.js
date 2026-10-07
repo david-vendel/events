@@ -61,6 +61,14 @@ const byLength = (keys) => [...keys].sort((a, b) => b.length - a.length).join('|
 const TOWN_RE = new RegExp(`(?:^|[^a-z])(${byLength([...TOWNS.keys()].filter((k) => !AMBIGUOUS.has(k)))})(?=$|[^a-z])`, 'g');
 const WHOLE_TOWN_RE = new RegExp(`^(${byLength(TOWNS.keys())})(?:\\s*[-–—]\\s*(.+))?$`);
 
+// Adjectives of the bigger towns ("bratislavské", "košický", "žilinská"): the town's name less its
+// last letter, plus an ending. Only names of 6+ letters, so short ones don't eat ordinary words.
+const TOWN_ADJ_RE = new RegExp(`(?:^|[^a-z])(${byLength([...TOWNS.keys()]
+  .filter((k) => !AMBIGUOUS.has(k) && !k.includes(' ') && k.length >= 6).map((k) => k.slice(0, -1)))})[a-z]*(?=$|[^a-z])`, 'g');
+
+/** A folded title without the towns it names ("donaha! - trnava - vypredane" → "donaha! - - vypredane"). */
+export const withoutTowns = (folded) => folded.replace(TOWN_RE, ' ').replace(TOWN_ADJ_RE, ' ');
+
 // A part that IS a town, maybe with its district: "Košice", "Košice-Staré Mesto", "Košice – Krásna".
 function wholeTown(part) {
   const m = fold(part).match(WHOLE_TOWN_RE);
