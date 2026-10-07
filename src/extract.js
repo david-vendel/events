@@ -121,6 +121,42 @@ export function jsonLdEvents($, pageUrl) {
   return out;
 }
 
+/**
+ * Events of an EventON calendar (WordPress plugin; gemercan.sk), once Chrome has filled it in. Each
+ * row carries its start and end as Unix seconds (data-time="1789653600-1801436340"); the dates it
+ * shows ("17sep(sep 17)16:00") have no year. An all-day event runs from midnight to midnight, and an
+ * end at 23:59 means "until that day": both give dates without times.
+ */
+export function eventOnEvents($, pageUrl) {
+  const out = [];
+  const seen = new Set();
+  $('.eventon_list_event[data-time]').each((_, el) => {
+    const $el = $(el);
+    const [s, e] = String($el.attr('data-time')).split('-').map((n) => Number(n) * 1000);
+    if (!Number.isFinite(s) || !s) return;
+    const [startDay, startTime] = LOCAL.format(new Date(s)).split(' ');
+    const [endDay, endTime] = Number.isFinite(e) && e > s ? LOCAL.format(new Date(e)).split(' ') : [];
+    const allDay = startTime === '00:00' && (!endTime || endTime === '00:00' || endTime === '23:59');
+    // Venue and address when given (this site gives only the town), else the "Kde?" (where?) box.
+    const place = ['.evo_location_name', '.evo_location_address'].map((sel) => clean($el.find(sel).first().text()));
+    if (!place[0]) place[0] = clean($el.find('.evocard_box.location').first().text()).replace(/^Kde\s*\?\s*/i, '');
+    const href = $el.find('.evo_event_schema a[href]').attr('href') || $el.find('a[href*="/events/"]').attr('href');
+    const ev = makeEvent({
+      title: $el.find('.evcal_event_title').first().text(),
+      start: allDay ? startDay : `${startDay}T${startTime}`,
+      end: endDay && (endDay !== startDay || !allDay)
+        ? (allDay || endTime === '23:59' ? endDay : `${endDay}T${endTime}`) : undefined,
+      location: [...new Set(place.filter(Boolean))].join(', '),
+      url: href ? absolutize(href, pageUrl) : undefined,
+    }, pageUrl);
+    if (ev && !seen.has(ev.id)) {
+      seen.add(ev.id);
+      out.push(ev);
+    }
+  });
+  return out;
+}
+
 // First link inside an item that stays on the same site (skips map/share links).
 function sameSiteLink($, $el, pageUrl) {
   const host = new URL(pageUrl).host;

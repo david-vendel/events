@@ -15,8 +15,17 @@ const CANDIDATES = [
 
 export const chromePath = () => CANDIDATES.find((p) => fs.existsSync(p));
 
+// One page at a time: each Chrome takes ~150 MB, and the server has little memory to spare.
+let turn = Promise.resolve();
+
 /** @returns {Promise<string|null>} rendered HTML, or null when Chrome is missing or fails */
-export function renderPage(url, { waitMs = 8000 } = {}) {
+export function renderPage(url, opts) {
+  const done = turn.then(() => render(url, opts));
+  turn = done;
+  return done;
+}
+
+function render(url, { waitMs = 8000 } = {}) {
   const chrome = chromePath();
   if (!chrome) return Promise.resolve(null);
   const args = ['--headless=new', '--disable-gpu', '--no-first-run', '--lang=sk',

@@ -16,7 +16,7 @@ import dns from 'node:dns/promises';
 import * as cheerio from 'cheerio';
 import { fetchPage } from './fetcher.js';
 import {
-  PARSER_VERSION, applyRecipe, clean, extractLinks, makeEvent, isArchiveUrl, isSocial, jsonLdEvents, pageSignals, pageText,
+  PARSER_VERSION, applyRecipe, clean, extractLinks, makeEvent, isArchiveUrl, isSocial, eventOnEvents, jsonLdEvents, pageSignals, pageText,
   partialStructured, scoreLink, scriptCalendar,
   simplifyHtml,
 } from './extract.js';
@@ -452,6 +452,9 @@ async function readPage(state, url, ctx, job) {
   const links = extractLinks($, res.url);
 
   const events = jsonLdEvents($, res.url);
+  // An EventON calendar (rendered above) gives each event's exact times in its markup: no AI needed.
+  const eventOn = !events.length && calendar?.name === 'EventON' && !blind;
+  if (eventOn) events.push(...eventOnEvents($, res.url));
   const structured = events.length;
   const signals = pageSignals($);
   // Some sites give structured data for only the first few items ("4 of 20 films today"): then the
@@ -459,7 +462,7 @@ async function readPage(state, url, ctx, job) {
   const partial = events.length > 0 && partialStructured(events, links, res.url);
   const unread = !events.length || partial;
   let recipeBroken = false;
-  let how = events.length ? 'json-ld' : undefined;
+  let how = events.length ? (eventOn ? 'eventon' : 'json-ld') : undefined;
   let aiCall = null;
   let recipeProblem = null; // what's wrong with how the saved recipe reads this page now, if anything
   if (listing?.recipe) {
