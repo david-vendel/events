@@ -112,6 +112,9 @@ pre { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background
   background: var(--card); color: var(--text); }
 .aijobrow .click { cursor: pointer; text-decoration: underline; }
 .outcome { font-size: 12px; color: var(--text); margin-top: 3px; }
+.outcome.bad { color: var(--bad); }
+/* AI log: the page / outcome column takes the width; the others only what they need. */
+.ailog td.url { width: 100%; }
 .aijobs.plan { margin-bottom: 12px; }
 .planhead { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
 .planhead .muted { flex: 1; }

@@ -685,12 +685,12 @@ function aiTab() {
     <div id="ai-detail"></div>
     <div class="sorts"><span>Show</span>${[['all', 'All jobs'], ...Object.entries(a.jobs).map(([k, j]) => [k, j.label])].map(([k, label]) =>
       `<button data-aifilter="${k}" aria-pressed="${k === aiFilter}">${esc(label)}</button>`).join('')}</div>
-    <div class="scroll"><table class="grid">
+    <div class="scroll"><table class="grid ailog">
       <tr><th>Time</th><th>Job</th><th>Page / query → what came of it</th><th class="num">Tokens in/out</th><th class="num">s</th></tr>
       ${calls.map((c) => `<tr class="click ${selectedAi === c.id ? 'sel' : ''}" data-ai="${c.id}">
         <td class="num">${fmtWhen(c.at)}</td>
-        <td>${tag(jobName(c), 'ai')}<div class="muted">${esc(c.model || '')}</div>${c.error ? ` ${tag(c.error, 'bad')}` : ''}</td>
-        <td class="url">${esc(c.target)}${c.outcome ? `<div class="outcome">${esc(c.outcome).replace(/\n/g, '<br>')}</div>` : ''}</td>
+        <td>${tag(jobName(c), 'ai')}<div class="muted">${esc(c.model || '')}</div>${c.error ? tag('failed', 'bad') : ''}</td>
+        <td class="url">${esc(c.target)}${c.error ? `<div class="outcome bad">${esc(c.error)}</div>` : ''}${c.outcome ? `<div class="outcome">${esc(c.outcome).replace(/\n/g, '<br>')}</div>` : ''}</td>
         <td class="num">${fmtTokens(c.usage.input + c.usage.cacheRead + c.usage.cacheWrite)} / ${fmtTokens(c.usage.output)}${c.usage.costUsd ? `<div class="muted">${fmtUsd(c.usage.costUsd)}</div>` : ''}</td>
         <td class="num">${(c.ms / 1000).toFixed(1)}</td></tr>`).join('')
       || '<tr><td class="empty-row">No AI calls yet.</td></tr>'}
@@ -771,13 +771,14 @@ function datesView(r, input) {
 }
 
 let detailCache = { id: null, html: '' };
+let scrollToAi = null; // a call just opened (clicked, or in the URL): scroll to its details once, not on every refresh
 
 const AI_VIEWS = { analyze: analyzeView, tag: tagView, classify: tagView, discover: discoverView, dates: datesView };
 
 async function showAiDetail(id) {
   selectedAi = id;
   setHash(`ai/${id}`);
-  const box = $('#ai-detail');
+  let box = $('#ai-detail');
   if (!box) return;
   // The tab re-renders every few seconds: put the open call back as it was, without a reload or a jump.
   if (detailCache.id === id) {
@@ -787,6 +788,8 @@ async function showAiDetail(id) {
   }
   box.innerHTML = '<div class="detail muted">Loading…</div>';
   const c = await getJson(`${API}ai/${id}`);
+  // The tab may have re-rendered (or another call been opened) while this loaded.
+  if (selectedAi !== id || !(box = $('#ai-detail'))) return;
   const u = c.usage || {};
   box.innerHTML = `<div class="detail">
     <dl>
@@ -816,7 +819,10 @@ async function showAiDetail(id) {
   box.querySelector('.detail').insertAdjacentHTML('afterbegin', '<button class="btn close" data-ai-close>Close</button>');
   detailCache = { id, html: box.innerHTML };
   document.querySelectorAll('[data-ai]').forEach((r) => r.classList.toggle('sel', r.dataset.ai === id));
-  box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (scrollToAi === id) {
+    scrollToAi = null;
+    box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 }
 
 // What a setting or view does, how and why: shown below it when its ⓘ is pressed.
@@ -1031,11 +1037,14 @@ $('#tab').onclick = (e) => {
   if (go) return selectTab(go.dataset.go);
   const call = e.target.closest('[data-aicall]');
   if (call) {
-    selectedAi = call.dataset.aicall;
+    selectedAi = scrollToAi = call.dataset.aicall;
     return selectTab('ai');
   }
   const ai = e.target.closest('[data-ai]');
-  if (ai) return showAiDetail(ai.dataset.ai);
+  if (ai) {
+    scrollToAi = ai.dataset.ai;
+    return showAiDetail(ai.dataset.ai);
+  }
   if (e.target.closest('[data-ai-close]')) {
     selectedAi = null;
     setHash('ai');
@@ -1130,6 +1139,11 @@ $('#tab').addEventListener('pointermove', (e) => {
   tmTip.style.top = `${e.clientY + 16 + r.height > innerHeight ? e.clientY - r.height - 10 : e.clientY + 16}px`;
 });
 $('#tab').addEventListener('pointerleave', hideTmTip);
+// Sections of the open AI call that were expanded stay expanded when the tab refreshes.
+$('#tab').addEventListener('toggle', (e) => {
+  const box = e.target.closest('#ai-detail');
+  if (box && detailCache.id === selectedAi) detailCache.html = box.innerHTML;
+}, true);
 window.addEventListener('resize', () => { if (tab === 'ai') drawTreemap(); });
 
 // ---------------------------------------------------------------- live updates
@@ -1164,7 +1178,7 @@ function connect() {
 
 function openFromHash() {
   const [name, id] = location.hash.slice(1).replace(/^admin\/?/, '').split('/'); // e.g. #ai/<call id>, #admin/ai/<call id>
-  if (name === 'ai' && id) selectedAi = id;
+  if (name === 'ai' && id) selectedAi = scrollToAi = id;
   selectTab(name);
 }
 
