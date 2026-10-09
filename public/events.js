@@ -51,7 +51,15 @@ const recall = (k) => { try { return localStorage.getItem(k) || ''; } catch { re
 // #admin… opens the public page's read-only crawler dashboard (admin.js).
 let view = location.hash.startsWith('#admin') && $('#adminview') ? 'admin'
   : (new URLSearchParams(location.search).get('view') || recall('view')) === 'map' ? 'map' : 'list';
-let city = recall('city');
+// ?city=Košice opens that town (a link someone can share); otherwise the last town chosen here.
+let city = new URLSearchParams(location.search).get('city') ?? recall('city');
+// Keep the chosen town in the address bar, so the page can be shared or bookmarked as it is.
+function cityToUrl() {
+  const u = new URL(location.href);
+  if (city) u.searchParams.set('city', city); else u.searchParams.delete('city');
+  if (u.href !== location.href) history.replaceState(history.state, '', u);
+}
+cityToUrl();
 
 // Kinds of event (same list as src/tags.js); "other" is an event with none of them.
 const TAG_LABELS = {
@@ -328,6 +336,7 @@ document.querySelectorAll('#views button').forEach((b) => b.addEventListener('cl
 $('#city').addEventListener('change', (e) => {
   city = e.target.value;
   remember('city', city);
+  cityToUrl();
   // On the map, go to the town picked (or back to all of Slovakia).
   Promise.resolve(renderEvents()).then(() => {
     if (view !== 'map' || !map) return;

@@ -48,8 +48,8 @@ function cachedJson(key, ms, build) {
   return c;
 }
 
-// The public page's Admin view: read-only copies of the admin GET routes, at api/ro/<name> (one path
-// prefix to open in the proxy). No settings to change, and nothing about the Claude account (plan usage).
+// The public page's Admin view: read-only copies of the admin GET routes, at ro/<name>: outside api/,
+// so a proxy that guards api/ leaves them public. No settings to change, and nothing about the Claude account (plan usage).
 const READONLY = {
   status: [2_000, () => { const s = engine.snapshot(); return { ...s, ai: { ...s.ai, plan: undefined } }; }],
   queue: [5_000, () => engine.queue()],
@@ -74,7 +74,7 @@ setInterval(() => {
   for (const res of streams) res.write(data);
 }, 1000).unref();
 
-// Admin API. Behind a proxy, only the PUBLIC and api/ro/ routes above should be reachable without a login.
+// Admin API. Behind a proxy, only the PUBLIC and ro/ routes above should be reachable without a login.
 const routes = {
   'GET /api/sources': () => engine.sources(),
   'GET /api/status': () => engine.snapshot(),
@@ -101,14 +101,14 @@ http.createServer(async (req, res) => {
     req.on('close', () => streams.delete(res));
     return;
   }
-  const aiDetail = pathname.match(/^\/api\/(?:ro\/)?ai\/([\w-]+)$/); // read-only too
+  const aiDetail = pathname.match(/^\/(?:api|ro)\/ai\/([\w-]+)$/); // read-only too
   if (aiDetail && req.method === 'GET') {
     const call = engine.aiCall(aiDetail[1]);
     return call ? json(req, res, call) : json(req, res, { error: 'not found' }, 404);
   }
   const pub = PUBLIC[`${req.method} ${pathname}`];
   if (pub) return send(req, res, cachedJson(pathname, PUBLIC_CACHE_MS, pub));
-  const ro = req.method === 'GET' && pathname.match(/^\/api\/ro\/([\w-]+)$/);
+  const ro = req.method === 'GET' && pathname.match(/^\/ro\/([\w-]+)$/);
   if (ro && READONLY[ro[1]]) return send(req, res, cachedJson(`ro ${ro[1]}`, ...READONLY[ro[1]]));
   const route = routes[`${req.method} ${pathname}`];
   if (route) return json(req, res, await route(req.method === 'POST' ? await readBody(req) : undefined));

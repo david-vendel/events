@@ -1,9 +1,9 @@
 // Left column of the admin page: live crawler dashboard. Status arrives once a second over api/stream;
 // the Queue, Sources, Domains and AI tabs fetch their own data while open.
 // The public page has the same dashboard, read only, as its Admin view (#adminview): no controls, no
-// Templates or Settings tab, no AI switches or plan; it polls the cached copies at api/ro/ while the view is open.
+// Templates or Settings tab, no AI switches or plan; it polls the cached copies at ro/ while the view is open.
 const READONLY = !!$('#adminview');
-const API = READONLY ? 'api/ro/' : 'api/';
+const API = READONLY ? 'ro/' : 'api/';
 const WORKER_PRESETS = [1, 2, 5, 10, 20];
 const PHASE_TAG = { learn: 'ai', recheck: 'info', verify: 'warn', explore: '', discover: 'info', tag: 'ai', locate: 'ok', sitemap: 'info' };
 
