@@ -43,16 +43,26 @@ function sourcesTable(e) {
 }
 
 let events = [];
-let range = 'week';
-// Remembered in this browser: List or Map, and the chosen town.
+// Every choice the visitor makes on the page is remembered in this browser (localStorage) and comes
+// back the next time they open the page, even as a plain /events link: view (List or Map), town,
+// date range, search, unchecked kinds of event and where the map was. A new setting must be
+// remembered the same way (see "Remembered settings" in README.md).
+// A link can set some of them (?view=map, ?city=Košice); the link wins, and is remembered too.
 const remember = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 const recall = (k) => { try { return localStorage.getItem(k) || ''; } catch { return ''; } };
-// ?view=map opens the map (a link someone can share); otherwise the last view used here.
+const recallJson = (k, fallback) => { try { return JSON.parse(recall(k)) ?? fallback; } catch { return fallback; } };
+const params = new URLSearchParams(location.search);
 // #admin… opens the public page's read-only crawler dashboard (admin.js).
 let view = location.hash.startsWith('#admin') && $('#adminview') ? 'admin'
-  : (new URLSearchParams(location.search).get('view') || recall('view')) === 'map' ? 'map' : 'list';
-// ?city=Košice opens that town (a link someone can share); otherwise the last town chosen here.
-let city = new URLSearchParams(location.search).get('city') ?? recall('city');
+  : (params.get('view') || recall('view')) === 'map' ? 'map' : 'list';
+if (params.has('view') && view !== 'admin') remember('view', view);
+let city = params.get('city') ?? recall('city');
+remember('city', city);
+let range = ['today', 'weekend', 'week', 'all'].includes(recall('range')) ? recall('range') : 'week';
+document.querySelectorAll('#ranges button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.range === range));
+$('#q').value = recall('q');
+// Where the map was ({ lat, lon, zoom }); a town given by the link starts the map at that town instead.
+let mapAt = params.has('city') ? null : recallJson('mapAt', null);
 // Keep the chosen town in the address bar, so the page can be shared or bookmarked as it is.
 function cityToUrl() {
   const u = new URL(location.href);
@@ -68,10 +78,9 @@ const TAG_LABELS = {
   market: 'Markets & food', other: 'Other',
 };
 const tagsOf = (e) => (e.tags?.length ? e.tags : ['other']);
-// Unchecked tags, remembered in this browser.
-let hidden = new Set();
-try { hidden = new Set(JSON.parse(localStorage.getItem('hiddenTags') || '[]')); } catch {}
-const saveHidden = () => { try { localStorage.setItem('hiddenTags', JSON.stringify([...hidden])); } catch {} };
+// Unchecked tags.
+let hidden = new Set(recallJson('hiddenTags', []));
+const saveHidden = () => remember('hiddenTags', JSON.stringify([...hidden]));
 
 // Tag chip on an event; tags that came from AI say so ("AI": this event was tagged by AI;
 // "learned": a rule the crawler learned from earlier AI answers).
@@ -225,7 +234,12 @@ function initMap() {
     loadCss(`${CLUSTER}MarkerCluster.Default.min.css`);
     await loadJs(`${LEAFLET}leaflet.min.js`);
     await loadJs(`${CLUSTER}leaflet.markercluster.min.js`);
-    map = L.map('map', { zoomSnap: 0.5 }).fitBounds(SLOVAKIA);
+    map = L.map('map', { zoomSnap: 0.5 });
+    if (mapAt) map.setView([mapAt.lat, mapAt.lon], mapAt.zoom); else map.fitBounds(SLOVAKIA);
+    map.on('moveend', () => {
+      const c = map.getCenter();
+      remember('mapAt', JSON.stringify({ lat: +c.lat.toFixed(5), lon: +c.lng.toFixed(5), zoom: map.getZoom() }));
+    });
     // OpenStreetMap's own tiles (dimmed by CSS in dark mode).
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
@@ -310,8 +324,8 @@ async function renderMap(shown) {
   });
   cluster.addLayers(markers);
   lastBounds = markers.length ? cluster.getBounds() : null;
-  // First time the map opens with a town chosen: start there.
-  if (!mapFitted && city && lastBounds?.isValid()) map.fitBounds(lastBounds, { padding: [30, 30], maxZoom: 14 });
+  // First time the map opens with a town chosen (and no remembered map position): start there.
+  if (!mapFitted && !mapAt && city && lastBounds?.isValid()) map.fitBounds(lastBounds, { padding: [30, 30], maxZoom: 14 });
   mapFitted = true;
 }
 
@@ -337,6 +351,7 @@ $('#city').addEventListener('change', (e) => {
   city = e.target.value;
   remember('city', city);
   cityToUrl();
+  mapAt = null; // the map, opened later, starts at this town
   // On the map, go to the town picked (or back to all of Slovakia).
   Promise.resolve(renderEvents()).then(() => {
     if (view !== 'map' || !map) return;
@@ -347,10 +362,11 @@ $('#city').addEventListener('change', (e) => {
 
 document.querySelectorAll('#ranges button').forEach((b) => b.addEventListener('click', () => {
   range = b.dataset.range;
+  remember('range', range);
   document.querySelectorAll('#ranges button').forEach((x) => x.setAttribute('aria-pressed', x === b));
   renderEvents();
 }));
-$('#q').addEventListener('input', renderEvents);
+$('#q').addEventListener('input', () => { remember('q', $('#q').value); renderEvents(); });
 
 async function loadEvents() {
   try {

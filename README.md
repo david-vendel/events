@@ -184,6 +184,27 @@ place gets one pin with its number of events; its popup lists them by date. A da
 the town is known (the pin is at its centre). Pins cluster when zoomed out, showing the number of
 events inside. Choosing a town zooms to it.
 
+#### Remembered settings
+
+**Every setting a visitor changes on the list or map page stays as they left it** until they change
+it again: closing the page, coming back later from a bookmark or a plain `/events` link brings it
+all back. They're kept in the browser's `localStorage` (no login, nothing on the server):
+
+| Setting | localStorage key | Can a link set it? |
+| --- | --- | --- |
+| List or Map | `view` | `?view=map` |
+| Town | `city` (also written into the address bar) | `?city=Košice` |
+| Dates (Today / Weekend / 7 days / All) | `range` | |
+| Search text | `q` | |
+| Unchecked kinds of event | `hiddenTags` | |
+| Where the map was (centre, zoom) | `mapAt` | |
+
+A value in the link wins over the remembered one and is remembered from then on.
+
+**Adding a setting or control to the page? Remember it too**: read it with `recall` when the page
+loads, show it, and save it with `remember` whenever it changes (top of
+[public/events.js](public/events.js)), then add a row to this table.
+
 ### When things go wrong
 
 - **A bug in the crawler** (an exception while reading a page) no longer looks like "no events
