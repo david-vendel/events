@@ -170,6 +170,10 @@ h5.running { font-size: 12px; font-weight: 500; color: var(--muted); margin: 16p
 .event .name:hover { text-decoration: underline; }
 .meta { color: var(--muted); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
 .desc { font-size: 14px; margin-top: 4px; }
+.desc:not(.open) { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+button.more { border: 0; background: none; padding: 2px 0; color: var(--accent); font-size: 13px; cursor: pointer; }
+button.more:hover { text-decoration: underline; }
+.sources:not(.open) tr.extra { display: none; }
 .badge { font-size: 11px; font-weight: 700; color: var(--new); margin-left: 6px; text-transform: uppercase; }
 .sources { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12.5px; }
 .sources th { text-align: left; font-weight: 500; color: var(--muted); padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); }

@@ -19,13 +19,21 @@ function agrees(row, e) {
 const sameTitle = (a, b) => (a || '').trim().toLowerCase() === (b || '').trim().toLowerCase();
 const isRunDay = (r, p) => r !== p && !r.linked && r.start && r.site === p.site && sameTitle(r.title, p.title);
 
+// Long descriptions show 3 lines and long source tables 3 rows, each with a "Show more" button. What's
+// opened stays open when the list redraws (filters, the minute refresh) until the page is reloaded.
+const SOURCE_ROWS = 3;
+const opened = new Set(); // "desc <id>", "sources <id>"
+const moreBtn = (what, e, label) => `<button class="more" data-more="${what}" data-id="${esc(e.id)}"
+  data-label="${esc(label)}">${opened.has(`${what} ${e.id}`) ? 'Show less' : esc(label)}</button>`;
+
 function sourcesTable(e) {
   const all = (e.sources || []).map((r) => ({ title: e.title, ...r })); // the server leaves out titles equal to the event's
   if (!all.length) return '';
   const p = all[0];
   const days = new Set(all.filter((r) => r === p || isRunDay(r, p)).map((r) => r.start)).size;
   const rows = all.filter((r) => !isRunDay(r, p));
-  return `<table class="sources">
+  const extra = rows.length - SOURCE_ROWS;
+  return `<table class="sources ${opened.has(`sources ${e.id}`) ? 'open' : ''}">
     <tr><th>Source</th><th>Date</th><th>Time</th></tr>
     ${rows.map((r, i) => {
       const cls = i === 0 ? '' : r.status === 'ok' ? (agrees(r, e) ? 'ok' : 'bad') : 'na';
@@ -33,12 +41,13 @@ function sourcesTable(e) {
       const role = i === 0 ? (days > 1 ? `primary, listed on ${days} days` : 'primary')
         : r.kind === 'facebook' ? 'Facebook' : r.linked ? 'linked' : 'also listed';
       const time = r.status === 'ok' || i === 0 ? [r.time, r.endTime].filter(Boolean).join('–') : '';
-      return `<tr>
+      return `<tr class="${i >= SOURCE_ROWS ? 'extra' : ''}">
         <td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.site || host(r.url))}</a> <span class="role">· ${role}</span></td>
         <td><span class="d ${cls}" title="${esc(r.note || '')}">${esc(date)}</span></td>
         <td><span class="d ${i > 0 && r.status === 'ok' && r.time && p.time ? cls : ''}">${esc(time)}</span></td>
       </tr>`;
     }).join('')}
+    ${extra > 0 ? `<tr class="morerow"><td colspan="3">${moreBtn('sources', e, `Show ${extra} more ${extra === 1 ? 'source' : 'sources'}`)}</td></tr>` : ''}
   </table>`;
 }
 
@@ -203,12 +212,33 @@ function renderEvents() {
             ${e.showings?.[d] ? `${e.showings[d].map((s) => [s.venue, s.times.join(', ')].filter(Boolean).map(esc).join(' ')).join(' · ')} · `
               : e.location ? `${esc(e.location)} · ` : ''}via ${esc(host(e.source))}
           </div>
-          ${e.description ? `<div class="desc">${esc(e.description)}</div>` : ''}
+          ${e.description ? `<div class="desc ${opened.has(`desc ${e.id}`) ? 'open' : ''}">${esc(e.description)}</div>
+            ${moreBtn('desc', e, 'Show more')}` : ''}
           ${sourcesTable(e)}
         </div>
       </article>`).join('')}`).join('')
     : '<p class="empty">No events found for this filter yet.</p>';
+  fitDescs();
 }
+
+// A description's "Show more" only where it's longer than 3 lines (measured all at once, then hidden).
+function fitDescs() {
+  const descs = [...document.querySelectorAll('#list .desc:not(.open)')];
+  const fits = descs.map((d) => d.scrollHeight <= d.clientHeight + 1);
+  descs.forEach((d, i) => { d.nextElementSibling.hidden = fits[i]; });
+}
+let fitTimer;
+addEventListener('resize', () => { clearTimeout(fitTimer); fitTimer = setTimeout(fitDescs, 150); });
+$('#list').addEventListener('click', (ev) => {
+  const b = ev.target.closest('button[data-more]');
+  if (!b) return;
+  const key = `${b.dataset.more} ${b.dataset.id}`;
+  const box = b.dataset.more === 'desc' ? b.previousElementSibling : b.closest('table');
+  const open = !opened.has(key);
+  if (open) opened.add(key); else opened.delete(key);
+  box.classList.toggle('open', open);
+  b.textContent = open ? 'Show less' : b.dataset.label;
+});
 
 // ---------------------------------------------------------------- map
 
