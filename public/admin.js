@@ -23,16 +23,19 @@ let lastEventCount = -1;
 function renderHeader() {
   const s = snap;
   const waiting = s.running && s.phase.name === 'Waiting';
-  const state = s.stopping ? 'stopping' : waiting ? 'waiting' : s.running ? 'running' : 'idle';
+  const paused = s.running && s.phase.name === 'Paused';
+  const state = s.stopping ? 'stopping' : paused ? 'paused' : waiting ? 'waiting' : s.running ? 'running' : 'idle';
   const pill = $('#state');
   pill.className = `pill ${state}`;
   pill.textContent = state;
 
   if (!READONLY) renderControls(s, waiting);
 
-  const detail = waiting && s.nextCycleAt ? `next cycle in ${until(s.nextCycleAt)}` : s.phase.detail;
+  const detail = waiting && s.nextCycleAt ? `next cycle in ${until(s.nextCycleAt)}`
+    : paused && s.run?.paused ? `${s.phase.detail}; looks again in ${until(s.run.paused.checkAt)}` : s.phase.detail;
+  const runFor = s.run ? ` <span class="muted">· Run for ${esc(s.run.area || 'all towns')}</span>` : '';
   $('#phase').innerHTML = `<b>${esc(s.phase.name)}</b>${detail ? ` <span class="muted">— ${esc(detail)}</span>` : ''}` +
-    (s.cycle ? ` <span class="muted">· cycle ${s.cycle.n}, started ${fmtTime(s.cycle.startedAt)}</span>` : '');
+    runFor + (s.cycle ? ` <span class="muted">· cycle ${s.cycle.n}, started ${fmtTime(s.cycle.startedAt)}</span>` : '');
 
   const c = s.cycle;
   const bars = c ? [
@@ -49,7 +52,13 @@ function renderHeader() {
 function renderControls(s, waiting) {
   $('#start').disabled = s.running && !waiting;
   $('#start').textContent = waiting ? 'Start next cycle now' : 'Start';
-  $('#once').disabled = s.running;
+  $('#run').disabled = s.running;
+  $('#run').textContent = `Run${$('#city').value ? ` · ${$('#city').value}` : ''}`;
+  for (const key of ['limitFiveHour', 'limitWeekly']) {
+    const input = $(`#${key}`);
+    if (document.activeElement !== input) input.value = s.settings[key];
+    input.nextElementSibling.textContent = `${input.value} %`;
+  }
   $('#stop').disabled = !s.running || s.stopping;
 
   const workers = $('#workers');
@@ -64,7 +73,10 @@ function renderControls(s, waiting) {
 
 if (!READONLY) {
   $('#start').onclick = () => postJson('api/start').then(apply);
-  $('#once').onclick = () => postJson('api/run-once').then(apply);
+  // Run is for the town picked in the events list (all towns when none).
+  $('#run').onclick = () => postJson('api/run', { area: $('#city').value }).then(apply);
+  $('#limits').oninput = (e) => { e.target.nextElementSibling.textContent = `${e.target.value} %`; };
+  $('#limits').onchange = (e) => postJson('api/settings', { [e.target.id]: Number(e.target.value) }).then(apply);
   $('#stop').onclick = () => postJson('api/stop').then(apply);
   $('#workers').onclick = (e) => {
     const n = e.target.closest('button')?.dataset.n;
@@ -827,8 +839,11 @@ async function showAiDetail(id) {
 
 // What a setting or view does, how and why: shown below it when its ⓘ is pressed.
 const HELP = {
-  cycle: `<p>The crawler works in <b>cycles</b>. <b>Start</b> runs one, waits, runs the next, until you press Stop
-      (<b>Run once</b> runs a single cycle). Each cycle goes through these steps in order:</p>
+  cycle: `<p>The crawler works in <b>cycles</b>. <b>Start</b> runs one, waits, runs the next, until you press Stop.
+      <b>Run</b> runs cycles back to back, without waiting, for the town picked in the events list (or all towns), and
+      <b>pauses</b> while that town's coverage (Coverage tab) is at the goal below, or while the Claude plan's 5-hour or
+      weekly use is over its slider; paused, it looks again every 30 minutes and carries on by itself.
+      Each cycle goes through these steps in order:</p>
     <ol>
       <li><b>Re-check sources</b>: event sources that are due get their listing pages read again (up to 12 per source,
         the ones read longest ago first). A source that keeps giving new events is checked more often, one that doesn't
@@ -872,6 +887,10 @@ const HELP = {
     <p><b>Why:</b> listings often show only a title and a day; the detail and ticket pages confirm it and add the time,
       which is what the public site shows as sources. These fetches don't count towards <i>Pages per cycle</i>.</p>
     <p><b>Raise it</b> if many events show as unconfirmed; 0 switches verifying off.</p>`,
+  coverageGoal: `<p><b>What:</b> <b>Run</b> pauses while the estimated coverage of its town (or of all towns) is at least
+      this (1–100 %, default 90). A town with too few events to estimate ("?") never counts as covered.</p>
+    <p><b>Why:</b> once nearly everything that's on is found, more crawling mostly re-reads what we have. The AI limits are the
+      two sliders under the buttons (default 80 % each); a paused Run checks both again every 30 minutes.</p>`,
   cycleEveryMin: `<p><b>What:</b> how long to wait after a cycle ends before the next one starts (1–1440 minutes, default 60).</p>
     <p><b>How:</b> the wait is counted from the end of a cycle, so a long cycle doesn't make the next one start right away.
       A new value applies from the next wait; to skip the current wait press <b>Start next cycle now</b>.</p>
@@ -893,6 +912,7 @@ function settingsTab() {
       ${field('aiPerCycle', 'AI calls per cycle')}
       ${field('verifyPerCycle', 'Events verified per cycle')}
       ${field('cycleEveryMin', 'Minutes between cycles')}
+      ${field('coverageGoal', 'Run pauses at coverage %')}
     </div>
     <p><button class="btn primary" id="save-settings">Save</button> <span class="muted" id="saved"></span></p>
     <p class="note">Each site still gets one request every 2 seconds, however many pages run in parallel.<br>

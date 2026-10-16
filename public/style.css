@@ -41,6 +41,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .workers span { margin-right: 4px; }
 .workers button { border: 1px solid var(--line); background: var(--card); min-width: 34px; padding: 4px 6px; border-radius: 6px; }
 .workers button[aria-pressed=true] { background: var(--text); color: var(--bg); border-color: var(--text); }
+.limits { font-size: 13px; color: var(--muted); gap: 16px; }
+.limits label { display: flex; align-items: center; gap: 6px; }
+.limits input { width: 120px; }
+.limits b { color: var(--text); min-width: 3.2em; }
+.pill.paused { background: var(--warn-bg); color: var(--warn); }
 .phase { margin: 12px 0 4px; font-size: 14px; }
 .phase b { font-weight: 600; }
 .muted { color: var(--muted); }

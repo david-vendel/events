@@ -15,11 +15,15 @@
       <span class="pill" id="state">…</span>
       <span class="spacer"></span>
       <button class="btn primary" id="start">Start</button>
-      <button class="btn" id="once" title="Run a single cycle">Run once</button>
+      <button class="btn" id="run" title="Run cycles back to back for the town picked on the right; pauses at the coverage goal or the AI limits below">Run</button>
       <button class="btn" id="stop">Stop</button>
     </div>
     <div class="bar" style="margin-top:10px">
       <div class="workers" id="workers"><span>Parallel pages</span></div>
+    </div>
+    <div class="bar limits" id="limits" style="margin-top:10px">
+      <label>Pause Run at 5-hour AI use <input type="range" id="limitFiveHour" min="1" max="100" step="1"> <b></b></label>
+      <label>Weekly AI use <input type="range" id="limitWeekly" min="1" max="100" step="1"> <b></b></label>
     </div>
     <div class="phase" id="phase"></div>
     <div class="progress" id="progress"></div>

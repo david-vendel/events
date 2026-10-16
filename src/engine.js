@@ -53,10 +53,17 @@ export const DEFAULT_SETTINGS = {
   aiPerCycle: 5,
   verifyPerCycle: 15,
   cycleEveryMin: 60,
+  // Run (continuous): pause when the area's coverage reaches coverageGoal %, or when the plan's
+  // 5-hour or weekly window is over its limit %.
+  coverageGoal: 90,
+  limitFiveHour: 80,
+  limitWeekly: 80,
 };
 const LIMITS = {
   concurrency: [1, 50], pagesPerCycle: [1, 2000], aiPerCycle: [0, 100], verifyPerCycle: [0, 500], cycleEveryMin: [1, 1440],
+  coverageGoal: [1, 100], limitFiveHour: [1, 100], limitWeekly: [1, 100],
 };
+const PAUSE_CHECK_MS = 30 * 60e3; // a paused Run looks again this often
 const MAX_RECENT = 300;
 const fmtTokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 const MAX_AI_LOG = 5000;
@@ -80,6 +87,7 @@ export class Engine {
     this.seq = 0;
     this.wake = null;
     this.dirty = false;
+    this.run = null; // Run mode: { area, paused: { reason, since, checkAt } | null }
 
     setAiRecorder((rec) => {
       this.state.ai.push(rec);
@@ -99,9 +107,50 @@ export class Engine {
       this.wake?.(); // waiting between cycles: start the next one now
       return;
     }
+    this.run = null;
     this.running = true;
     this.stopping = false;
     this.loop(once).catch((err) => this.message(`engine error: ${err.stack || err}`));
+  }
+
+  /**
+   * Run: cycles back to back, for one area (a town, or all of them when empty), until stopped. Before
+   * each cycle it pauses while the area's coverage is at the goal or the plan's 5-hour or weekly use is
+   * over its limit, and looks again every 30 minutes.
+   */
+  startRun({ area = '' } = {}) {
+    if (this.running) return;
+    this.run = { area: String(area || ''), paused: null };
+    this.running = true;
+    this.stopping = false;
+    this.message(`Run started${this.run.area ? ` for ${this.run.area}` : ''}`);
+    this.loop(false).catch((err) => this.message(`engine error: ${err.stack || err}`));
+  }
+
+  /** Why a Run should not crawl now, or null. */
+  async pauseReason() {
+    const { area } = this.run;
+    const report = coverageReport(this.state);
+    const row = area ? report.towns.find((t) => t.town === area) : report.overall;
+    if (row?.coverage !== undefined && row.coverage * 100 >= this.settings.coverageGoal) {
+      return `coverage of ${area || 'all towns'} is ${Math.round(row.coverage * 100)} % (goal ${this.settings.coverageGoal} %)`;
+    }
+    if (!aiAvailable()) return null;
+    const plan = await planUsage({ refresh: true }).catch(() => null);
+    for (const w of plan?.windows || []) {
+      const limit = /^5-hour/.test(w.name) ? this.settings.limitFiveHour : /^Weekly/.test(w.name) ? this.settings.limitWeekly : null;
+      if (limit != null && w.used > limit) return `${w.name} AI use is ${Math.round(w.used)} % (limit ${limit} %)`;
+    }
+    return null;
+  }
+
+  // Sleep until ms from now, or until wake() (Stop, or Start next cycle now).
+  async sleep(ms) {
+    await new Promise((resolve) => {
+      const t = setTimeout(resolve, ms);
+      this.wake = () => { clearTimeout(t); resolve(); };
+    });
+    this.wake = null;
   }
 
   /** Finish the pages being fetched right now, then stop. */
@@ -130,6 +179,19 @@ export class Engine {
 
   async loop(once) {
     while (!this.stopping) {
+      if (this.run) {
+        const reason = await this.pauseReason();
+        if (reason) {
+          const checkAt = Date.now() + PAUSE_CHECK_MS;
+          if (!this.run.paused) this.message(`Run paused: ${reason}`);
+          this.run.paused = { reason, since: this.run.paused?.since || Date.now(), checkAt };
+          this.phase = { name: 'Paused', detail: reason };
+          await this.sleep(checkAt - Date.now());
+          continue;
+        }
+        if (this.run.paused) this.message('Run resumed');
+        this.run.paused = null;
+      }
       this.cycles++;
       this.nextCycleAt = null;
       try {
@@ -145,15 +207,13 @@ export class Engine {
       this.save();
       planUsage({ refresh: true }).catch(() => {});
       if (once || this.stopping) break;
+      if (this.run) continue; // Run: next cycle right away
       this.nextCycleAt = Date.now() + this.settings.cycleEveryMin * 60e3;
       this.phase = { name: 'Waiting', detail: 'for the next cycle' };
-      await new Promise((resolve) => {
-        const t = setTimeout(resolve, this.nextCycleAt - Date.now());
-        this.wake = () => { clearTimeout(t); resolve(); };
-      });
-      this.wake = null;
+      await this.sleep(this.nextCycleAt - Date.now());
     }
     this.running = false;
+    this.run = null;
     this.stopping = false;
     this.nextCycleAt = null;
     this.phase = { name: 'Idle', detail: '' };
@@ -235,6 +295,7 @@ export class Engine {
       settings: this.settings,
       cycles: this.cycles,
       nextCycleAt: this.nextCycleAt,
+      run: this.run,
       cycle: c && { n: c.n, startedAt: c.startedAt, budget: c.budget, used: c.used, found: c.found, health: c.health },
       // One line per finished cycle (newest last): pages read, how many had events, new events…
       history: (s.meta.cycles || []).slice(-12),

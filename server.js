@@ -86,6 +86,7 @@ const routes = {
   'GET /api/ai-usage': () => engine.aiUsage(),
   'POST /api/plan': () => engine.refreshPlan(),
   'POST /api/start': () => { engine.start(); return engine.snapshot(); },
+  'POST /api/run': (body) => { engine.startRun({ area: body.area }); return engine.snapshot(); },
   'POST /api/run-once': () => { engine.start({ once: true }); return engine.snapshot(); },
   'POST /api/stop': () => { engine.stop(); return engine.snapshot(); },
   'POST /api/settings': (body) => { engine.updateSettings(body); return engine.snapshot(); },

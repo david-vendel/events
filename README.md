@@ -22,7 +22,10 @@ There are two pages. `/` is the public website: the events, as a list or a map. 
 admin dashboard. Its **right** half is the same events list, and its **left** half is the admin panel
 that controls the crawler, which runs inside the server:
 
-- **Start / Run once / Stop.** Start repeats cycles every *N* minutes (see Settings). Stop lets the
+- **Start / Run / Stop.** Start repeats cycles every *N* minutes (see Settings). **Run** runs cycles back
+  to back for the town picked in the events list (or all towns) and pauses while that town's coverage is at
+  the goal (Settings, default 90 %) or the Claude plan's 5-hour or weekly use is over its slider; paused, it
+  checks again every 30 minutes. Stop lets the
   pages that are being fetched finish, then stops.
 - **Parallel pages** (1–20, or up to 50 in Settings). A new value applies within a second. Each
   site still gets at most one request every 2 seconds.
