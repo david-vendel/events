@@ -57,7 +57,7 @@ export function sitemapsDue(state, seeds) {
 /**
  * Read one site's sitemaps and queue its likely event pages. `queue(url, score)` returns true when
  * the URL is new in the frontier; `skip(url)` says it's already known or visited. Each file read
- * takes one page of the cycle's budget through `takePage()`, which returns false when none is left.
+ * takes one page of the pass's budget through `takePage()`, which returns false when none is left.
  */
 export async function readSitemaps(state, origin, { queue, skip, takePage }) {
   const rec = (state.sitemaps[origin] = { checkedAt: new Date().toISOString() });

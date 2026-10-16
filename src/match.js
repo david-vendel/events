@@ -39,7 +39,7 @@ export function titleTokens(title) {
 }
 
 // How much each word tells events apart: log(titles / titles with the word), from all events'
-// titles (useTitleWeights, once per cycle). Without it every word weighs 1.
+// titles (useTitleWeights, once per pass). Without it every word weighs 1.
 let weights = null;
 export function useTitleWeights(titles) {
   const df = new Map();

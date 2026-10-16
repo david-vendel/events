@@ -277,7 +277,7 @@ function splitUnrelated(state, ev) {
   console.log(`  ⇆ split "${ev.title}" from ${split.length} unrelated event(s)`);
 }
 
-/** Lookup structure over state.events, rebuilt once per cycle and kept up to date. */
+/** Lookup structure over state.events, rebuilt once per pass and kept up to date. */
 export class EventIndex {
   constructor(state) {
     this.state = state;

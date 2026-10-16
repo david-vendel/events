@@ -22,18 +22,18 @@ There are two pages. `/` is the public website: the events, as a list or a map. 
 admin dashboard. Its **right** half is the same events list, and its **left** half is the admin panel
 that controls the crawler, which runs inside the server:
 
-- **Start / Run / Stop.** Start repeats cycles every *N* minutes (see Settings). **Run** runs cycles back
-  to back for the town picked in the events list (or all towns) and pauses while that town's coverage is at
-  the goal (Settings, default 90 %) or the Claude plan's 5-hour or weekly use is over its slider; paused, it
-  checks again every 30 minutes. Stop lets the
-  pages that are being fetched finish, then stops.
+- **Run / Stop.** **Run** crawls continuously, for the town picked in the events list (or all towns),
+  until **Stop**, which lets the pages being fetched finish. There are no cycles to schedule. A Run pauses
+  by itself, and carries on by itself, while that town's coverage is at the goal (Settings, default 90 %)
+  or the Claude plan's 5-hour or weekly use is over its slider (both checked every 30 minutes), while
+  there's nothing to crawl (every 5 minutes), and while offline (every minute). A Run that was going
+  when the server restarts carries on after the restart (`state.meta.run`).
 - **Parallel pages** (1–20, or up to 50 in Settings). A new value applies within a second. Each
   site still gets at most one request every 2 seconds.
-- **Status:** the current phase, progress bars for the cycle's page, AI and verification budgets,
-  a **health box** for the running cycle (pages read, how many had upcoming events, new events, fetch
+- **Status:** the current step or why the Run is paused,
+  a **health box** with the Run's totals (pages read, how many had upcoming events, new events, fetch
   errors, AI calls, links from sitemaps; crawler bugs in red with the error), the pages being fetched
-  right now, recently scanned pages and what was found on them, a table of **recent cycles** (is the
-  crawl finding events, and at what cost?) and a log (a message repeated many times shows once, "×N").
+  right now, recently scanned pages and what was found on them, and a log (a message repeated many times shows once, "×N").
 - **Tabs:** *Queue* (links waiting to be explored, ranked as the crawler picks them, with what it
   learned), *Templates* (page templates that find events, and ones that waste visits; see below),
   *Sources* (sites the crawler has judged, their listing pages and whether a recipe is saved),
@@ -44,23 +44,25 @@ The admin API has no login, so the server listens only on localhost unless you s
 `HOST=0.0.0.0`. To put it on the internet, use a proxy that leaves only the public page's files and
 `GET /api/events` and `GET /api/sites` open and asks for a password for `/admin/` and every other
 `/api/` route. Those two public answers are rebuilt at most every 30 seconds. `node server.js --start`
-starts crawling right away.
+starts a Run for all towns right away.
 
-Without the server: `npm run crawl` runs one cycle in the terminal and `npm run watch` keeps
-running cycles. Options: `--pages 100 --ai 10 --verify 15 --concurrency 5 --every 30`, plus
+Without the server: `npm run crawl` runs one pass through the steps below in the terminal and
+`npm run watch` keeps crawling until Ctrl+C. Options: `--pages 200 --ai 30 --verify 15 --concurrency 5`, plus
 `--url <url>` to crawl a page right away. Don't run the CLI while the server is crawling, because
 both write the same files in `data/`.
 
 ## How it works
 
-Each cycle has these steps ([src/crawler.js](src/crawler.js)):
+A Run goes through these steps over and over, without a break ([src/crawler.js](src/crawler.js)
+does one pass; [src/engine.js](src/engine.js) repeats them). A pass explores up to 200 pages and makes up
+to 30 AI calls, so every step keeps getting its turn; AI use overall is held back by the plan limits:
 
 1. **Re-check known sources that are due.** Every website that publishes Košice events is saved in
    `data/sources.json` with its listing pages and a check interval (12 h to 7 days). The interval
    shrinks when a source keeps producing new events and grows when it doesn't. Re-checks use
    conditional GETs (ETag/Last-Modified) and a hash of the page text, so pages that haven't changed
    are skipped without parsing.
-2. **Verify against other sources.** For up to 15 upcoming events per cycle (`--verify N`),
+2. **Verify against other sources.** For up to 15 upcoming events per pass (`--verify N`),
    soonest first, each event is re-checked at most every 3 days. The crawler opens the event's own
    page, follows its links to the same event elsewhere (Facebook events, ticket shops) and records
    the date each source gives. See "One event, many sources" below.
@@ -78,7 +80,7 @@ Each cycle has these steps ([src/crawler.js](src/crawler.js)):
    re-reads those), and on a listing with events, "next page" links get a bonus. When picking, what
    the crawler has **learned** is added (see *Page templates*), plus random noise, so promising links
    usually win but anything can be picked. Sites that produce many new events may take up to 15
-   pages a cycle, sites that produce some 8, unknown ones 3, and sites read 6+ times without any
+   pages a pass, sites that produce some 8, unknown ones 3, and sites read 6+ times without any
    event 1.
 
 ### Page templates: learning where events are
@@ -154,7 +156,7 @@ when they fail:
    with the same tag (80 % agreeing), a listing page 3, or a title word 4 (90 %), that tag is applied
    without AI, but only to events the page and keyword rules left untagged. The log says
    "Learned tag rule: …" when one becomes active;
-4. events still without a tag go to the cheap model, up to 2 × 40 per cycle, each event once.
+4. events still without a tag go to the cheap model, up to 2 × 40 per pass, each event once.
 
 The website has a checkbox per tag; an event is shown if any of its tags is checked.
 
@@ -166,7 +168,7 @@ Martin) count only on their own. A list of towns ("Košice, Prešov, Poprad", a 
 place and isn't put on the map. A missing town comes from the source site's city when the AI said
 all its events are in one. Each distinct place is looked up once in OpenStreetMap's Nominatim geocoder
 (street address, then venue name, then the whole text, then the town; at most 1 request per second
-and 40 new places per cycle; after "too many requests" lookups pause for an hour). A venue-name hit
+and 40 new places per pass; after "too many requests" lookups pause for an hour). A venue-name hit
 must share a word with the venue's name and lie in the expected town, otherwise free-text search
 would happily return the railway station called "Košice" for "Yama Event Place, Košice"; asking for
 just the town always counts as town-level precision and cached in
@@ -212,12 +214,11 @@ loads, show it, and save it with `remember` whenever it changes (top of
 
 - **A bug in the crawler** (an exception while reading a page) no longer looks like "no events
   here": it's counted in the health box, shown in red with the error, the visit is forgotten so the
-  page is read again once it's fixed, and after 10 bugs with fewer pages read the cycle ends early
-  instead of burning the queue. (On 2 Oct 2026 a refactor left `MONTH_RE` undefined in
+  page is read again once it's fixed, and after 10 bugs with fewer pages read the Run pauses for 30
+  minutes instead of burning the queue. (On 2 Oct 2026 a refactor left `MONTH_RE` undefined in
   `extract.js` and every page failed for 4 hours, silently; 3,760 pages were repaired.)
-- **No network** (laptop asleep, Wi-Fi gone): a cycle doesn't start while DNS lookups fail, and a
-  run of network errors mid-cycle triggers a check; when offline, the cycle ends and those failed
-  visits are forgotten, so pages and sites aren't marked as failing.
+- **No network** (laptop asleep, Wi-Fi gone): a series of network errors triggers a check; when
+  DNS lookups fail, the Run pauses (looking again every minute) and those failed visits are forgotten, so pages and sites aren't marked as failing.
 
 ### One event, many sources
 
@@ -260,8 +261,9 @@ from the environment for these calls so they can't be billed to an API account b
 AI calls run **one at a time**, never in parallel, even when the crawler fetches many pages at
 once. Pages that need AI wait in line while the other workers keep crawling. The Overview shows
 what the AI is doing right now, how many pages are waiting, and an "AI · N tokens" tag on each page
-that used it (click the tag to open that call). `--ai N` (or *AI calls per cycle* in Settings) caps
-calls per cycle (default 5).
+that used it (click the tag to open that call). In a Run, AI use is held back by the
+5-hour and weekly sliders under the Run button (default 80 % of the plan each); `--ai N` caps calls per
+pass on the command line (default 30).
 
 The **AI tab** controls AI and shows what it was used for. A master switch turns all AI off (the
 crawler then runs on rules only), and each job has its own switch and model (your Claude Code default,

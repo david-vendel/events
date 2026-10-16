@@ -1,4 +1,4 @@
-// One crawl cycle (events from any place are kept; link priorities favour Slovakia, Košice first):
+// One crawl pass; a Run (engine.js) repeats them back to back (events from any place are kept; link priorities favour Slovakia, Košice first):
 //   1. re-check known event sources that are due (cheap: conditional GET + saved recipe),
 //   2. verify upcoming events against the other places they're published (Facebook, tickets…),
 //   3. occasionally ask AI to web-search for new sources,
@@ -31,7 +31,7 @@ import { locateEvents } from './geo.js';
 import { EventIndex, migrate } from './events.js';
 import { dueForVerification, verifyEvent } from './corroborate.js';
 import { defaultControl, runPool } from './pool.js';
-import { domainOf, hostOf, normalizeUrl, urlKey, urlPattern } from './urls.js';
+import { hostOf, normalizeUrl, urlKey, urlPattern } from './urls.js';
 import {
   MAX_BONUS, bootstrapPatterns, hostCap, linkBonus, notePatternVisit, patternKeys, siblingRecipes, templateOf,
 } from './learn.js';
@@ -48,15 +48,15 @@ const RETRY_FAILED_AFTER = DAY; // a failed page waits 1, 2, 4… days (up to a 
 const HOST_FAIL_STREAK = 3; // a host whose last 3 visits failed is skipped for a day
 const DISCOVERY_EVERY = Number(process.env.EVENTS_DISCOVERY_HOURS || 6) * HOUR;
 const MAX_FRONTIER = 5000;
-const SITEMAP_SITES_PER_CYCLE = 4;
-const RECHECK_PAGES = 12; // listing pages re-read per due source per cycle
+const SITEMAP_SITES_PER_PASS = 4;
+const RECHECK_PAGES = 12; // listing pages re-read per due source per pass
 const TEMPLATE_DEAD_AFTER = 5; // visits of a template without any event before AI stops looking at it
 const EMPTY_READS_BEFORE_REST = 3; // a listing page empty this many reads in a row is read only now and then
 const EMPTY_LISTING_REST = 14 * DAY;
 const NOT_LISTING_FOR = 30 * DAY; // a page AI said lists no events isn't taken as a listing again for this long
 const AI_MISSES_PER_SITE = 3;
 const AI_MISSES_FORGET = 30 * DAY; // after this, a site AI gave up on gets one more look (a month apart)
-const TRIAGE_PER_CYCLE = 60; // cheap pre-checks, on top of the AI budget for the bigger model
+const TRIAGE_PER_PASS = 60; // cheap pre-checks, on top of the AI budget for the bigger model
 // A template recipe that finds events on fewer than 10 % of at least 10 pages read the wrong pages
 // (an event page's recipe borrowed by the same site's news articles reads their publish time).
 const RECIPE_MIN_VISITS = 10;
@@ -67,7 +67,7 @@ const NET_DOWN = /ENOTFOUND|EAI_AGAIN|ENETUNREACH|ENETDOWN|EHOSTUNREACH|UND_ERR_
 const NET_FAILS_BEFORE_CHECK = 6; // network errors in a row before checking whether we're offline
 const SCORE_VERSION = 4; // bump when scoreLink() changes a lot: queued links get scored again
 const TAG_BATCH = 40; // events per cheap-AI tagging call
-const TAG_BATCHES = 2; // tagging calls per cycle
+const TAG_BATCHES = 2; // tagging calls per pass
 
 const iso = (t) => new Date(t).toISOString();
 const fmtN = (n) => (n || 0).toLocaleString('en');
@@ -227,7 +227,7 @@ function hostPaused(state, host) {
 /**
  * Weighted pseudo-random pick: score (the link's own, plus what its template and host taught us)
  * plus noise, so good links win but anything can be chosen. Skips hosts another worker is fetching
- * right now and hosts that used up their share this cycle (hostCap: more for productive hosts).
+ * right now and hosts that used up their share this pass (hostCap: more for productive hosts).
  */
 function pickFromFrontier(state, hostCounts, busyHosts, eventPages) {
   let best = null, bestKey = -Infinity;
@@ -296,7 +296,7 @@ function forgetVisit(state, url, host) {
 
 /**
  * While many fetches in a row fail with network errors, check whether we are offline. If so, end
- * the cycle and forget those visits, so pages and sites aren't marked as failing.
+ * the pass and forget those visits, so pages and sites aren't marked as failing.
  */
 async function watchNetwork(state, url, ctx, r) {
   if (ctx.offline) {
@@ -313,7 +313,7 @@ async function watchNetwork(state, url, ctx, r) {
   ctx.offline = true;
   ctx.budget.pages = 0;
   for (const u of ctx.netFails) forgetVisit(state, u, hostOf(u));
-  ctx.control.report.log(`The network is down (DNS lookups fail): ending the cycle; ${ctx.netFails.length} failed visits forgotten`);
+  ctx.control.report.log(`The network is down (DNS lookups fail): ${ctx.netFails.length} failed visits forgotten`);
   ctx.netFails = [];
 }
 
@@ -363,7 +363,8 @@ async function visit(state, url, ctx, phase) {
     if (cache) { delete cache.visitedAt; delete cache.hash; }
     if (h.crashes >= CRASHES_BEFORE_GIVING_UP && h.crashes > h.read && ctx.budget.pages > 0) {
       ctx.budget.pages = 0; // don't burn the whole queue on a bug
-      report.log(`${h.crashes} crawler bugs this cycle and only ${h.read} pages read: ending the cycle early. Last: ${h.lastCrash.error}`);
+      ctx.halted = `${h.crashes} crawler bugs and only ${h.read} pages read`;
+      report.log(`${ctx.halted}. Last: ${h.lastCrash.error}`);
     }
     report.end(job, { status: 'error', note: `crawler bug: ${err.message}` });
     return 0;
@@ -509,7 +510,7 @@ async function readPage(state, url, ctx, job) {
   // (a cinema's programme for next week), and AI would find nothing either.
   if (structured && !partial) tpl.structured = true;
   // Worth showing to AI: a promising page without a working recipe. AI isn't called here: the page
-  // goes to the AI queue (aiqueue.js), and the queue step of the cycle visits it again with AI.
+  // goes to the AI queue (aiqueue.js), and the queue step of the pass visits it again with AI.
   const aiWorthy = aiAvailable('analyze')
     && (!listing?.recipe || recipeBroken || recipeProblem)
     && (signals.looksLikeListing || ctx.seeds.has(url) || listing || calendar)
@@ -542,7 +543,7 @@ async function readPage(state, url, ctx, job) {
     how = how ? `${how}; ${calendar.name} calendar: needs Chrome` : `${calendar.name} calendar: needs Chrome`;
   }
   if (viaQueue) ctx.aiJob.worthy = aiWorthy;
-  // Pages without a working recipe: one look per site a cycle (repairs and seeds aside).
+  // Pages without a working recipe: one look per site a pass (repairs and seeds aside).
   const wantsAi = aiWorthy && viaQueue && ctx.budget.ai > 0 && aiReady('analyze')
     && (ctx.seeds.has(url) || listing?.recipe || !ctx.aiSites.has(source.origin));
 
@@ -778,7 +779,7 @@ async function tagUncertainEvents(state, today, report) {
     let tagged = 0;
     const learned = [];
     batch.forEach((ev, i) => {
-      if (!tags[i]) return; // no answer for this one: ask again next cycle
+      if (!tags[i]) return; // no answer for this one: ask again next pass
       ev.aiTags = tags[i];
       ev.aiTaggedAt = iso(Date.now());
       if (places[i] && !ev.location) Object.assign(ev, { location: places[i].city, country: places[i].country, locationFrom: 'ai' });
@@ -835,16 +836,6 @@ function repairOfflineVisits(state, report) {
   if (n) report.log(`Repaired ${n} pages that failed while this machine was offline (${OFFLINE_REPAIR.from.slice(11, 16)}–${OFFLINE_REPAIR.to.slice(11, 16)} UTC); queued again`);
 }
 
-/** One line per cycle for the dashboard: is the crawl finding events, and at what cost? */
-function cycleSummary(ctx, startedAt) {
-  const h = ctx.health;
-  return {
-    at: iso(startedAt), ms: Date.now() - startedAt, pages: ctx.used.pages, read: h.read, unchanged: h.unchanged,
-    errors: h.errors, crashes: h.crashes, withEvents: h.withEvents, events: h.events, added: h.added,
-    ai: ctx.used.ai, sitemapQueued: h.sitemapQueued,
-  };
-}
-
 function pruneEvents(state, today) {
   const cutoff = new Date(Date.parse(today) - 14 * DAY).toISOString().slice(0, 10);
   for (const [id, ev] of Object.entries(state.events)) if ((ev.end || ev.start) < cutoff) delete state.events[id];
@@ -852,7 +843,7 @@ function pruneEvents(state, today) {
 
 /**
  * Work through the AI queue (aiqueue.js): each page is fetched again and read with AI, within the
- * cycle's AI budget. Pages are read one after another (AI takes one call at a time anyway). A page
+ * pass's AI budget. Pages are read one after another (AI takes one call at a time anyway). A page
  * that no longer needs AI (its template got a recipe meanwhile) just leaves the queue.
  */
 async function runAiQueue(state, ctx) {
@@ -871,7 +862,7 @@ async function runAiQueue(state, ctx) {
       report.log(`AI hit the plan's limit: the rest of the queue waits until ${new Date(aiPausedUntil()).toISOString().slice(11, 16)} UTC`);
       break;
     }
-    // A new site's page waits for the next cycle if this cycle already showed AI a page of that site.
+    // A new site's page waits for the next pass if this pass already showed AI a page of that site.
     if (!j.repair && ctx.aiSites.has(j.origin)) continue;
     if (downUntil(state, j.url)) continue;
     ctx.aiJob = { url: j.url };
@@ -885,7 +876,7 @@ async function runAiQueue(state, ctx) {
   }
 }
 
-export async function runCycle(state, options = {}, control = defaultControl()) {
+export async function crawlPass(state, options = {}, control = defaultControl()) {
   const { maxPages = 60, maxAi = 5, maxVerify = 15, maxGeocode = 40, seedsFile = 'seeds.json' } = options;
   const { report } = control;
   const today = new Date().toISOString().slice(0, 10);
@@ -895,32 +886,28 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
   setAiConfig(state.settings?.ai); // AI switches and models from the admin panel
   state.patterns ??= {};
   state.sitemaps ??= {};
-  const startedAt = Date.now();
   // Pages of events we already have (their own pages, not the listing they came from).
   const eventPages = new Set();
   for (const ev of Object.values(state.events)) {
     for (const s of ev.sources || []) if (s.url && s.url !== s.via) eventPages.add(urlKey(s.url));
   }
   const ctx = {
-    budget: { pages: maxPages, ai: aiAvailable() ? maxAi : 0, verify: maxVerify, triage: TRIAGE_PER_CYCLE },
+    budget: { pages: maxPages, ai: aiAvailable() ? maxAi : 0, verify: maxVerify, triage: TRIAGE_PER_PASS },
     used: { pages: 0, ai: 0, verify: 0, triage: 0 },
     found: { events: 0, added: 0 },
-    // How well this cycle is going: pages fetched / read / failed, crawler bugs, pages with events…
+    // How well this pass is going: pages fetched / read / failed, crawler bugs, pages with events…
     health: {
       fetched: 0, read: 0, unchanged: 0, errors: 0, crashes: 0, lastCrash: null,
       withEvents: 0, events: 0, added: 0, ai: 0, aiRecipes: 0, sitemapFiles: 0, sitemapQueued: 0,
     },
-    hostVisits: {}, // host -> pages fetched this cycle
-    aiSites: new Set(), // sites whose explored pages AI looked at this cycle
+    hostVisits: {}, // host -> pages fetched this pass
+    aiSites: new Set(), // sites whose explored pages AI looked at this pass
     netFails: [], offline: false, // network errors in a row; set when we found we're offline
     today, seeds, control, eventPages, index: new EventIndex(state),
   };
   report.begin?.(ctx);
-  report.phase('Starting cycle', `budget ${maxPages} pages, ${ctx.budget.ai} AI calls` +
-    (aiAvailable() ? '' : ' (AI is off)'));
 
   if (!(await online())) {
-    report.phase('Offline', 'no network (DNS lookups fail); trying again next cycle');
     ctx.offline = true;
     return ctx;
   }
@@ -1000,7 +987,7 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
 
   // 4. Sitemaps of sites that produce events: event pages no listing links to.
   if (!control.stopped() && ctx.budget.pages > 0) {
-    const due = sitemapsDue(state, seeds).slice(0, SITEMAP_SITES_PER_CYCLE);
+    const due = sitemapsDue(state, seeds).slice(0, SITEMAP_SITES_PER_PASS);
     if (due.length) report.phase('Reading sitemaps', `${due.length} sites`);
     await runPool(() => {
       let origin = due.shift();
@@ -1048,7 +1035,7 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
     }, control);
   }
 
-  // Dates, tagging and locating run last, so events found this cycle get done this cycle.
+  // Dates, tagging and locating run last, so events found this pass get done this pass.
   // 6. Pages waiting for AI: no recipe yet, or one that stopped reading the page well.
   if (!control.stopped()) await runAiQueue(state, ctx);
 
@@ -1067,18 +1054,5 @@ export async function runCycle(state, options = {}, control = defaultControl()) 
 
   pruneEvents(state, today);
   trimFrontier(state);
-  const upcoming = Object.values(state.events).filter((e) => (e.end || e.start) >= today).length;
-  const sources = Object.values(state.sources).filter((s) => s.kind === 'events').length;
-  const byDomain = {};
-  for (const [host, n] of Object.entries(ctx.hostVisits)) byDomain[domainOf(host)] = (byDomain[domainOf(host)] || 0) + n;
-  const top = Object.entries(byDomain).sort((a, b) => b[1] - a[1]).slice(0, 5);
-  if (top.length) report.log(`Most visited domains this cycle: ${top.map(([d, n]) => `${d} ${n}`).join(', ')}`);
-  const sum = cycleSummary(ctx, startedAt);
-  state.meta.cycles = [...(state.meta.cycles || []).slice(-49), sum];
-  report.log(`Yield: ${sum.read} pages read, ${sum.withEvents} had upcoming events (${sum.read ? Math.round((100 * sum.withEvents) / sum.read) : 0} %), `
-    + `${sum.added} new events, ${sum.ai} AI calls${sum.errors ? `, ${sum.errors} fetch errors` : ''}`
-    + `${sum.crashes ? `, ${sum.crashes} CRAWLER BUGS (see the health box)` : ''}`);
-  report.phase(control.stopped() ? 'Stopped' : 'Cycle done',
-    `${ctx.found.added} new events; ${upcoming} upcoming from ${sources} event sources`);
   return ctx;
 }

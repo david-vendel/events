@@ -4,7 +4,7 @@
 // From that:
 //   - linkBonus(): links into templates and hosts that keep producing events rank higher in the
 //     frontier; templates that never do (news articles, archives, help pages…) sink,
-//   - hostCap(): how many pages of one host a cycle may explore (productive hosts get more),
+//   - hostCap(): how many pages of one host a pass may explore (productive hosts get more),
 //   - crawler.js reuses a recipe the AI wrote for one page on every page of the same template,
 //     and shows each template to the AI at most once a week (state.patterns[key].aiAt).
 import { coarsePattern, hostOf, urlKey, urlPattern } from './urls.js';
@@ -102,7 +102,7 @@ export function productiveTemplate(state, url) {
 /** Most a link can gain from linkBonus (best template + best host). */
 export const MAX_BONUS = 10;
 
-/** Pages of one host a cycle may explore: more for hosts that produce events, 1 for dead ones. */
+/** Pages of one host a pass may explore: more for hosts that produce events, 1 for dead ones. */
 export function hostCap(state, host) {
   const h = state.hosts[host];
   if ((h?.newRate ?? 1) < 0.05) return 3; // lately nothing new

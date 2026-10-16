@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Serves the events website (/) and the admin dashboard (/admin/), and runs the crawler in-process.
 //   node server.js [--port 3000]       (HOST=0.0.0.0 to listen beyond localhost)
-//   --start                            start crawling right away
+//   --start                            start a Run (all towns) right away
 // The admin API has no authentication, so by default it only listens on localhost.
 import http from 'node:http';
 import fs from 'node:fs';
@@ -85,9 +85,7 @@ const routes = {
   'GET /api/ai': () => engine.aiCalls(),
   'GET /api/ai-usage': () => engine.aiUsage(),
   'POST /api/plan': () => engine.refreshPlan(),
-  'POST /api/start': () => { engine.start(); return engine.snapshot(); },
-  'POST /api/run': (body) => { engine.startRun({ area: body.area }); return engine.snapshot(); },
-  'POST /api/run-once': () => { engine.start({ once: true }); return engine.snapshot(); },
+  'POST /api/run': (body) => { engine.start({ area: body.area }); return engine.snapshot(); },
   'POST /api/stop': () => { engine.stop(); return engine.snapshot(); },
   'POST /api/settings': (body) => { engine.updateSettings(body); return engine.snapshot(); },
 };

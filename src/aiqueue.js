@@ -1,5 +1,5 @@
 // Pages waiting for the AI page reader. Crawling never waits for AI: a page that needs it (no
-// recipe yet, or a recipe that stopped reading it well) is put here, and a step of each cycle works
+// recipe yet, or a recipe that stopped reading it well) is put here, and a step of each pass works
 // through the queue while AI is on, within its budget, and not paused by the plan's limit. A job
 // that failed because AI wasn't available stays, and is tried again later. So AI is spent once per
 // kind of page; after that the recipe it wrote reads every visit without it.

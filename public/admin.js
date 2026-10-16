@@ -22,36 +22,23 @@ let lastEventCount = -1;
 
 function renderHeader() {
   const s = snap;
-  const waiting = s.running && s.phase.name === 'Waiting';
-  const paused = s.running && s.phase.name === 'Paused';
-  const state = s.stopping ? 'stopping' : paused ? 'paused' : waiting ? 'waiting' : s.running ? 'running' : 'idle';
+  const paused = s.running && !!s.run?.paused;
+  const state = s.stopping ? 'stopping' : paused ? 'paused' : s.running ? 'running' : 'stopped';
   const pill = $('#state');
   pill.className = `pill ${state}`;
   pill.textContent = state;
 
-  if (!READONLY) renderControls(s, waiting);
+  if (!READONLY) renderControls(s);
 
-  const detail = waiting && s.nextCycleAt ? `next cycle in ${until(s.nextCycleAt)}`
-    : paused && s.run?.paused ? `${s.phase.detail}; looks again in ${until(s.run.paused.checkAt)}` : s.phase.detail;
-  const runFor = s.run ? ` <span class="muted">· Run for ${esc(s.run.area || 'all towns')}</span>` : '';
-  $('#phase').innerHTML = `<b>${esc(s.phase.name)}</b>${detail ? ` <span class="muted">— ${esc(detail)}</span>` : ''}` +
-    runFor + (s.cycle ? ` <span class="muted">· cycle ${s.cycle.n}, started ${fmtTime(s.cycle.startedAt)}</span>` : '');
-
-  const c = s.cycle;
-  const bars = c ? [
-    ['Pages', c.used.pages, c.used.pages + c.budget.pages],
-    ['AI calls', c.used.ai, c.used.ai + c.budget.ai],
-    ['Events verified', c.used.verify, c.budget.verify],
-  ] : [];
-  $('#progress').innerHTML = bars.map(([label, used, total]) => `
-    <div><div class="label"><span>${label}</span><span>${used} / ${total}</span></div>
-    <div class="track"><div style="width:${total ? Math.min(100, (used / total) * 100) : 0}%"></div></div></div>`).join('');
+  const detail = paused ? `${s.run.paused.reason}; looks again in ${until(s.run.paused.checkAt)}` : s.phase.detail;
+  const r = s.run;
+  const runFor = !r ? '' : ` <span class="muted">· Run for ${esc(r.area || 'all towns')}, ${s.running
+    ? `since ${fmtWhen(r.startedAt)}` : `${fmtWhen(r.startedAt)} – ${fmtWhen(r.endedAt)}`}</span>`;
+  $('#phase').innerHTML = `<b>${esc(s.phase.name)}</b>${detail ? ` <span class="muted">— ${esc(detail)}</span>` : ''}${runFor}`;
 }
 
-// Start / Run once / Stop and the parallel pages: the admin page only.
-function renderControls(s, waiting) {
-  $('#start').disabled = s.running && !waiting;
-  $('#start').textContent = waiting ? 'Start next cycle now' : 'Start';
+// Run / Stop, the AI limits and the parallel pages: the admin page only.
+function renderControls(s) {
   $('#run').disabled = s.running;
   $('#run').textContent = `Run${$('#city').value ? ` · ${$('#city').value}` : ''}`;
   for (const key of ['limitFiveHour', 'limitWeekly']) {
@@ -72,7 +59,6 @@ function renderControls(s, waiting) {
 }
 
 if (!READONLY) {
-  $('#start').onclick = () => postJson('api/start').then(apply);
   // Run is for the town picked in the events list (all towns when none).
   $('#run').onclick = () => postJson('api/run', { area: $('#city').value }).then(apply);
   $('#limits').oninput = (e) => { e.target.nextElementSibling.textContent = `${e.target.value} %`; };
@@ -112,7 +98,7 @@ function resultCell(r) {
 // "AI · 54.5k tokens" — click to open that call in the AI usage tab.
 const aiTag = (a) => `<span class="tag ai" data-aicall="${esc(a.id)}" title="Open this AI call">AI · ${fmtTokens(a.tokens)} tokens${a.error ? ' · failed' : ''}</span>`;
 
-// The steps of one cycle, with the current one highlighted.
+// The steps a Run keeps going through, with the current one highlighted.
 const STEPS = [
   ['Re-checking sources', 'Re-check sources'], ['Verifying events', 'Verify events'],
   ['AI discovery search', 'AI discovery'], ['Reading sitemaps', 'Sitemaps'], ['Exploring', 'Explore'],
@@ -121,11 +107,9 @@ const STEPS = [
 function stepsStrip(s) {
   const name = s.phase.name;
   const at = STEPS.findIndex(([phase]) => phase === name);
-  const finished = ['Cycle done', 'Waiting', 'Stopped'].includes(name);
   const items = STEPS.map(([, label], i) =>
-    `<span class="${i === at ? 'now' : (finished || (at >= 0 && i < at)) ? 'done' : ''}">${i + 1}. ${label}</span>`);
-  const last = name === 'Waiting' ? `Wait ${s.nextCycleAt ? until(s.nextCycleAt) : ''}` : s.running ? 'Wait' : 'Idle';
-  items.push(`<span class="${name === 'Waiting' || !s.running ? 'now' : ''}">${esc(last)}</span>`);
+    `<span class="${i === at ? 'now' : at >= 0 && i < at ? 'done' : ''}">${i + 1}. ${label}</span>`);
+  if (!s.running || s.run?.paused) items.push(`<span class="now">${s.running ? 'Paused' : 'Stopped'}</span>`);
   return `<div class="steps">${items.join('<i>›</i>')}</div>`;
 }
 
@@ -156,9 +140,9 @@ function aiBox(s) {
 // page otherwise only shows up as "0 events" everywhere.
 const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
 function healthBox(s) {
-  const h = s.cycle?.health;
-  if (!h) return '';
-  const bug = h.crashes ? `<div class="alert"><b>${fmtInt(h.crashes)} crawler bug${h.crashes === 1 ? '' : 's'} this cycle.</b>
+  const h = s.run?.health;
+  if (h?.read === undefined) return '';
+  const bug = h.crashes ? `<div class="alert"><b>${fmtInt(h.crashes)} crawler bug${h.crashes === 1 ? '' : 's'} this Run.</b>
     Pages that hit a bug are not counted as read and will be read again once it's fixed.
     <pre>${esc(h.lastCrash?.url || '')}\n${esc(h.lastCrash?.error || '')}</pre></div>` : '';
   const cells = [
@@ -171,23 +155,6 @@ function healthBox(s) {
   ];
   return `${bug}<div class="health">${cells.map(([k, n, sub]) => `<div><div class="k">${k}</div><div class="n">${n}</div>
     <div class="k">${esc(sub)}</div></div>`).join('')}</div>`;
-}
-
-function historyTable(s) {
-  const rows = [...(s.history || [])].reverse();
-  if (!rows.length) return '';
-  return `<h3>Recent cycles</h3>
-    <div class="scroll"><table class="grid">
-      <tr><th>Ended</th><th class="num">Pages</th><th class="num">Read</th><th class="num">With events</th>
-        <th class="num">New events</th><th class="num">AI</th><th class="num">Errors</th><th class="num">Bugs</th><th class="num">min</th></tr>
-      ${rows.map((c) => `<tr>
-        <td class="num">${fmtWhen(new Date(Date.parse(c.at) + c.ms))}</td>
-        <td class="num">${fmtInt(c.pages)}</td><td class="num">${fmtInt(c.read)}</td>
-        <td class="num">${fmtInt(c.withEvents)} <span class="muted">${pct(c.withEvents, c.read)} %</span></td>
-        <td class="num">${c.added ? `<b>${fmtInt(c.added)}</b>` : '0'}</td><td class="num">${fmtInt(c.ai)}</td>
-        <td class="num">${fmtInt(c.errors)}</td><td class="num">${c.crashes ? tag(fmtInt(c.crashes), 'bad') : ''}</td>
-        <td class="num">${(c.ms / 60e3).toFixed(1)}</td></tr>`).join('')}
-    </table></div>`;
 }
 
 function jobLabel(j) {
@@ -210,7 +177,8 @@ function overview() {
     ['AI calls today', s.ai.enabled ? fmtInt(s.ai.todayCalls) : 'off', 'ai'],
     ['AI tokens today', fmtTokens(s.ai.todayTokens), 'ai'],
   ];
-  const found = s.cycle ? `${s.cycle.found.events} events seen, ${s.cycle.found.added} new` : '';
+  const h = s.run?.health;
+  const found = h?.events !== undefined ? `${fmtInt(h.events)} events seen, ${fmtInt(h.added)} new` : '';
   return `
     ${stepsStrip(s)}
     ${healthBox(s)}
@@ -225,10 +193,10 @@ function overview() {
         <td>${tag(j.phase, PHASE_TAG[j.phase])}${j.ai ? `<br>${tag(j.ai === 'running' ? 'AI working' : 'AI queue', 'ai')}` : ''}</td>
         <td class="url">${jobLabel(j)}${j.note ? `<div class="muted">${esc(j.note)}</div>` : ''}</td>
         <td class="num">${ago(j.startedAt)}</td></tr>`).join('')
-      : `<tr><td class="empty-row">${s.running ? 'Between tasks…' : `Not running.${READONLY ? '' : ' Press Start.'}`}</td></tr>`}
+      : `<tr><td class="empty-row">${s.running ? 'Between tasks…' : `Not running.${READONLY ? '' : ' Press Run.'}`}</td></tr>`}
     </table></div>
 
-    <h3>Recently scanned ${found ? `<span style="text-transform:none;letter-spacing:0">· this cycle: ${found}</span>` : ''}</h3>
+    <h3>Recently scanned ${found ? `<span style="text-transform:none;letter-spacing:0">· this Run: ${found}</span>` : ''}</h3>
     <div class="scroll"><table class="grid">
       <tr><th>Time</th><th></th><th>Page</th><th>Result</th><th class="num">ms</th></tr>
       ${s.recent.length ? s.recent.map((r) => `<tr>
@@ -240,8 +208,6 @@ function overview() {
       : '<tr><td class="empty-row" colspan="5">Nothing scanned since the server started.</td></tr>'}
     </table></div>
 
-    ${historyTable(s)}
-
     <h3>Log</h3>
     <div class="log">${s.log.map((l) => `<div>${fmtTime(l.at)} ${esc(l.text)}${l.repeat ? ` <b>×${fmtInt(l.repeat)}</b>` : ''}</div>`).join('') || 'Empty.'}</div>`;
 }
@@ -250,8 +216,8 @@ function queueTab() {
   const q = tabData || [];
   return `<p class="muted" style="margin-top:0">${fmtInt(snap.counts.queue)} links waiting, best first. A link's score is its
     own (event words, Slovak place names, .sk; minus for news, archives, past years, other languages) plus what the
-    crawler learned about its page template and site (see Templates). Each cycle picks by score plus randomness;
-    sites that produce events may take up to 15 pages a cycle, sites that never do 1.</p>
+    crawler learned about its page template and site (see Templates). Exploring picks by score plus randomness;
+    of every 200 pages, sites that produce events may take up to 15, sites that never do 1.</p>
     <div class="scroll"><table class="grid">
       <tr><th class="num">Score</th><th class="num">Learned</th><th>Link</th><th>Found on</th><th class="num">Added</th></tr>
       ${q.map((f) => `<tr><td class="num"><b>${f.total ?? f.score}</b></td>
@@ -312,32 +278,32 @@ function share(n, total) {
   return `<div class="share">${fmtInt(n)}<div class="track" title="${pct.toFixed(1)} % of all"><div style="width:${Math.min(100, pct)}%"></div></div></div>`;
 }
 
-const DOMAIN_SORTS = [['visits', 'Visits'], ['cycleVisits', 'This cycle'], ['queued', 'In queue'], ['events', 'Events'], ['errors', 'Errors']];
-// One domain taking this share of the current cycle or of the queue gets a "heavy" tag.
-const HEAVY_CYCLE = 0.25, HEAVY_QUEUE = 0.2;
+const DOMAIN_SORTS = [['visits', 'Visits'], ['runVisits', 'This Run'], ['queued', 'In queue'], ['events', 'Events'], ['errors', 'Errors']];
+// One domain taking this share of the Run's visits or of the queue gets a "heavy" tag.
+const HEAVY_RUN = 0.25, HEAVY_QUEUE = 0.2;
 
 function domainsTab() {
   if (!tabData) return '<p class="muted">Loading…</p>';
   const { totals: t, domains } = tabData;
   const list = [...domains].sort((a, b) => b[domainSort] - a[domainSort] || b.visits - a.visits).slice(0, 300);
-  const heavy = (x) => (t.cycleVisits >= 10 && x.cycleVisits / t.cycleVisits >= HEAVY_CYCLE)
+  const heavy = (x) => (t.runVisits >= 10 && x.runVisits / t.runVisits >= HEAVY_RUN)
     || (t.queued >= 50 && x.queued / t.queued >= HEAVY_QUEUE);
   const cells = (x) => `
     <td class="num">${share(x.visits, t.visits)}</td>
-    <td class="num">${share(x.cycleVisits, t.cycleVisits)}</td>
+    <td class="num">${share(x.runVisits, t.runVisits)}</td>
     <td class="num">${share(x.queued, t.queued)}</td>
     <td class="num">${fmtInt(x.pages)}</td>
     <td class="num">${fmtInt(x.events)}${x.added ? `<div class="muted">${fmtInt(x.added)} new</div>` : ''}</td>
     <td class="num">${x.errors ? `<span title="${esc(x.lastError || '')}">${fmtInt(x.errors)}</span>` : ''}</td>
     <td class="num">${x.lastVisitAt ? ago(x.lastVisitAt) : ''}</td>`;
   return `<p class="muted" style="margin-top:0">Where the crawler spends its visits, by domain. Click a domain for its
-    subdomains. Bars show the share of all visits, of this cycle's visits, and of the queue. A domain with many visits
+    subdomains. Bars show the share of all visits, of this Run's visits, and of the queue. A domain with many visits
     but few events is eating the budget; one with many events may deserve it.</p>
     <div class="sorts"><span>Sort by</span>${DOMAIN_SORTS.map(([k, label]) =>
       `<button data-sort="${k}" aria-pressed="${k === domainSort}">${label}</button>`).join('')}
       <span>· ${fmtInt(domains.length)} domains, ${fmtInt(t.visits)} visits, ${fmtInt(t.queued)} queued</span></div>
     <div class="scroll"><table class="grid">
-      <tr><th>Domain</th><th class="num">Visits</th><th class="num">This cycle</th><th class="num">In queue</th>
+      <tr><th>Domain</th><th class="num">Visits</th><th class="num">This Run</th><th class="num">In queue</th>
         <th class="num">Pages</th><th class="num">Events</th><th class="num">Errors</th><th class="num">Last</th></tr>
       ${list.map((d) => `
         <tr class="click ${openDomain === d.domain ? 'sel' : ''}" data-domain="${esc(d.domain)}">
@@ -667,7 +633,7 @@ function aiQueueBox(a) {
     pages wait in the queue meanwhile.</p>` : '';
   return `<h3>Waiting for AI ${info('aiqueue')}</h3>${help('aiqueue')}${paused}
     <p class="muted">${fmtInt(q.size)} page${q.size === 1 ? '' : 's'} waiting${q.repairs ? `, ${fmtInt(q.repairs)} of them recipe repairs` : ''};
-      ${fmtInt(q.due)} can run now. Read by AI in the queue step of each cycle.</p>
+      ${fmtInt(q.due)} can run now. Read by AI in the queue step, over and over while a Run goes.</p>
     ${q.next.length ? `<div class="scroll"><table class="grid">
       <tr><th>Page</th><th>Why</th><th class="num">Priority</th><th>Waiting since</th></tr>
       ${q.next.map((j) => `<tr><td class="url">${esc(j.url)}</td>
@@ -839,63 +805,39 @@ async function showAiDetail(id) {
 
 // What a setting or view does, how and why: shown below it when its ⓘ is pressed.
 const HELP = {
-  cycle: `<p>The crawler works in <b>cycles</b>. <b>Start</b> runs one, waits, runs the next, until you press Stop.
-      <b>Run</b> runs cycles back to back, without waiting, for the town picked in the events list (or all towns), and
-      <b>pauses</b> while that town's coverage (Coverage tab) is at the goal below, or while the Claude plan's 5-hour or
-      weekly use is over its slider; paused, it looks again every 30 minutes and carries on by itself.
-      Each cycle goes through these steps in order:</p>
+  run: `<p><b>Run</b> crawls continuously, for the town picked in the events list (or all towns), until you press
+      <b>Stop</b>. It survives a server restart: a Run that was going carries on when the server is back.</p>
+    <p>It <b>pauses</b> by itself, and carries on by itself when the reason is gone:</p>
+    <ul>
+      <li>while that town's coverage (Coverage tab) is at the goal below, or the Claude plan's 5-hour or weekly use is over
+        its slider under the buttons; it looks again every 30 minutes;</li>
+      <li>while there's nothing to crawl (no source due, empty queue): looks again every 5 minutes;</li>
+      <li>while the network is down: every minute; and after 10 crawler bugs with fewer pages read: every 30 minutes.</li>
+    </ul>
+    <p>While running it keeps going through these steps, over and over:</p>
     <ol>
       <li><b>Re-check sources</b>: event sources that are due get their listing pages read again (up to 12 per source,
         the ones read longest ago first). A source that keeps giving new events is checked more often, one that doesn't
         less often (every 12 hours to 7 days).</li>
-      <li><b>Verify events</b>: upcoming events re-read their own page and the Facebook / ticket pages they link to.</li>
+      <li><b>Verify events</b>: upcoming events re-read their own page and the Facebook / ticket pages they link to
+        (15 at a time, the soonest first, each at most every 3 days).</li>
       <li><b>AI discovery</b>: every 6 hours, one AI web search for new event sites, aimed at the town and kind of event
         we cover worst (see the Coverage tab).</li>
       <li><b>Sitemaps</b>: up to 4 sites that have events get their sitemap read, to find event pages no listing links to.</li>
-      <li><b>Explore</b>: whatever page budget is left goes to the queue of links found so far, best-scoring first.</li>
-      <li><b>Check dates</b>, <b>tag</b> and <b>locate</b> the events, so the ones found this cycle are finished this cycle.</li>
-    </ol>
-    <p>The numbers below are the limits for one cycle. A cycle ends when its work is done or its budget is spent,
-      whichever comes first. Changes are saved for good and apply from the next cycle (parallel pages: right away).</p>`,
+      <li><b>Explore</b>: the queue of links found so far, best-scoring first, 200 pages at a time.</li>
+      <li><b>AI queue</b>, <b>check dates</b>, <b>tag</b> and <b>locate</b> the events found, then back to step 1.</li>
+    </ol>`,
   concurrency: `<p><b>What:</b> how many pages are fetched at the same time (1–50, default 5).</p>
     <p><b>How:</b> a pool of workers; each takes the next page as soon as it's free. Changing it takes effect within half a
-      second, even in the middle of a cycle.</p>
+      second, even in the middle of a step.</p>
     <p><b>Why it doesn't hammer sites:</b> every site still gets at most one request every 2 seconds, however many workers
       there are, and robots.txt is obeyed. More workers help when the work is spread over many sites; on one big site
       they just wait their turn. AI calls also run strictly one at a time, so more workers don't mean more AI.</p>
-    <p><b>Raise it</b> to finish cycles faster; <b>lower it</b> if the server is slow or short on memory or network.</p>`,
-  pagesPerCycle: `<p><b>What:</b> the most pages one cycle may fetch (1–2000, default 60). This is the main size of a cycle.</p>
-    <p><b>Counts:</b> listing pages re-checked, sitemap files, and pages explored from the queue. Re-checking known sources
-      goes first, then sitemaps, then exploring gets what's left, so with a small number new sites are found slowly.</p>
-    <p><b>Doesn't count:</b> the pages read to verify events (they have their own limit below) and robots.txt.</p>
-    <p><b>Why a limit:</b> it keeps each cycle short and predictable, and spreads the crawling out over time. A page that hasn't
-      changed since last time (same ETag or content) still counts as fetched but is processed in no time.</p>`,
-  aiPerCycle: `<p><b>What:</b> the most calls to the bigger AI model in one cycle (0–100, default 5). 0 means no such calls.</p>
-    <p><b>Used by:</b> the AI queue (pages the crawler can't parse on its own get a <i>recipe</i> written for them, after
-      which pages like them are read without AI; recipes that stop working get repaired); the discovery web search; and
-      checking date formats and schedules written as text (at most 2 calls a cycle). Pages that don't fit in this
-      cycle's budget wait in the queue (AI tab) for the next one.</p>
-    <p><b>Not counted:</b> the cheap pre-check that first asks whether a page lists events at all (up to 60 a cycle) and
-      tagging events (2 calls of 40 events a cycle). Switch those off in the AI tab if you want none.</p>
-    <p><b>Why a limit:</b> AI calls use your Claude plan and take tens of seconds each. The crawler also holds back by itself:
-      one look per site per cycle, one per page template per week, and none at sites where AI found nothing 3 times.
-      The AI tab shows every call, what it cost and what came of it.</p>`,
-  verifyPerCycle: `<p><b>What:</b> how many upcoming events get re-checked in one cycle (0–500, default 15).</p>
-    <p><b>How:</b> an event is due when it was last checked more than 3 days ago; the soonest events go first. Its own detail
-      page is read again (dates and times may have changed, a schedule may have appeared) and the Facebook and
-      ticket-shop pages it links to (up to 4) are checked to confirm the date. Events whose site is down wait until it's back.</p>
-    <p><b>Why:</b> listings often show only a title and a day; the detail and ticket pages confirm it and add the time,
-      which is what the public site shows as sources. These fetches don't count towards <i>Pages per cycle</i>.</p>
-    <p><b>Raise it</b> if many events show as unconfirmed; 0 switches verifying off.</p>`,
+    <p><b>Raise it</b> to crawl faster; <b>lower it</b> if the server is slow or short on memory or network.</p>`,
   coverageGoal: `<p><b>What:</b> <b>Run</b> pauses while the estimated coverage of its town (or of all towns) is at least
       this (1–100 %, default 90). A town with too few events to estimate ("?") never counts as covered.</p>
     <p><b>Why:</b> once nearly everything that's on is found, more crawling mostly re-reads what we have. The AI limits are the
       two sliders under the buttons (default 80 % each); a paused Run checks both again every 30 minutes.</p>`,
-  cycleEveryMin: `<p><b>What:</b> how long to wait after a cycle ends before the next one starts (1–1440 minutes, default 60).</p>
-    <p><b>How:</b> the wait is counted from the end of a cycle, so a long cycle doesn't make the next one start right away.
-      A new value applies from the next wait; to skip the current wait press <b>Start next cycle now</b>.</p>
-    <p><b>Why not shorter:</b> sources decide themselves when they are due (every 12 hours to 7 days), so cycles more often
-      than that mostly explore the queue. Shorter = new sites found sooner, but more requests and more AI use per day.</p>`,
 };
 
 const info = (key) => `<button class="info-btn" data-help="${key}" aria-expanded="${openHelp.has(key)}" title="What this does">i</button>`;
@@ -905,13 +847,9 @@ function settingsTab() {
   const s = snap.settings;
   const field = (key, label) => `<label for="set-${key}">${label} ${info(key)}</label>
     <input id="set-${key}" type="number" min="0" value="${s[key]}">${help(key)}`;
-  return `<p class="muted">How a crawl cycle works ${info('cycle')}</p>${help('cycle')}
+  return `<p class="muted">How a Run works ${info('run')}</p>${help('run')}
     <div class="form">
       ${field('concurrency', 'Parallel pages')}
-      ${field('pagesPerCycle', 'Pages per cycle')}
-      ${field('aiPerCycle', 'AI calls per cycle')}
-      ${field('verifyPerCycle', 'Events verified per cycle')}
-      ${field('cycleEveryMin', 'Minutes between cycles')}
       ${field('coverageGoal', 'Run pauses at coverage %')}
     </div>
     <p><button class="btn primary" id="save-settings">Save</button> <span class="muted" id="saved"></span></p>
@@ -921,8 +859,9 @@ function settingsTab() {
 }
 
 HELP.aiqueue = `<p><b>Why a queue:</b> crawling is free, AI isn't. So the crawler never waits for AI and never
-    calls it in the middle of crawling. A page that needs AI is put here, and one step of every cycle works through
-    the queue: within <i>AI calls per cycle</i>, with AI switched on, and not while the Claude plan's limit is hit.</p>
+    calls it in the middle of crawling. A page that needs AI is put here, and a step of the Run works through the
+    queue (up to 30 pages, then the other steps get their turn), with AI switched on, and not while the Claude plan's
+    limit is hit.</p>
   <p><b>What needs AI:</b> a page that lists events but that the crawler can't read on its own yet (no structured data,
     no recipe), and a page whose recipe stopped reading it well. AI then writes a <b>recipe</b>: CSS selectors that say
     where each event, its title, date, time, place and link are on the page. Every later visit reads the page with the
@@ -934,7 +873,7 @@ HELP.aiqueue = `<p><b>Why a queue:</b> crawling is free, AI isn't. So the crawle
     (first in line), and AI is shown the old recipe and what went wrong. Meanwhile the old recipe's events are still used.
     A new recipe replaces the old one only if it reads the page at least about as well.</p>
   <p><b>Order and limits:</b> repairs first, then seed pages, then pages AI named as listings, then other promising pages.
-    One new page per URL pattern waits at a time (its recipe will read the others), and one new site's page per cycle.
+    One new page per URL pattern waits at a time (its recipe will read the others), and one page per new site until the other steps have had their turn.
     A try that fails because the plan's limit was hit waits until the limit resets and doesn't count; other failures
     are retried after 1, 2 and 4 hours, then dropped. The queue keeps at most 1,000 pages.</p>`;
 
@@ -980,7 +919,7 @@ function coverageTab() {
     ['Coverage, all', o.coverage === undefined ? '?' : covPct(o.coverage)],
     ['Upcoming events', fmtInt(o.events)], ['Estimated total', o.estimate ? fmtInt(o.estimate) : '?'],
     ['On 2+ sites', fmtInt(o.twice + o.more)], ['Listing sites', fmtInt(o.sites)],
-    ['Next search', !c.discoverOn ? 'AI off' : nextAt <= Date.now() ? 'next cycle' : `in ${until(nextAt)}`],
+    ['Next search', !c.discoverOn ? 'AI off' : nextAt <= Date.now() ? 'due' : `in ${until(nextAt)}`],
   ];
   return `<p class="muted" style="margin-top:0">How much of what's on we've probably found, per town and kind of event,
       and where the AI search for new sites goes next. ${info('coverage')}</p>${help('coverage')}
@@ -1008,7 +947,7 @@ function coverageTab() {
         <td>${esc(d.query)}<div class="muted">${esc(d.why || '')}</div></td>
         <td class="num">${d.urls} / ${d.queued}</td>
         <td>${tag(...SEARCH_RESULT[d.result])}${d.found.length ? `<div class="muted">${d.found.map((u) => esc(u.replace(/^https?:\/\/(www\.)?/, ''))).join(', ')}</div>` : ''}</td></tr>`).join('')
-      || '<tr><td class="empty-row">No aimed searches yet: the first runs in the next cycle that is due one.</td></tr>'}
+      || '<tr><td class="empty-row">No aimed searches yet: the first runs when one is due.</td></tr>'}
     </table></div>`;
 }
 

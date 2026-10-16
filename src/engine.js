@@ -1,7 +1,7 @@
 // Runs the crawler inside the server so the admin panel can watch and control it:
-// start/stop, number of parallel workers, budgets, and a live record of what's happening.
+// one continuous Run (Run/Stop), parallel workers, and a live record of what's happening.
 import { loadState, saveState } from './store.js';
-import { runCycle } from './crawler.js';
+import { crawlPass } from './crawler.js';
 import {
   AI_JOBS, AI_MODELS, aiAvailable, aiConfig, aiInput, aiPausedUntil, aiStatus, lastPlanUsage, planUsage, setAiConfig, setAiRecorder,
 } from './ai.js';
@@ -49,45 +49,58 @@ const PUBLIC_ROW = ['url', 'site', 'kind', 'linked', 'status', 'note', 'title', 
 
 export const DEFAULT_SETTINGS = {
   concurrency: 5, // pages fetched in parallel
-  pagesPerCycle: 60,
-  aiPerCycle: 5,
-  verifyPerCycle: 15,
-  cycleEveryMin: 60,
-  // Run (continuous): pause when the area's coverage reaches coverageGoal %, or when the plan's
+  // Run pauses when the area's coverage reaches coverageGoal %, or when the plan's
   // 5-hour or weekly window is over its limit %.
   coverageGoal: 90,
   limitFiveHour: 80,
   limitWeekly: 80,
 };
 const LIMITS = {
-  concurrency: [1, 50], pagesPerCycle: [1, 2000], aiPerCycle: [0, 100], verifyPerCycle: [0, 500], cycleEveryMin: [1, 1440],
-  coverageGoal: [1, 100], limitFiveHour: [1, 100], limitWeekly: [1, 100],
+  concurrency: [1, 50], coverageGoal: [1, 100], limitFiveHour: [1, 100], limitWeekly: [1, 100],
 };
-const PAUSE_CHECK_MS = 30 * 60e3; // a paused Run looks again this often
+// A Run works in passes of this size (crawler.js), so every step (re-checks, verifying, exploring, the
+// AI queue, dates, tags, the map) keeps getting its turn. They follow each other without a break; AI use
+// is held back by the plan limits above, not per pass.
+const PASS = { maxPages: 200, maxAi: 30, maxVerify: 15 };
+const PAUSE_CHECK_MS = 30 * 60e3; // a Run paused at a goal or limit looks again this often
+const IDLE_CHECK_MS = 5 * 60e3; // …with nothing to crawl
+const OFFLINE_CHECK_MS = 60e3; // …without a network
 const MAX_RECENT = 300;
 const fmtTokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 const MAX_AI_LOG = 5000;
 const SAVE_EVERY_MS = 15000;
+
+// Pass health (crawler.js) added up: counts summed, the latest crawler bug kept.
+function sumHealth(a, b) {
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b)) {
+    if (typeof v === 'number') out[k] = (out[k] || 0) + v;
+    else if (v) out[k] = v;
+  }
+  return out;
+}
 
 export class Engine {
   constructor() {
     this.state = loadState();
     this.settings = { ...DEFAULT_SETTINGS, ...this.state.settings };
     this.settings.ai = setAiConfig(this.settings.ai); // AI switches + model per job
+    for (const k of ['pagesPerCycle', 'aiPerCycle', 'verifyPerCycle', 'cycleEveryMin']) delete this.settings[k]; // no more cycles
+    delete this.state.meta.cycles;
     this.state.settings = this.settings;
-    this.running = false; // a loop is active (cycle running or waiting for the next one)
+    this.running = false; // a Run is active (crawling or paused)
     this.stopping = false;
-    this.phase = { name: 'Idle', detail: '' };
-    this.cycle = null; // ctx of the current/last cycle: budget, used, found
-    this.cycles = 0;
-    this.nextCycleAt = null;
+    this.phase = { name: 'Stopped', detail: '' };
+    this.pass = null; // ctx of the pass in progress
     this.active = new Map(); // job id -> job (pages being fetched right now)
     this.recent = []; // finished jobs, newest first
     this.log = []; // phase changes and messages, newest first
     this.seq = 0;
     this.wake = null;
     this.dirty = false;
-    this.run = null; // Run mode: { area, paused: { reason, since, checkAt } | null }
+    // The current (or last) Run: { area, startedAt, endedAt, paused: { reason, since, checkAt } | null,
+    // health: totals of its passes, hostVisits }
+    this.run = null;
 
     setAiRecorder((rec) => {
       this.state.ai.push(rec);
@@ -97,34 +110,25 @@ export class Engine {
     });
     setInterval(() => this.save(), SAVE_EVERY_MS).unref();
     planUsage().catch(() => {}); // your Claude plan's usage, for the AI tab
+    if (this.state.meta.run) this.start(this.state.meta.run); // a Run carries on after a restart
   }
 
   // ---------------------------------------------------------------- control
 
-  /** Start crawling: cycles repeat every cycleEveryMin until stopped (or just one with once). */
-  start({ once = false } = {}) {
-    if (this.running) {
-      this.wake?.(); // waiting between cycles: start the next one now
-      return;
-    }
-    this.run = null;
-    this.running = true;
-    this.stopping = false;
-    this.loop(once).catch((err) => this.message(`engine error: ${err.stack || err}`));
-  }
-
   /**
-   * Run: cycles back to back, for one area (a town, or all of them when empty), until stopped. Before
-   * each cycle it pauses while the area's coverage is at the goal or the plan's 5-hour or weekly use is
-   * over its limit, and looks again every 30 minutes.
+   * Run: crawl continuously, for one area (a town, or all of them when empty), until Stop. It pauses
+   * while the area's coverage is at the goal or the plan's 5-hour or weekly use is over its limit
+   * (looking again every 30 minutes), while there's nothing to crawl, and while offline.
    */
-  startRun({ area = '' } = {}) {
+  start({ area = '' } = {}) {
     if (this.running) return;
-    this.run = { area: String(area || ''), paused: null };
+    this.run = { area: String(area || ''), startedAt: Date.now(), paused: null, health: {}, hostVisits: {} };
+    this.state.meta.run = { area: this.run.area };
+    this.dirty = true;
     this.running = true;
     this.stopping = false;
     this.message(`Run started${this.run.area ? ` for ${this.run.area}` : ''}`);
-    this.loop(false).catch((err) => this.message(`engine error: ${err.stack || err}`));
+    this.loop().catch((err) => this.message(`engine error: ${err.stack || err}`));
   }
 
   /** Why a Run should not crawl now, or null. */
@@ -144,7 +148,7 @@ export class Engine {
     return null;
   }
 
-  // Sleep until ms from now, or until wake() (Stop, or Start next cycle now).
+  // Sleep until ms from now, or until wake() (Stop).
   async sleep(ms) {
     await new Promise((resolve) => {
       const t = setTimeout(resolve, ms);
@@ -153,10 +157,12 @@ export class Engine {
     this.wake = null;
   }
 
-  /** Finish the pages being fetched right now, then stop. */
+  /** Finish the pages being fetched right now, then stop the Run. */
   stop() {
     if (!this.running) return;
     this.stopping = true;
+    delete this.state.meta.run;
+    this.dirty = true;
     this.message('Stopping after current pages finish…');
     this.wake?.();
   }
@@ -177,55 +183,65 @@ export class Engine {
     this.save();
   }
 
-  async loop(once) {
+  async loop() {
+    let wait = null; // { reason, ms }: why the last pass says to hold off
     while (!this.stopping) {
-      if (this.run) {
+      if (!wait) {
         const reason = await this.pauseReason();
-        if (reason) {
-          const checkAt = Date.now() + PAUSE_CHECK_MS;
-          if (!this.run.paused) this.message(`Run paused: ${reason}`);
-          this.run.paused = { reason, since: this.run.paused?.since || Date.now(), checkAt };
-          this.phase = { name: 'Paused', detail: reason };
-          await this.sleep(checkAt - Date.now());
-          continue;
-        }
-        if (this.run.paused) this.message('Run resumed');
-        this.run.paused = null;
+        if (reason) wait = { reason, ms: PAUSE_CHECK_MS };
       }
-      this.cycles++;
-      this.nextCycleAt = null;
+      if (wait) {
+        const { paused } = this.run;
+        if (paused?.reason !== wait.reason) this.message(`Run paused: ${wait.reason}`);
+        this.run.paused = { reason: wait.reason, since: paused?.since || Date.now(), checkAt: Date.now() + wait.ms };
+        this.phase = { name: 'Paused', detail: wait.reason };
+        await this.sleep(wait.ms);
+        wait = null;
+        continue;
+      }
+      if (this.run.paused) this.message('Run resumed');
+      this.run.paused = null;
+      let ctx = null;
       try {
-        await runCycle(this.state, {
-          maxPages: this.settings.pagesPerCycle,
-          maxAi: this.settings.aiPerCycle,
-          maxVerify: this.settings.verifyPerCycle,
-        }, this.control());
+        ctx = await crawlPass(this.state, PASS, this.control());
       } catch (err) {
-        this.message(`cycle failed: ${err.stack || err}`);
+        this.message(`crawler error: ${err.stack || err}`);
+        wait = { reason: 'crawler error (see the log)', ms: PAUSE_CHECK_MS };
+      }
+      this.pass = null;
+      if (ctx) {
+        this.addPass(ctx);
+        const idle = !ctx.used.pages && !ctx.used.verify && !ctx.used.ai;
+        if (ctx.offline) wait = { reason: 'offline (DNS lookups fail)', ms: OFFLINE_CHECK_MS };
+        else if (ctx.halted) wait = { reason: ctx.halted, ms: PAUSE_CHECK_MS };
+        else if (idle && !ctx.control.stopped()) wait = { reason: 'nothing to crawl right now', ms: IDLE_CHECK_MS };
       }
       this.dirty = true;
       this.save();
       planUsage({ refresh: true }).catch(() => {});
-      if (once || this.stopping) break;
-      if (this.run) continue; // Run: next cycle right away
-      this.nextCycleAt = Date.now() + this.settings.cycleEveryMin * 60e3;
-      this.phase = { name: 'Waiting', detail: 'for the next cycle' };
-      await this.sleep(this.nextCycleAt - Date.now());
     }
     this.running = false;
-    this.run = null;
     this.stopping = false;
-    this.nextCycleAt = null;
-    this.phase = { name: 'Idle', detail: '' };
+    this.run.paused = null;
+    this.run.endedAt = Date.now();
+    this.phase = { name: 'Stopped', detail: '' };
+    this.message('Run stopped');
   }
 
-  // What runCycle uses to read settings and report progress.
+  /** Add a finished pass to the Run's totals. */
+  addPass(ctx) {
+    const r = this.run;
+    r.health = sumHealth(r.health, ctx.health);
+    for (const [host, n] of Object.entries(ctx.hostVisits)) r.hostVisits[host] = (r.hostVisits[host] || 0) + n;
+  }
+
+  // What crawlPass uses to read settings and report progress.
   control() {
     return {
       concurrency: () => this.settings.concurrency,
       stopped: () => this.stopping,
       report: {
-        begin: (ctx) => { this.cycle = { ...ctx, startedAt: Date.now(), n: this.cycles }; },
+        begin: (ctx) => { this.pass = ctx; },
         phase: (name, detail) => {
           this.phase = { name, detail: detail || '' };
           this.message(`${name}${detail ? ` — ${detail}` : ''}`);
@@ -287,18 +303,15 @@ export class Engine {
       if (r.error) t.errors++;
       return t;
     }, { calls: 0, input: 0, output: 0, webSearches: 0, todayCalls: 0, todayTokens: 0, errors: 0, costUsd: 0, todayCostUsd: 0 });
-    const c = this.cycle;
+    const r = this.run;
     return {
       running: this.running,
       stopping: this.stopping,
       phase: this.phase,
       settings: this.settings,
-      cycles: this.cycles,
-      nextCycleAt: this.nextCycleAt,
-      run: this.run,
-      cycle: c && { n: c.n, startedAt: c.startedAt, budget: c.budget, used: c.used, found: c.found, health: c.health },
-      // One line per finished cycle (newest last): pages read, how many had events, new events…
-      history: (s.meta.cycles || []).slice(-12),
+      // The Run's totals so far, the pass in progress included.
+      run: r && { area: r.area, startedAt: r.startedAt, endedAt: r.endedAt, paused: r.paused,
+        health: this.pass ? sumHealth(r.health, this.pass.health) : r.health },
       active: [...this.active.values()],
       recent: this.recent.slice(0, 40),
       log: this.log.slice(0, 30),
@@ -390,14 +403,15 @@ export class Engine {
 
   /**
    * Crawl activity grouped by domain, with each subdomain inside: visits (all time and this
-   * cycle), errors, events found, pages known and links waiting in the queue.
+   * Run), errors, events found, pages known and links waiting in the queue.
    */
   domains() {
     const s = this.state;
-    const cycleVisits = this.cycle?.hostVisits || {};
+    const runVisits = { ...this.run?.hostVisits };
+    for (const [host, n] of Object.entries(this.pass?.hostVisits || {})) runVisits[host] = (runVisits[host] || 0) + n;
     const hosts = {};
     const row = (host) => (hosts[host] ??= {
-      host, visits: 0, cycleVisits: 0, errors: 0, events: 0, added: 0, pages: 0, queued: 0, kind: undefined,
+      host, visits: 0, runVisits: 0, errors: 0, events: 0, added: 0, pages: 0, queued: 0, kind: undefined,
     });
     for (const [host, h] of Object.entries(s.hosts)) {
       Object.assign(row(host), {
@@ -406,7 +420,7 @@ export class Engine {
         events: h.events, added: h.added, lastVisitAt: h.lastVisitAt,
       });
     }
-    for (const [host, n] of Object.entries(cycleVisits)) row(host).cycleVisits = n;
+    for (const [host, n] of Object.entries(runVisits)) row(host).runVisits = n;
     for (const url of Object.keys(s.pages)) { const h = hostOf(url); if (h) row(h).pages++; }
     for (const url of Object.keys(s.frontier)) { const h = hostOf(url); if (h) row(h).queued++; }
     for (const src of Object.values(s.sources)) {
@@ -415,7 +429,7 @@ export class Engine {
     }
 
     const domains = {};
-    const SUM = ['visits', 'cycleVisits', 'errors', 'events', 'added', 'pages', 'queued'];
+    const SUM = ['visits', 'runVisits', 'errors', 'events', 'added', 'pages', 'queued'];
     for (const h of Object.values(hosts)) {
       const d = (domains[domainOf(h.host)] ??= { domain: domainOf(h.host), hosts: [], ...Object.fromEntries(SUM.map((k) => [k, 0])) });
       d.hosts.push(h);

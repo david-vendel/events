@@ -14,8 +14,7 @@
       <h1>Crawler</h1>
       <span class="pill" id="state">…</span>
       <span class="spacer"></span>
-      <button class="btn primary" id="start">Start</button>
-      <button class="btn" id="run" title="Run cycles back to back for the town picked on the right; pauses at the coverage goal or the AI limits below">Run</button>
+      <button class="btn primary" id="run" title="Crawl continuously for the town picked on the right, until Stop; pauses at the coverage goal or the AI limits below">Run</button>
       <button class="btn" id="stop">Stop</button>
     </div>
     <div class="bar" style="margin-top:10px">
@@ -26,7 +25,6 @@
       <label>Weekly AI use <input type="range" id="limitWeekly" min="1" max="100" step="1"> <b></b></label>
     </div>
     <div class="phase" id="phase"></div>
-    <div class="progress" id="progress"></div>
 
     <nav class="tabs" role="tablist">
       <button role="tab" data-tab="overview" aria-selected="true">Overview</button>

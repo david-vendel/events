@@ -7,7 +7,7 @@
 //   2. the venue cache, filled by OpenStreetMap's Nominatim geocoder: the street address, else
 //      the venue name, else the city centre (precision "city", so a map can treat it as rough).
 // Nominatim's usage policy: at most 1 request per second, an identifying User-Agent, and cache
-// results. We send a few dozen requests per cycle at most, and every answer (also "not found") is
+// results. We send a few dozen requests per pass at most, and every answer (also "not found") is
 // cached. Set a venue's status to "manual" in data/venues.json to pin coordinates by hand.
 // EVENTS_GEOCODER=off disables lookups.
 
@@ -346,7 +346,7 @@ export async function locateEvents(state, today, budget, report) {
         ? { status: 'ok', note: `${hit.precision}: ${hit.label}${hit.precision === 'city' ? ' (city centre only)' : ''}` }
         : { status: 'nothing', note: 'not found' });
     } catch (err) {
-      // Network or rate-limit trouble: leave it uncached so the next cycle tries again.
+      // Network or rate-limit trouble: leave it uncached so the next pass tries again.
       report.end(job, { status: 'error', note: err.message });
       if (Date.now() < pausedUntil) break;
     }

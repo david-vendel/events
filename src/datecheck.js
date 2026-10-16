@@ -1,4 +1,4 @@
-// The "Check dates" step of a cycle: date formats the parser hasn't confirmed (or that are due for
+// The "Check dates" step of a pass: date formats the parser hasn't confirmed (or that are due for
 // a re-check) and schedules written as prose go to AI in small batches. What AI says about a format
 // decides how it is parsed from now on (see dates.js); stored events in a format that changed are
 // read again right away.
@@ -8,7 +8,7 @@ import { dateShape, formatsDue, learnFormat, parseDateText, readDateText } from 
 const FORMATS_PER_CALL = 12;
 const SAMPLES_PER_FORMAT = 3;
 const PROSE_PER_CALL = 4;
-const CALLS_PER_CYCLE = 2;
+const CALLS_PER_PASS = 2;
 
 const iso = () => new Date().toISOString();
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -25,7 +25,7 @@ const proseDue = (state, today) => Object.values(state.events)
 export async function checkDates(state, ctx, report) {
   const { today, index } = ctx;
   let calls = 0;
-  while (calls < CALLS_PER_CYCLE && ctx.budget.ai > 0 && !ctx.control.stopped()) {
+  while (calls < CALLS_PER_PASS && ctx.budget.ai > 0 && !ctx.control.stopped()) {
     const formats = formatsDue(FORMATS_PER_CALL);
     const prose = proseDue(state, today).slice(0, PROSE_PER_CALL);
     if (!formats.length && !prose.length) break;
@@ -46,7 +46,7 @@ export async function checkDates(state, ctx, report) {
     let changed = 0, reread = 0;
     sent.forEach(({ f, samples }, i) => {
       const a = res.formats[i];
-      if (!a) return; // no answer: asked again next cycle
+      if (!a) return; // no answer: asked again next pass
       const answers = {};
       for (const x of a.samples) if (samples[x.s] !== undefined) answers[samples[x.s]] = answerOf(x);
       if (!Object.keys(answers).length) return;
