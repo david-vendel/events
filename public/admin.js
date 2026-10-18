@@ -152,9 +152,26 @@ function healthBox(s) {
     ['Fetch errors', fmtInt(h.errors), h.fetched ? `${pct(h.errors, h.fetched)} % of fetches` : ''],
     ['AI calls', fmtInt(h.ai), h.aiRecipes ? `${h.aiRecipes} new recipes` : ''],
     ['From sitemaps', fmtInt(h.sitemapQueued), h.sitemapFiles ? `${h.sitemapFiles} files read` : 'links queued'],
+    // Only events in Slovakia are kept: how much of the crawl still goes abroad.
+    ['Pages abroad', fmtInt(h.abroadPages || 0), `${pct(h.abroadPages || 0, h.read)} % of pages read`
+      + `${h.aiUsd ? ` · AI ${fmtUsd(h.aiAbroadUsd || 0)} of ${fmtUsd(h.aiUsd)}` : ''}`],
+    ['Events abroad', fmtInt(h.abroadEvents || 0), `not kept · ${fmtInt(h.dropped || 0)} more dropped later`],
   ];
   return `${bug}<div class="health">${cells.map(([k, n, sub]) => `<div><div class="k">${k}</div><div class="n">${n}</div>
     <div class="k">${esc(sub)}</div></div>`).join('')}</div>`;
+}
+
+// Upcoming events whose country isn't known yet: kept (most are in Slovakia) until locating tells.
+// A sample, to spot events abroad slipping through.
+function unknownBox(s) {
+  const u = s.unknownCountry;
+  if (!u?.count) return '';
+  return `<details class="unknown"><summary>${fmtInt(u.count)} upcoming events: country not known yet
+    <span class="muted">(kept until they're located; a random sample)</span></summary>
+    <div class="scroll"><table class="grid">${u.sample.map((e) => `<tr><td>${esc(e.title || '')}</td>
+      <td class="muted">${esc(e.location || '—')}</td>
+      <td class="url"><a href="${esc(e.via || '')}" target="_blank" rel="noopener">${esc(e.via || '')}</a></td></tr>`).join('')}
+    </table></div></details>`;
 }
 
 function jobLabel(j) {
@@ -183,6 +200,7 @@ function overview() {
     ${stepsStrip(s)}
     ${healthBox(s)}
     ${aiBox(s)}
+    ${unknownBox(s)}
     <div class="tiles">${tiles.map(([label, n, go]) => TABS[go]
       ? `<button class="tile" data-go="${go}"><div class="n">${n}</div><div class="k">${label} ›</div></button>`
       : `<div class="tile"><div class="n">${n}</div><div class="k">${label}</div></div>`).join('')}</div>
@@ -308,16 +326,28 @@ function domainsTab() {
       ${list.map((d) => `
         <tr class="click ${openDomain === d.domain ? 'sel' : ''}" data-domain="${esc(d.domain)}">
           <td class="url"><b>${esc(d.domain)}</b> ${d.hosts.length > 1 ? `<span class="muted">${d.hosts.length} hosts</span>` : ''}
-            ${d.kind ? tag(d.kind, d.kind === 'events' ? 'ok' : '') : ''} ${heavy(d) ? tag('heavy', 'warn') : ''}
+            ${d.kind ? tag(d.kind, d.kind === 'events' ? 'ok' : '') : ''} ${regionTag(d)} ${heavy(d) ? tag('heavy', 'warn') : ''}
             ${d.hosts.some((h) => h.downUntil) ? tag('down', 'bad') : ''}</td>
           ${cells(d)}</tr>
         ${openDomain === d.domain ? d.hosts.map((h) => `<tr class="sub">
-          <td class="url">${esc(h.host)} ${h.kind ? tag(h.kind, h.kind === 'events' ? 'ok' : '') : ''}
+          <td class="url">${esc(h.host)} ${h.kind ? tag(h.kind, h.kind === 'events' ? 'ok' : '') : ''} ${regionTag(h)}
             ${h.downUntil ? tag(`down (${h.lastTrouble || 'error'}): back ${fmtWhen(h.downUntil)}`, 'bad')
               : h.failStreak >= 3 ? tag(`failing: ${h.lastError || 'error'}`, 'bad') : ''}</td>
           ${cells(h)}</tr>`).join('') : ''}`).join('')
       || '<tr><td class="empty-row">Nothing visited yet.</td></tr>'}
     </table></div>`;
+}
+
+// Where a template's or site's events are (as learn.js judges it: regionAt): only events in Slovakia
+// are kept, and pages whose events are abroad aren't crawled.
+function regionTag(x) {
+  const sk = x?.sk || 0, abroad = x?.abroad || 0;
+  if (sk + abroad < 3) return '';
+  const share = sk / (sk + abroad);
+  const counts = `${fmtInt(sk)} in Slovakia, ${fmtInt(abroad)} abroad`;
+  return share < 0.15 ? `<span title="${counts}: not crawled">${tag('abroad', 'bad')}</span>`
+    : share > 0.85 ? `<span title="${counts}">${tag('Slovakia', 'ok')}</span>`
+      : `<span title="${counts}">${tag(`mixed ${Math.round(share * 100)} % SK`, 'warn')}</span>`;
 }
 
 const TEMPLATE_VIEWS = [['productive', 'Finding events'], ['wasteful', 'Never had events']];
@@ -330,7 +360,8 @@ function templatesTab() {
     (<code>kamdomesta.sk/kosice/*</code>). The crawler counts, per template, how many visits found upcoming events.
     Templates that keep finding events get their links visited sooner; ones that never do sink in the queue, and the
     AI looks at a template at most once a week. A recipe the AI writes for one page is used for every page of the
-    template (and tried on sibling templates of the same site), so no AI is needed for them.</p>
+    template (and tried on sibling templates of the same site), so no AI is needed for them. Each template also counts
+    where its events are: one whose events are abroad (tagged so) isn't crawled any more, since only events in Slovakia are kept.</p>
     <div class="tiles">
       <div class="tile"><div class="n">${fmtInt(t.templates)}</div><div class="k">templates seen</div></div>
       <div class="tile"><div class="n">${fmtInt(t.productive)}</div><div class="k">with events</div></div>
@@ -342,7 +373,7 @@ function templatesTab() {
       <tr><th>Template</th><th class="num">Visits</th><th class="num">With events</th><th class="num">New events</th>
         <th>Reading</th><th class="num">Effect</th></tr>
       ${list.map((p) => `<tr>
-        <td class="url"><b>${esc(p.key)}</b>${p.example ? `<div><a class="muted" href="${esc(p.example)}" target="_blank" rel="noopener">${esc(p.example)}</a></div>` : ''}</td>
+        <td class="url"><b>${esc(p.key)}</b> ${regionTag(p)}${p.example ? `<div><a class="muted" href="${esc(p.example)}" target="_blank" rel="noopener">${esc(p.example)}</a></div>` : ''}</td>
         <td class="num">${fmtInt(p.visits)}</td>
         <td class="num">${fmtInt(p.withEvents)} <span class="muted">${pct(p.withEvents, p.visits)} %</span></td>
         <td class="num">${fmtInt(p.added)}<div class="muted">${fmtInt(p.events)} seen</div></td>

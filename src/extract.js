@@ -5,6 +5,7 @@ import { sha1 } from './fetcher.js';
 import { coarsePattern, normalizeUrl, urlKey } from './urls.js';
 import { TAGS, tagsFromSchemaTypes } from './tags.js';
 import { MONTH_RE, finishDate, parseDateText, readDateText, tooFarAhead } from './dates.js';
+import { foreignHost, namesSkTown } from './slovakia.js';
 
 export { PARSER_VERSION, parseDateText } from './dates.js';
 
@@ -209,8 +210,11 @@ const SKIP_EXT = /\.(pdf|jpe?g|png|gif|webp|svg|zip|rar|docx?|xlsx?|pptx?|mp[34]
 const SKIP_HOSTS = /(^|\.)(google\.[a-z.]+|goo\.gl|apple\.com|microsoft\.com|wikipedia\.org|gstatic\.com|doubleclick\.net|cookiebot\.com|wa\.me|t\.me|wordpress\.(org|com)|wp-events-plugin\.com|theeventscalendar\.com|wix\.com|webnode\.\w+|zendesk\.com|bazos\.sk|topreality\.sk|nehnutelnosti\.sk)$/i;
 const EVENT_WORDS = /podujat|akci[ae]|event|kalendar|program|festival|koncert|vystav|divadl|trh|jarmok|kino|predstaven|workshop|prednask|kultur|zabav|vikend|tickets?|vstupenk|listky|majales|beh\b|maraton/;
 const KOSICE_WORDS = /kosic|kosice|cassovia|kassa|kaschau/;
-// Slovak towns and regions: the crawler covers all of Slovakia first.
-const SK_PLACES = /kosic|bratislav|zilin|presov|banska.?bystric|nitr[ae]|trnav|trencin|poprad|martin|michalovc|spisska|bardejov|humenn|levic|komarn|piestan|zvolen|ruzomberok|liptov|tatr|senec|pezinok|prievidz|lucenec|roznav|trebisov|dunajska|nove.?zamky|topolcan|skalic|senic|sabinov|kezmarok|stara.?lubovn|vranov/;
+// Slovak regions (towns: namesSkTown, every Slovak town).
+const SK_REGIONS = /liptov|tatr|spissk|spisk[aeyo]|orav[ays]|kysuc|zahori|zemplin|sarisk|gemer|hontian|turiec|turciansk|horehron|novohrad|zitn[yeo][^a-z]*ostrov/;
+// Links that name another country or a town abroad (eventbrite's
+// "/d/germany--berlin/", "…/festivals/hamburg"): we collect events in Slovakia only.
+const FOREIGN_PLACES = /(^|[^a-z])(germany|deutschland|austria|osterreich|czech|czechia|cesko|ceska-republika|hungary|magyarorszag|poland|polska|united-states|united-kingdom|usa|australia|canada|singapore|praha|prague|brno|ostrava|olomouc|wien|vienna|budapest|krakow|warszawa|berlin|hamburg|munchen|muenchen|munich|koln|frankfurt|stuttgart|dusseldorf|leipzig|dresden|hannover|bremen|london|paris|amsterdam|nashville|brisbane|sydney|melbourne|auckland|toronto)([^a-z]|$)/;
 // News and discussion pages rarely list events; archives and other-language copies repeat what we have.
 const NEWSY = /\/(clanky|clanok|spravy|sprava|news|novinky|article|articles|blog|diskusia|debata|komentare|forum|magazin|tlacove-spravy)(\/|$)/;
 const ARCHIVE = /archiv|archive|historia\b|history\b|vysledky|results|eventdisplay=past|past-events|minule-(podujatia|akcie)|probehle/;
@@ -257,7 +261,7 @@ export function isSocial(url) {
 
 /**
  * Priority for exploring a link, from the link alone: higher = more likely to lead to upcoming
- * events in Slovakia. (What the crawler has learned about the link's template and host is added
+ * events in Slovakia (links to other countries' sites and towns rank low). (What the crawler has learned about the link's template and host is added
  * when it picks from the frontier; see learn.js.)
  */
 export function scoreLink(url, anchorText) {
@@ -276,8 +280,10 @@ export function scoreLink(url, anchorText) {
   let score = 1;
   if (EVENT_WORDS.test(hay)) score += 3;
   if (KOSICE_WORDS.test(hay)) score += 1;
-  if (SK_PLACES.test(hay)) score += 1;
+  if (namesSkTown(hay) || SK_REGIONS.test(hay)) score += 1;
   if (u.hostname.endsWith('.sk')) score += 1;
+  else if (foreignHost(u.hostname)) score -= 3;
+  if (FOREIGN_PLACES.test(path) || FOREIGN_PLACES.test(fold(anchorText))) score -= 4;
   if (u.pathname.split('/').filter(Boolean).length > 4) score -= 1; // deep pages are rarely hubs
   if (u.search.length > 60) score -= 1;
   if (NEWSY.test(path)) score -= 2;

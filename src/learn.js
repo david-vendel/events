@@ -5,9 +5,13 @@
 //   - linkBonus(): links into templates and hosts that keep producing events rank higher in the
 //     frontier; templates that never do (news articles, archives, help pages…) sink,
 //   - hostCap(): how many pages of one host a pass may explore (productive hosts get more),
+//   - where the events of a template or host are (regionAt: Slovakia, abroad, mixed): the crawler
+//     collects events in Slovakia only, so links into templates and hosts whose events are abroad
+//     are never queued, and their pages aren't read again,
 //   - crawler.js reuses a recipe the AI wrote for one page on every page of the same template,
 //     and shows each template to the AI at most once a week (state.patterns[key].aiAt).
 import { coarsePattern, hostOf, urlKey, urlPattern } from './urls.js';
+import { countryInUrl, foreignHost, regionOf } from './slovakia.js';
 
 const MIN_VISITS = 3; // below this a template's record says little; the coarse one is used instead
 const blank = () => ({ visits: 0, withEvents: 0, events: 0, added: 0 });
@@ -21,12 +25,17 @@ export function templateOf(state, url) {
   return key ? (state.patterns[key] ??= blank()) : blank();
 }
 
-/** Count one visit. `events` = upcoming events read from the page, `added` = how many were new. */
-export function notePatternVisit(state, url, { events = 0, added = 0 } = {}, at = new Date().toISOString()) {
+/**
+ * Count one visit. `events` = upcoming events in Slovakia (or not known to be elsewhere) read from
+ * the page, `added` = how many were new; `sk` / `abroad` = events known to be in Slovakia / abroad.
+ */
+export function notePatternVisit(state, url, { events = 0, added = 0, sk = 0, abroad = 0 } = {}, at = new Date().toISOString()) {
   for (const key of new Set(patternKeys(url))) {
     if (!key) continue;
     const p = (state.patterns[key] ??= blank());
     p.visits++;
+    if (sk) p.sk = (p.sk || 0) + sk;
+    if (abroad) p.abroad = (p.abroad || 0) + abroad;
     if (events > 0) p.withEvents++;
     p.events += events;
     // How often a visit lately found something new (a moving average): filter and sort variants
@@ -65,12 +74,58 @@ export function hostBonus(h) {
   return read >= 6 ? -Math.min(5, 1 + Math.floor(read / 8)) : 0;
 }
 
+/** Count events found abroad (or in Slovakia) on a page after it was read: its templates and host. */
+export function noteCountry(state, url, { sk = 0, abroad = 0 }) {
+  const h = state.hosts[hostOf(url)];
+  for (const rec of [...new Set(patternKeys(url))].filter(Boolean).map((k) => state.patterns[k]).concat(h)) {
+    if (!rec) continue;
+    if (sk) rec.sk = (rec.sk || 0) + sk;
+    if (abroad) rec.abroad = (rec.abroad || 0) + abroad;
+  }
+}
+
+/**
+ * Where the events on pages like this one are: 'sk', 'abroad', 'mixed', or undefined (not known).
+ * A page of a site abroad whose address names the country or a town ("eventbrite.com/d/australia--
+ * byron-bay/networking", "…/festivals/berlin") is that; else the exact template's record when it
+ * knows, else the coarse template's, else the host's. (A Slovak site's page naming Wien is a trip
+ * from Slovakia, or a guest from there.)
+ */
+export function regionAt(state, url, keys = patternKeys(url), host = hostOf(url)) {
+  const inUrl = !host?.endsWith('.sk') && countryInUrl(url);
+  if (inUrl) return inUrl;
+  for (const rec of [state.patterns[keys[0]], state.patterns[keys[1]], state.hosts[host]]) {
+    const r = regionOf(rec);
+    if (r) return r;
+  }
+  return undefined;
+}
+
+/**
+ * A site that has never had an event in Slovakia, and is on another country's domain (kinoaero.cz)
+ * or has had events abroad (too few yet for regionAt to say so).
+ */
+export function siteAbroad(state, host) {
+  const h = state.hosts[host];
+  return !h?.sk && (foreignHost(host) || h?.abroad > 0);
+}
+
+/**
+ * Is an event read from this page, whose place isn't known yet, more likely abroad? On pages whose
+ * events are abroad, and on a site abroad (siteAbroad) while its pages' record says nothing.
+ */
+export function unknownIsAbroad(state, url) {
+  const r = regionAt(state, url);
+  return r === 'abroad' || (!r && siteAbroad(state, hostOf(url)));
+}
+
 /**
  * Score adjustment for a link from what earlier visits taught: its template's yield (the coarse
  * template's while the exact one has few visits, half weight while both have few) plus its host's.
  * `keys` (the link's patternKeys) and `host` can be passed when the caller has them already.
  */
 export function linkBonus(state, url, keys = patternKeys(url), host = hostOf(url)) {
+  if (regionAt(state, url, keys, host) === 'abroad') return ABROAD_PENALTY;
   const fine = state.patterns[keys[0]], coarse = state.patterns[keys[1]];
   const p = fine?.visits >= MIN_VISITS ? fine : coarse?.visits >= MIN_VISITS ? coarse : fine || coarse;
   const t = p?.visits ? yieldScore(p) * (p.visits >= MIN_VISITS ? 1 : 0.5) : 0;
@@ -101,10 +156,13 @@ export function productiveTemplate(state, url) {
 
 /** Most a link can gain from linkBonus (best template + best host). */
 export const MAX_BONUS = 10;
+/** A link to pages whose events are abroad: below anything else. */
+const ABROAD_PENALTY = -20;
 
 /** Pages of one host a pass may explore: more for hosts that produce events, 1 for dead ones. */
 export function hostCap(state, host) {
   const h = state.hosts[host];
+  if (regionOf(h) === 'abroad') return 0; // its events are outside Slovakia
   if ((h?.newRate ?? 1) < 0.05) return 3; // lately nothing new
   const b = hostBonus(h);
   return b >= 2 ? 15 : b >= 1 ? 8 : b < 0 ? 1 : 3;

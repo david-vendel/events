@@ -8,7 +8,8 @@ import {
 import { facebookEnabled } from './corroborate.js';
 import { domainOf, hostOf } from './urls.js';
 import { activeRuleCount, tagSources } from './tags.js';
-import { parseLocation, placeFor, venueKey } from './geo.js';
+import { eventCountry, parseLocation, placeFor, venueKey } from './geo.js';
+import { SK_PLACES, isTown, skPlace } from './slovakia.js';
 import { linkBonus, patternKeys } from './learn.js';
 import { coverageReport, discoveryEveryHours, discoveryTargets, searchResult } from './coverage.js';
 import { aiJobsDue } from './aiqueue.js';
@@ -329,10 +330,25 @@ export class Engine {
         pagesKnown: Object.keys(s.pages).length,
         social: Object.keys(s.social).length,
       },
+      unknownCountry: this.unknownCountry(today),
       ai: { ...ai, enabled: aiAvailable(), ...aiStatus(), jobs: this.aiJobs(today), models: AI_MODELS, byModel: this.aiByModel(), plan: lastPlanUsage(),
         pausedUntil: aiPausedUntil() || null, queue: this.aiQueue() },
       facebook: facebookEnabled(),
     };
+  }
+
+  /**
+   * Upcoming events whose country isn't known yet (geo.js: eventCountry), with a sample of them, to
+   * see whether events abroad slip through: { count, sample: [{ title, location, via }] }. Kept a minute.
+   */
+  unknownCountry(today) {
+    if (this.unknownCache && Date.now() - this.unknownCache.at < 60_000) return this.unknownCache.value;
+    const unknown = Object.values(this.state.events)
+      .filter((e) => (e.end || e.start) >= today && !eventCountry(this.state, e));
+    const sample = unknown.map((e) => [Math.random(), e]).sort((a, b) => a[0] - b[0]).slice(0, 12)
+      .map(([, e]) => ({ title: e.title, location: e.location, via: e.sources?.find((r) => !r.linked)?.via || e.source }));
+    this.unknownCache = { at: Date.now(), value: { count: unknown.length, sample } };
+    return this.unknownCache.value;
   }
 
   /** Pages waiting for AI (aiqueue.js): how many, why, and the first ones in line. */
@@ -371,6 +387,7 @@ export class Engine {
       .map(([key, p]) => ({
         key, visits: p.visits, withEvents: p.withEvents, events: p.events, added: p.added, lastAt: p.lastAt,
         example: p.example, aiAt: p.aiAt, aiSaid: p.aiSaid, recipe: Boolean(p.recipe), recipeFrom: p.recipeFrom,
+        sk: p.sk, abroad: p.abroad,
         effect: p.example ? Math.round(linkBonus(this.state, p.example, patternKeys(p.example)) * 10) / 10 : 0,
       }));
     const wasted = list.filter((p) => !p.withEvents).reduce((t, p) => t + p.visits, 0);
@@ -411,13 +428,13 @@ export class Engine {
     for (const [host, n] of Object.entries(this.pass?.hostVisits || {})) runVisits[host] = (runVisits[host] || 0) + n;
     const hosts = {};
     const row = (host) => (hosts[host] ??= {
-      host, visits: 0, runVisits: 0, errors: 0, events: 0, added: 0, pages: 0, queued: 0, kind: undefined,
+      host, visits: 0, runVisits: 0, errors: 0, events: 0, added: 0, pages: 0, queued: 0, sk: 0, abroad: 0, kind: undefined,
     });
     for (const [host, h] of Object.entries(s.hosts)) {
       Object.assign(row(host), {
         visits: h.visits, errors: h.errors, failStreak: h.failStreak, lastError: h.lastError,
         downUntil: Date.parse(h.downUntil || 0) > Date.now() ? h.downUntil : undefined, lastTrouble: h.lastTrouble,
-        events: h.events, added: h.added, lastVisitAt: h.lastVisitAt,
+        events: h.events, added: h.added, lastVisitAt: h.lastVisitAt, sk: h.sk || 0, abroad: h.abroad || 0,
       });
     }
     for (const [host, n] of Object.entries(runVisits)) row(host).runVisits = n;
@@ -429,7 +446,7 @@ export class Engine {
     }
 
     const domains = {};
-    const SUM = ['visits', 'runVisits', 'errors', 'events', 'added', 'pages', 'queued'];
+    const SUM = ['visits', 'runVisits', 'errors', 'events', 'added', 'pages', 'queued', 'sk', 'abroad'];
     for (const h of Object.values(hosts)) {
       const d = (domains[domainOf(h.host)] ??= { domain: domainOf(h.host), hosts: [], ...Object.fromEntries(SUM.map((k) => [k, 0])) });
       d.hosts.push(h);
@@ -534,6 +551,22 @@ export class Engine {
   aiCall(id) {
     const rec = this.state.ai.find((r) => r.id === id);
     return rec && { ...rec, input: aiInput(id) };
+  }
+
+  /**
+   * Towns for the website's town filter, with their centres ([name, lat, lon]): every Slovak town,
+   * and the villages events are in. The website shows a town's events within 25 km of its centre.
+   */
+  towns() {
+    const today = new Date().toISOString().slice(0, 10);
+    const named = new Set();
+    for (const e of Object.values(this.state.events)) {
+      if ((e.end || e.start) < today) continue;
+      const p = skPlace(e.place?.city ?? parseLocation(e.location).city);
+      if (p && !p.partOf) named.add(p);
+    }
+    for (const p of SK_PLACES) if (isTown(p) && !p.partOf) named.add(p);
+    return [...named].map((p) => [p.name, p.lat, p.lon]);
   }
 
   events() {

@@ -52,6 +52,21 @@ function sourcesTable(e) {
 }
 
 let events = [];
+// Town centres (towns.json): picking a town shows its events and those within RADIUS_KM of it.
+let towns = new Map();
+const RADIUS_KM = 25;
+function km(a, b) {
+  const rad = (d) => (d * Math.PI) / 180;
+  const h = Math.sin(rad(b.lat - a.lat) / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(rad(b.lon - a.lon) / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.sqrt(h));
+}
+// Where an event is for the town filter: its place, or else its town's centre.
+const whereIs = (e) => e.place || towns.get(e.city);
+// Is the event in this town or within RADIUS_KM of it? (A town we have no centre for: its own events only.)
+function nearTown(e, t) {
+  const at = towns.get(t), here = whereIs(e);
+  return at && here ? km(at, here) <= RADIUS_KM : e.city === t;
+}
 // Every choice the visitor makes on the page is remembered in this browser (localStorage) and comes
 // back the next time they open the page, even as a plain /events link: view (List or Map), town,
 // date range, search, unchecked kinds of event and where the map was. A new setting must be
@@ -151,20 +166,29 @@ function inFilters() {
   const [from, to] = rangeBounds();
   const q = fold($('#q').value);
   return events.filter((e) => e.start <= to && (e.end || e.start) >= from
-    && (!city || e.city === city)
+    && (!city || nearTown(e, city))
     && (!q || fold(`${e.title} ${e.location} ${e.description}`).includes(q)));
 }
 
-// Town filter: towns with upcoming events, most events first.
+// Town filter: towns with upcoming events of their own, most first; each shows how many events
+// picking it shows (its own and those within RADIUS_KM).
 function renderCities() {
+  const own = {};
+  for (const e of events) if (e.city) own[e.city] = (own[e.city] || 0) + 1;
+  const placed = events.map((e) => whereIs(e)).filter(Boolean);
   const counts = {};
-  for (const e of events) if (e.city) counts[e.city] = (counts[e.city] || 0) + 1;
+  for (const t of Object.keys(own)) {
+    const at = towns.get(t);
+    counts[t] = at ? placed.filter((here) => km(at, here) <= RADIUS_KM).length : own[t];
+  }
   if (city && !counts[city]) counts[city] = 0;
-  const towns = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'sk'));
-  $('#city').innerHTML = `<option value="">All towns (${fmtCount(events.length)})</option>` + towns.map(([t, n]) =>
-    `<option value="${esc(t)}" ${t === city ? 'selected' : ''}>${esc(t)} (${fmtCount(n)})</option>`).join('');
+  const list = Object.entries(counts).sort((a, b) => (own[b[0]] || 0) - (own[a[0]] || 0) || a[0].localeCompare(b[0], 'sk'));
+  $('#city').innerHTML = `<option value="">All towns (${fmtCount(events.length)})</option>` + list.map(([t, n]) =>
+    `<option value="${esc(t)}" ${t === city ? 'selected' : ''}>${esc(t)} +${RADIUS_KM} km (${fmtCount(n)})</option>`).join('');
+  cityTitle();
 }
 const fmtCount = (n) => n.toLocaleString('sk-SK');
+const cityTitle = () => { $('#city').title = city ? `Events in ${city} and within ${RADIUS_KM} km of it` : `Pick a town: its events and those within ${RADIUS_KM} km`; };
 
 function renderEvents() {
   if (view === 'admin') return;
@@ -380,6 +404,7 @@ document.querySelectorAll('#views button').forEach((b) => b.addEventListener('cl
 $('#city').addEventListener('change', (e) => {
   city = e.target.value;
   remember('city', city);
+  cityTitle();
   cityToUrl();
   mapAt = null; // the map, opened later, starts at this town
   // On the map, go to the town picked (or back to all of Slovakia).
@@ -400,11 +425,12 @@ $('#q').addEventListener('input', () => { remember('q', $('#q').value); renderEv
 
 async function loadEvents() {
   try {
-    const [ev, live] = await Promise.all([getJson('api/events'), getJson('api/sites')]);
+    const [ev, live, centres] = await Promise.all([getJson('api/events'), getJson('api/sites'), getJson('towns.json').catch(() => [])]);
     events = ev;
-    const towns = new Set(ev.map((e) => e.city).filter(Boolean)).size;
+    towns = new Map(centres.map(([name, lat, lon]) => [name, { lat, lon }]));
+    const townCount = new Set(ev.map((e) => e.city).filter(Boolean)).size;
     const located = ev.filter((e) => e.place).length;
-    $('#summary').textContent = `${fmtCount(ev.length)} upcoming events in ${fmtCount(towns)} towns from ${fmtCount(live.length)} sources`
+    $('#summary').textContent = `${fmtCount(ev.length)} upcoming events in ${fmtCount(townCount)} towns from ${fmtCount(live.length)} sources`
       + ` · ${fmtCount(located)} on the map`;
     renderCities();
     $('#footer').innerHTML = live.length

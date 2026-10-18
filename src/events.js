@@ -88,7 +88,7 @@ export function migrate(state, today = new Date().toISOString().slice(0, 10)) {
   useTitleWeights(Object.values(state.events).map((e) => e.title || e.sources?.[0]?.title || ''));
   // Sites judged "irrelevant" back when only Košice events counted get judged again.
   for (const s of Object.values(state.sources)) {
-    if (s.kind === 'irrelevant' && s.judgedFor !== 'any place') s.kind = 'unknown';
+    if (s.kind === 'irrelevant' && !['any place', 'slovakia'].includes(s.judgedFor)) s.kind = 'unknown';
     delete s.kosiceOnly;
   }
   for (const ev of Object.values(state.events)) {

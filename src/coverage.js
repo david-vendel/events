@@ -13,6 +13,7 @@
 // often when everything known is well covered. Crawling itself isn't throttled by this: fetching
 // pages costs nothing but time, AI calls cost money.
 import { townOf } from './events.js';
+import { SK_PLACES, isTown } from './slovakia.js';
 
 const MIN_EVENTS = 8; // fewer upcoming events than this: too few to estimate anything
 const RECENT = 7 * 864e5;
@@ -72,13 +73,12 @@ export function coverageReport(state, today = new Date().toISOString().slice(0, 
 
 // ---------------------------------------------------------------- aiming the discovery search
 
-// Discovery covers Slovakia town by town: each search is one kind of event in one place. Regions
-// and the whole country catch what town searches miss (festivals, sport, tours).
-export const DISCOVERY_TOWNS = [
-  'Košice', 'Bratislava', 'Žilina', 'Prešov', 'Banská Bystrica', 'Nitra', 'Trnava', 'Trenčín', 'Poprad', 'Martin',
-  'Michalovce', 'Spišská Nová Ves', 'Bardejov', 'Humenné', 'Levice', 'Komárno', 'Piešťany', 'Zvolen', 'Ružomberok',
-  'Liptovský Mikuláš', 'Vysoké Tatry', 'Prievidza', 'Lučenec', 'Rožňava', 'Trebišov', 'Nové Zámky', 'Senec', 'Pezinok',
-];
+// Discovery covers Slovakia town by town: each search is one kind of event in one place. Every
+// Slovak town (sk-places.json), biggest first. Regions and the whole country catch what town
+// searches miss (festivals, sport, tours).
+export const DISCOVERY_TOWNS = SK_PLACES.filter((p) => isTown(p) && !p.partOf).map((p) => p.name);
+// A town's weight: by its population, so Košice's gaps come before Gelnica's (Bratislava counts as Košice).
+const TOWN_SIZE = new Map(SK_PLACES.filter((p) => !p.partOf).map((p) => [p.name, Math.min(1, Math.sqrt((p.pop || 0) / 222286))]));
 const DISCOVERY_REGIONS = [
   'Košický kraj', 'Prešovský kraj', 'Žilinský kraj', 'Banskobystrický kraj', 'Nitriansky kraj', 'Trnavský kraj',
   'Trenčiansky kraj', 'Bratislavský kraj', 'Slovensko',
@@ -106,7 +106,7 @@ export function searchResult(state, d, now = Date.now()) {
 /**
  * Candidate searches, best first: { place, tag, query, score, why }. The score is how big the gap
  * is (1 - coverage; a town or kind with too few events to judge counts as a big gap) times how big
- * the place is (earlier in DISCOVERY_TOWNS = bigger). Searches done lately are skipped, for longer
+ * the place is (by population). Searches done lately are skipped, for longer
  * each time one found no new event source, so a gap no search can fill stops costing AI calls.
  */
 export function discoveryTargets(state, report = coverageReport(state), now = Date.now()) {
@@ -130,8 +130,8 @@ export function discoveryTargets(state, report = coverageReport(state), now = Da
     if (last && now - Date.parse(last.at) < wait) return;
     out.push({ place, tag: t, query: `${place} ${KIND_QUERY[t]}`, score: gapOf(row) * size, why: describe(row, what), fruitless });
   };
-  DISCOVERY_TOWNS.forEach((place, i) => {
-    const size = 1 / Math.sqrt(i + 1);
+  DISCOVERY_TOWNS.forEach((place) => {
+    const size = TOWN_SIZE.get(place) || 0.1;
     for (const t of KINDS) {
       consider(place, t, size, t ? cell.get(`${place}|${t}`) : town.get(place), t ? `${t} in ${place}` : place);
     }

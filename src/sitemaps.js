@@ -2,16 +2,20 @@
 // only some events; a sitemap lists every page. For a host whose pages have produced events (or a
 // seed), the sitemap is read at most once a day, and URLs whose template has produced events
 // before (learn.js), or that look like event pages, go into the frontier, newest first.
-// GoOut, for example, lists ~27,000 event pages per language this way.
+// GoOut, for example, lists ~27,000 event pages per language this way. A site whose events are
+// abroad (eventbrite.com, songkick…) has its sitemap read weekly, for the pages whose address names
+// Slovakia or a Slovak town only ("/d/slovakia--bratislava/…", "…/kosice-…").
 import { fetchText, robotsSitemaps } from './fetcher.js';
-import { productiveTemplate } from './learn.js';
+import { productiveTemplate, siteAbroad } from './learn.js';
 import { scoreLink } from './extract.js';
 import { hostOf } from './urls.js';
+import { countryInUrl, regionOf } from './slovakia.js';
 
 const DAY = 864e5;
 const MAX_FETCHES = 6; // sitemap files read per host per visit (index + children)
 const MAX_CHILDREN = 3; // children of a sitemap index, the most event-like first
 const MAX_QUEUED = 150; // URLs queued per host per visit
+const ABROAD_EVERY = 7 * DAY; // a site whose events are abroad: its sitemap, for its Slovak pages
 const EVENTY = /event|podujat|akci|kalendar|program|listk|ticket|vstupenk|predstaven|koncert|festival|vystav|udalost/i;
 // Language markers in sitemap names (GoOut: event-SK-0.xml, event-CS-0.xml…): Slovak first.
 const SLOVAK = /(^|[^a-z])sk([^a-z]|$)/i;
@@ -41,16 +45,24 @@ function pickChildren(entries) {
     .slice(0, MAX_CHILDREN).map(([e]) => e);
 }
 
-/** Sites whose sitemap is due: productive hosts and seeds, read at most daily, best first. */
+// A site whose events are abroad: from its sitemap, only its pages about Slovakia.
+const abroad = (state, host) => regionOf(state.hosts[host]) === 'abroad' || siteAbroad(state, host);
+
+/**
+ * Sites whose sitemap is due: productive hosts and seeds, read at most daily (sites whose events
+ * are abroad weekly, after the others), best first.
+ */
 export function sitemapsDue(state, seeds) {
   const origins = new Map(); // origin -> priority
   for (const [host, h] of Object.entries(state.hosts)) {
-    if (h.added > 0 || h.withEvents > 0) origins.set(`https://${host}`, (h.added || 0) + (h.withEvents || 0));
+    if (h.added > 0 || h.withEvents > 0) origins.set(`https://${host}`, abroad(state, host) ? -1 : (h.added || 0) + (h.withEvents || 0));
   }
-  for (const s of Object.values(state.sources)) if (s.kind === 'events' && !origins.has(s.origin)) origins.set(s.origin, 1);
+  for (const s of Object.values(state.sources)) {
+    if (s.kind === 'events' && !origins.has(s.origin)) origins.set(s.origin, abroad(state, hostOf(s.origin)) ? -1 : 1);
+  }
   for (const u of seeds) { try { const o = new URL(u).origin; if (!origins.has(o)) origins.set(o, 0); } catch {} }
   const now = Date.now();
-  return [...origins].filter(([o]) => now - Date.parse(state.sitemaps[o]?.checkedAt || 0) > DAY)
+  return [...origins].filter(([o, p]) => now - Date.parse(state.sitemaps[o]?.checkedAt || 0) > (p < 0 ? ABROAD_EVERY : DAY))
     .sort((a, b) => b[1] - a[1]).map(([o]) => o);
 }
 
@@ -62,6 +74,7 @@ export function sitemapsDue(state, seeds) {
 export async function readSitemaps(state, origin, { queue, skip, takePage }) {
   const rec = (state.sitemaps[origin] = { checkedAt: new Date().toISOString() });
   const host = site(hostOf(origin));
+  const slovakOnly = abroad(state, hostOf(origin));
   let files = await robotsSitemaps(origin);
   const guessed = !files.length;
   if (guessed) files = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`, `${origin}/wp-sitemap.xml`];
@@ -85,6 +98,7 @@ export async function readSitemaps(state, origin, { queue, skip, takePage }) {
   const today = new Date().toISOString().slice(0, 10);
   const wanted = urls.filter(({ loc, lastmod }) => {
     if (site(hostOf(loc)) !== host || skip(loc)) return false;
+    if (slovakOnly && countryInUrl(loc) !== 'sk') return false;
     if (lastmod && lastmod.slice(0, 10) < today && Date.parse(lastmod) < Date.now() - 365 * DAY) return false; // untouched for a year
     return productiveTemplate(state, loc) || (EVENTY.test(new URL(loc).pathname) && scoreLink(loc, '') >= 4);
   }).sort((a, b) => (b.lastmod || '').localeCompare(a.lastmod || ''));
@@ -95,6 +109,6 @@ export async function readSitemaps(state, origin, { queue, skip, takePage }) {
     const score = scoreLink(loc, '');
     if (score >= 0 && queue(loc, score + 2)) queued++;
   }
-  Object.assign(rec, { files: read, urls: urls.length, wanted: wanted.length, queued });
+  Object.assign(rec, { files: read, urls: urls.length, wanted: wanted.length, queued, slovakOnly: slovakOnly || undefined });
   return rec;
 }

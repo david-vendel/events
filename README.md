@@ -1,7 +1,7 @@
 # events — what's on in Slovakia
 
-A crawler that collects events (all of Slovakia first, anywhere eventually; it started in Košice) and a
-small website that lists them and shows them on a map.
+A crawler that collects events in Slovakia (it started in Košice) and a small website that lists them
+and shows them on a map. Events outside Slovakia are not kept; see *Only Slovakia* below.
 
 ## Run
 
@@ -42,7 +42,7 @@ that controls the crawler, which runs inside the server:
 
 The admin API has no login, so the server listens only on localhost unless you set
 `HOST=0.0.0.0`. To put it on the internet, use a proxy that leaves only the public page's files and
-`GET /api/events` and `GET /api/sites` open and asks for a password for `/admin/` and every other
+`GET /api/events`, `GET /api/sites` and `GET /towns.json` open and asks for a password for `/admin/` and every other
 `/api/` route. Those two public answers are rebuilt at most every 30 seconds. `node server.js --start`
 starts a Run for all towns right away.
 
@@ -57,7 +57,7 @@ A Run goes through these steps over and over, without a break ([src/crawler.js](
 does one pass; [src/engine.js](src/engine.js) repeats them). A pass explores up to 200 pages and makes up
 to 30 AI calls, so every step keeps getting its turn; AI use overall is held back by the plan limits:
 
-1. **Re-check known sources that are due.** Every website that publishes Košice events is saved in
+1. **Re-check known sources that are due.** Every website that publishes events in Slovakia is saved in
    `data/sources.json` with its listing pages and a check interval (12 h to 7 days). The interval
    shrinks when a source keeps producing new events and grows when it doesn't. Re-checks use
    conditional GETs (ETag/Last-Modified) and a hash of the page text, so pages that haven't changed
@@ -68,13 +68,19 @@ to 30 AI calls, so every step keeps getting its turn; AI use overall is held bac
    the date each source gives. See "One event, many sources" below.
 3. **Discovery** (every 6 hours, `EVENTS_DISCOVERY_HOURS`; AI only). Claude runs a web search for
    one kind of event in one Slovak town or region (a different pair each time) and the URLs it finds
-   are added to the frontier.
+   are added to the frontier. Every Slovak town (166) takes part, the biggest gaps in the biggest towns
+   (by population) first ([src/coverage.js](src/coverage.js)). Besides, every pass queues the websites
+   of 15 more Slovak municipalities (from `src/sk-places.json`, biggest first), until each of the
+   ~2,850 has been visited once; most have a calendar of events.
 4. **Sitemaps** ([src/sitemaps.js](src/sitemaps.js)). For sites that have produced events (and the
    seeds), the sitemap (from `robots.txt`, or `/sitemap.xml`) is read at most once a day; event-like
    pages and pages whose template has produced events are queued, newest first, at most 150 per site.
-   This finds event pages that no listing links to (GoOut's sitemap alone lists ~27,000).
+   This finds event pages that no listing links to (GoOut's sitemap alone lists ~27,000). Sites whose
+   events are abroad have theirs read weekly, for only the pages whose address names Slovakia or a
+   Slovak town.
 5. **Explore.** Links from every visited page go into `data/frontier.json` with a score from the
-   link itself: event words, Slovak towns, `.sk`, and penalties for news and discussion pages,
+   link itself: event words, Slovak towns (any of them, in any form: "v-trencine", "bratislavske"; and
+   their Hungarian or German names), `.sk`, and penalties for news and discussion pages,
    archives, past years or dates in the URL ("rok=2009", "podujatia-2023") and other-language copies
    (`/pl/`, `/en/`, `?lang=hu`). Links to pages of events we already have are skipped (verification
    re-reads those), and on a listing with events, "next page" links get a bonus. When picking, what
@@ -115,7 +121,7 @@ Three methods, tried from cheapest to most expensive:
   saved per listing page. Applying a recipe costs no AI tokens.
 - **AI** ([src/ai.js](src/ai.js)), called only for a page that looks like an event listing (many
   dates, event words, mentions of Košice) and has no working recipe. Claude gets a stripped-down
-  version of the HTML and returns what the site is, whether it publishes Košice events, other
+  version of the HTML and returns what the site is, whether it publishes events, which country they are in, other
   listing pages on the same site, how often to check it, and a recipe. The recipe is tested on the
   page right away and saved only if it finds events. If a saved recipe later finds nothing, the
   site has probably been redesigned and the page is re-learned. Each page (and each page
@@ -160,8 +166,7 @@ when they fail:
 
 The website has a checkbox per tag; an event is shown if any of its tags is checked.
 
-**Location.** Events from any place are kept (the project started with Košice, and link priorities
-still favour it). Each event's location text is split into venue, street, postcode, town and district
+**Location.** Each event's location text is split into venue, street, postcode, town and district
 ([src/geo.js](src/geo.js)). A list of Slovak towns finds the town whatever the order ("Košice-Staré
 Mesto, Collosseum klub", "Dom umenia Košice"); names that are also words or first names (sála, Svit,
 Martin) count only on their own. A list of towns ("Košice, Prešov, Poprad", a tour) has no single
@@ -179,11 +184,98 @@ clear. Every upcoming event gets `place: { lat, lon, precision, name, address, k
 `km` is the distance from Košice. To fix a place by hand, edit its entry in `data/venues.json` and set
 `"status": "manual"`. `EVENTS_GEOCODER=off` disables lookups.
 
+The towns come from a list of every Slovak municipality with its centre, population, district,
+website and names in other languages (`src/sk-places.json`, 2,925 places from Wikidata, including the
+boroughs of Bratislava and Košice),
+and the country's outline (`src/sk-border.json`, from OpenStreetMap); `node scripts/build-geo.js`
+rebuilds both. A location that is just a Slovak town or village needs no lookup (its centre comes from
+the list), and a borough on its own counts as its city ("Petržalka" → Bratislava, Petržalka). A Slovak
+town named in the location beats coordinates more than 30 km from it (a same-named village in Bohemia,
+a ticket page giving its organiser's address); such a venue is looked up again. A place whose town
+isn't known is looked for in Slovakia first, then anywhere (which tells us it's abroad).
+
+A town's Hungarian, German, Polish or Czech name counts as the town ("Ifjúsági Ház, Kassa" → Košice,
+"Pressburg", "Érsekújvár" → Nové Zámky), as a whole part of the location only, and only towns' names
+of 5+ letters that name one town and no place abroad: not villages' (German "Schönau" is Šuňava, and a
+dozen villages in Germany), nor "Komárom" (Komárno's, and the Hungarian town across the river), nor a
+short list of names common elsewhere (Rosenberg, Königsberg, Leopoldstadt…; `ALIAS_DENY`).
+
+### Only Slovakia
+
+On 17 Oct 2026 about 60 % of upcoming events were abroad (Hamburg, Prague, Nashville, Singapore…):
+international ticket shops (songkick, eventbrite.\*, ticketscharf.de, smsticket.cz) had been learned as
+good sources. Now only events in Slovakia are kept ([src/slovakia.js](src/slovakia.js),
+`eventCountry` in [src/geo.js](src/geo.js)). Whether an event is in Slovakia comes from, best first:
+
+1. its location's own words: a Slovak town or village it names, another country ("…, Czechia",
+   "Zlín (CZ)"), a town abroad as a whole part ("…, Hamburg"), letters Slovak doesn't have (Czech
+   ě ř ů, German ß…) or street words of other languages ("Fraser Highway", "Rue …"). A Slovak village
+   alone, on pages whose events are abroad, is taken for the Czech one of that name (Dolany, Lipník…);
+2. coordinates from the event's page or its venue's lookup, tested against the country's outline;
+3. the location's language: letters or venue words only Slovak has ("Dom kultúry Kanianka",
+   "Evanjelický kostol", "Hlavné námestie"), or a Slovak town in the locative ("Divadlo J. Palárika
+   v Trnave", "knižnica v Tvrdošovciach");
+4. the country the AI gave, a country code in the title ("LEVICE (SK)", "CZ TOUR"), the listing's
+   address ("eventbrite.com/d/united-kingdom/…", "ticketportal.sk/venue/Kino-Hviezda-Trencin"; that it
+   names Slovakia counts on a site abroad only for an event without a location: eventbrite's
+   `/d/slovakia--trnava/` lists Vienna too), the city of its listing page or site, or its venue's;
+5. last, its site: an event without a location on a `.sk` site, or on pages whose events are in
+   Slovakia, is there; Czech words in the title or description ("Městské divadlo") on a site not known
+   to have its events in Slovakia mean abroad. Otherwise it's not known until it's located.
+
+The crawler learns **where each kind of page has its events**: every page template and every host
+counts the events it gave that are known to be in Slovakia (`sk`) and abroad (`abroad`) in
+`patterns.json` and `hosts.json`. With 3 or more known, a template or host is *Slovakia* (over 85 % in
+Slovakia), *abroad* (under 15 %) or *mixed*; the exact template's verdict counts first, then the
+rougher template's, then the host's (`regionAt` in [src/learn.js](src/learn.js)). Before all of
+them, a page of a site outside `.sk` whose address names a country or a town abroad is that
+(`eventbrite.com/d/australia--byron-bay/networking`, `…/festivals/berlin`). A site that has never had
+an event in Slovakia and is on another country's domain (`kinoaero.cz`) or has had any event abroad
+counts as abroad too, before it has 3 (`siteAbroad`). Then:
+
+- events known to be abroad are dropped as they're read, and so are events whose place isn't known yet
+  from pages whose events are abroad, or from a site abroad. Others whose place isn't known are kept and
+  located later;
+- links to pages whose events are abroad are never queued (and leave the queue), their sites' sitemaps
+  give only their Slovak pages, the AI isn't shown them, and listing pages whose events were all abroad aren't re-checked.
+  A site whose events are abroad stops being a source (every pass checks this for all sources). Mixed
+  sites (eventbrite.com has Slovak events too) are judged template by template;
+- but a site abroad may have Slovak pages, and is never written off for good:
+  - a link to a page abroad with the place in its address (`eventbrite.com/d/germany--hamburg/
+    networking`, `stayhappening.com/chicago`) queues the same page for the 8 biggest Slovak towns instead
+    (`…/d/slovakia--bratislava/networking`, `stayhappening.com/kosice`), once a month per template
+    (`slovakVariants`); such pages are explored even on a site whose events are abroad;
+  - a retired site gets a look every 45 days: its 3 listing pages that had the most events, read with
+    their saved recipes (no AI). An artist's tour or a ticket shop abroad may list a date in Bratislava;
+    a page with events in Slovakia makes the site a source again;
+- link scores drop for other countries' domains (`.cz`, `.de`…) and for URLs naming another country or a
+  big town abroad;
+- the page reader (AI) says which country a page's and its site's events are in; its word that they're
+  abroad counts as three events seen there. The pre-check turns down pages whose events are all abroad;
+- every pass, events already known to be abroad are dropped before locating (so no lookup is spent on
+  them), and those found abroad by locating are dropped after, counted against their page's template
+  and host.
+
+**Is it leaking?** The admin Overview shows, for the Run, the pages read whose events were all abroad
+(share of pages read, and the AI spent on them), events read abroad and not kept, and events dropped
+later; and the upcoming events whose country isn't known yet, with a random sample to look over.
+
+The AI's city for a listing page is kept per page; it's the whole site's city only while every page the
+AI read names the same one. (It used to be the site's after one page: eventbrite.com became a "Trnava"
+site and its London events were put in Trnava.) The Templates and Domains tabs tag each template and
+site *Slovakia*, *abroad* or *mixed* (hover for the counts). The first pass with this code counts every
+stored event towards its pages' templates and hosts, drops the city of 49 multi-city sites, and drops
+~23,000 events abroad.
+
 ### The website: list and map
 
 The website lists upcoming events by day, or shows them on a **map** (List / Map at the top;
-`?view=map` opens the map directly). Both use the same filters: dates, search, **town** (towns with
-events, most first) and kind of event. The map ([public/events.js](public/events.js)) uses
+`?view=map` opens the map directly). Both use the same filters: dates, search, **town** and kind of event.
+Picking a town shows its events **and those within 25 km of it** (by the event's coordinates, or its
+town's centre; `RADIUS_KM` in [public/events.js](public/events.js)). The list offers the towns that
+have events of their own, most first, each with the number picking it shows ("Pezinok +25 km (1 564)"
+includes Bratislava). Town centres come from `towns.json` (every Slovak town, and the villages events
+are in), served outside `api/` so a proxy that guards `api/` leaves it public. The map ([public/events.js](public/events.js)) uses
 [Leaflet](https://leafletjs.com) with OpenStreetMap tiles, loaded only when the map is opened. Each
 place gets one pin with its number of events; its popup lists them by date. A dashed pin means only
 the town is known (the pin is at its centre). Pins cluster when zoomed out, showing the number of
@@ -301,9 +393,9 @@ reads or writes them, so moving to a database later means changing that one file
 | `pages.json` | HTTP cache info per URL (ETag, Last-Modified, text hash) |
 | `social.json` | Facebook/Instagram/etc. links found while crawling, saved for later |
 | `dateFormats.json` | date text shapes: samples, how each is read (built-in / AI rule), last AI check |
-| `patterns.json` | page templates: visits, visits with events, new events, AI verdict, shared recipe |
+| `patterns.json` | page templates: visits, visits with events, new events, events in Slovakia / abroad, AI verdict, shared recipe |
 | `sitemaps.json` | per site: when its sitemap was last read and what it gave |
-| `hosts.json` | per host: visits, errors, events, new events (site-level learning, failure pauses) |
+| `hosts.json` | per host: visits, errors, events, new events, events in Slovakia / abroad (site-level learning, failure pauses) |
 | `ai.json` | every AI call: model, tokens, cost, duration, what it returned |
 | `settings.json` | crawler settings from the admin panel |
 

@@ -20,7 +20,7 @@ import { DATA_DIR } from './store.js';
 export const AI_JOBS = {
   analyze: {
     label: 'Read new listing pages',
-    what: 'Reads a page from the AI queue once: what the site is, whether it lists events (and in which city), and a '
+    what: 'Reads a page from the AI queue once: what the site is, whether it lists events (in which city and country), and a '
       + 'recipe (CSS selectors) so later visits need no AI. Also repairs recipes that stopped reading their page well.',
     model: 'sonnet', // Opus wrote no better recipes; Haiku's were worse (eval, 2 Oct 2026)
   },
@@ -196,6 +196,10 @@ export const Analysis = z.object({
   summary: z.string().describe('one sentence: what this website is'),
   publishesEvents: z.boolean().describe('does this site regularly publish upcoming events (any place)?'),
   listingCity: z.string().nullable().describe('the city ALL events on this page take place in, e.g. "Košice"; null if several cities or unknown'),
+  eventsCountry: z.string().nullable().describe('ISO 3166 code of the country the events on THIS page take place in, e.g. "SK", "CZ", "DE"; ' +
+    '"mixed" if several countries; null if no events or unknown'),
+  siteCountry: z.string().nullable().describe('ISO 3166 code of the country the events this WEBSITE publishes are mostly in; ' +
+    '"mixed" if it covers several countries (e.g. an international ticket shop); null if unknown'),
   pageListsEvents: z.boolean().describe('does THIS page contain a list of multiple events?'),
   recipe: Recipe.nullable().describe('null if this page shows no event (one event on a detail page still gets a recipe)'),
   eventListUrls: z.array(z.string()).describe('other URLs on this site (from the given link list) that likely list events'),
@@ -217,7 +221,8 @@ export const Analysis = z.object({
 });
 
 export const ANALYZE_SYSTEM = `You help a crawler that collects events (concerts, markets, festivals, exhibitions, sport, \
-workshops, kids' programs…) anywhere, Slovakia first. You get one web page as simplified HTML \
+workshops, kids' programs…) in Slovakia only. Say which country the page's events and the website's events are in: \
+pages and sites with events only abroad are skipped from then on. You get one web page as simplified HTML \
 (scripts/images/navigation/most attributes removed; long runs of look-alike elements are cut to the \
 first few, marked "[… N more like this]") plus a list of its links. Classify the site and, if the page \
 lists events, write CSS selectors (cheerio-compatible, no :contains, no positional selectors that depend on the \
@@ -298,16 +303,17 @@ export function analyzePage({ url, title, html, truncated, links, today, previou
 }
 
 const Triage = z.object({
-  listsEvents: z.boolean().describe('the page itself lists upcoming events, each with a date'),
+  listsEvents: z.boolean().describe('the page itself lists upcoming events in Slovakia, each with a date'),
   reason: z.string().describe('a few words'),
 });
 const TRIAGE_SYSTEM = `You help a crawler that collects public events (concerts, theatre, cinema, exhibitions, \
-markets, festivals, sport, talks, workshops) in Slovakia and nearby. You get the text of one web page. Say \
-whether the page itself lists upcoming events, each with its own date (a programme, a calendar, a list of \
+markets, festivals, sport, talks, workshops) in Slovakia only. You get the text of one web page. Say \
+whether the page itself lists upcoming events in Slovakia, each with its own date (a programme, a calendar, a list of \
 events or screenings, one event's own page). It also counts when such a list is only part of the page: a \
 homepage section of upcoming events, or an article that is a guide to what's on ("where to go this week") \
 with some days still ahead. News articles about one thing, opening hours, archives of past events, \
-contacts, shops, real estate, job ads and documents are not. Today is given; past events don't count.`;
+contacts, shops, real estate, job ads and documents are not, and neither are events that all take place in \
+another country (Czech, Austrian, German… towns). Today is given; past events don't count.`;
 
 /** Quick yes/no: does this page list upcoming events? { listsEvents, reason, call } (listsEvents null: no answer). */
 export function triagePage({ url, title, text, today, onStart }) {

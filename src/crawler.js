@@ -1,4 +1,6 @@
-// One crawl pass; a Run (engine.js) repeats them back to back (events from any place are kept; link priorities favour Slovakia, Košice first):
+// One crawl pass; a Run (engine.js) repeats them back to back. Only events in Slovakia are kept: each
+// page's events are sorted by country as they're read (geo.js: eventCountry), templates and sites
+// whose events are abroad aren't crawled any more, and events found abroad later are dropped:
 //   1. re-check known event sources that are due (cheap: conditional GET + saved recipe),
 //   2. verify upcoming events against the other places they're published (Facebook, tickets…),
 //   3. occasionally ask AI to web-search for new sources,
@@ -7,7 +9,7 @@
 //      bias towards links that look like events and towards page templates and hosts that have
 //      produced events before (learn.js); templates that never do sink,
 //   6. check new date formats, 7. tag events the rules couldn't (cheap AI; answers become rules),
-//   8. geocode new places.
+//   8. geocode new places, and drop events that turn out to be abroad.
 // AI is only called for promising pages that have no working recipe yet, at most once per page
 // template a week; a recipe it writes is reused for every page built from the same template.
 // Work runs in a pool of parallel workers; `control` sets how many and reports progress.
@@ -27,13 +29,14 @@ import {
 } from './ai.js';
 import { aiJobDone, aiJobFailed, aiJobPostponed, aiJobsDue, enqueueAi } from './aiqueue.js';
 import { eventTags, headingTags, learnTags } from './tags.js';
-import { locateEvents } from './geo.js';
+import { eventCountry, locateEvents, repairSiteCities } from './geo.js';
+import { SK_PLACES, isTown, regionOf, slovakVariants } from './slovakia.js';
 import { EventIndex, migrate } from './events.js';
 import { dueForVerification, verifyEvent } from './corroborate.js';
 import { defaultControl, runPool } from './pool.js';
 import { hostOf, normalizeUrl, urlKey, urlPattern } from './urls.js';
 import {
-  MAX_BONUS, bootstrapPatterns, hostCap, linkBonus, notePatternVisit, patternKeys, siblingRecipes, templateOf,
+  MAX_BONUS, bootstrapPatterns, hostCap, linkBonus, noteCountry, notePatternVisit, patternKeys, regionAt, siblingRecipes, siteAbroad, templateOf, unknownIsAbroad,
 } from './learn.js';
 import { readSitemaps, sitemapsDue } from './sitemaps.js';
 import { downUntil, noteFetch, serverTrouble } from './hosthealth.js';
@@ -65,7 +68,7 @@ const CRASHES_BEFORE_GIVING_UP = 10;
 // Errors that mean "we can't reach the internet" rather than "this site is down".
 const NET_DOWN = /ENOTFOUND|EAI_AGAIN|ENETUNREACH|ENETDOWN|EHOSTUNREACH|UND_ERR_CONNECT_TIMEOUT|fetch failed/;
 const NET_FAILS_BEFORE_CHECK = 6; // network errors in a row before checking whether we're offline
-const SCORE_VERSION = 4; // bump when scoreLink() changes a lot: queued links get scored again
+const SCORE_VERSION = 6; // bump when scoreLink() changes a lot: queued links get scored again
 const TAG_BATCH = 40; // events per cheap-AI tagging call
 const TAG_BATCHES = 2; // tagging calls per pass
 
@@ -155,12 +158,32 @@ function dequeue(state, url) {
   queued.delete(key);
 }
 
-/** Queue a link unless that page was visited recently. Returns true if it's new in the queue. */
+/**
+ * Queue a link unless that page was visited recently, or pages like it have events abroad only.
+ * Returns true if it's new in the queue.
+ */
 function addToFrontier(state, url, score, foundOn) {
   if (score < 0) return false;
   const n = normalizeUrl(url);
   if (!n || visitedRecently(state, n)) return false;
+  if (regionAt(state, n) === 'abroad') { trySlovakPages(state, n); return false; }
   return queue(state, n, { score, v: SCORE_VERSION, foundOn, addedAt: iso(Date.now()) });
+}
+
+/**
+ * A link to pages whose events are abroad, with the place in its address ("eventbrite.com/d/
+ * germany--hamburg/networking"): the same page for the biggest Slovak towns is queued instead,
+ * once a month per template. A site with a page per place has one for Bratislava, often.
+ */
+const VARIANTS_EVERY = 30 * DAY;
+function trySlovakPages(state, url) {
+  const key = patternKeys(url)[0];
+  const tried = (state.meta.slovakVariants ??= {}); // template -> when its Slovak pages were last queued
+  if (!key || Date.now() - Date.parse(tried[key] || 0) < VARIANTS_EVERY) return;
+  const variants = slovakVariants(url);
+  if (!variants.length) return;
+  tried[key] = iso(Date.now());
+  for (const v of variants) addToFrontier(state, v, 6, 'slovak page');
 }
 
 /** Queue a URL even if it was visited recently (the user asked for it). */
@@ -191,6 +214,7 @@ function trimFrontier(state) {
 function hostStats(state, host) {
   return (state.hosts[host] ??= {
     visits: 0, ok: 0, unchanged: 0, errors: 0, failStreak: 0, events: 0, withEvents: 0, added: 0, linksQueued: 0,
+    sk: 0, abroad: 0, // events known to be in Slovakia / abroad (learn.js: regionAt)
   });
 }
 
@@ -209,7 +233,9 @@ function recordVisit(state, ctx, url, r) {
   h.failStreak = 0;
   if (r.status === 'unchanged') h.unchanged++;
   else h.ok++;
-  h.events += r.events || 0; // upcoming events read
+  h.events += r.events || 0; // upcoming events read (abroad ones not counted)
+  h.sk = (h.sk || 0) + (r.sk || 0);
+  h.abroad = (h.abroad || 0) + (r.abroad || 0);
   // How often a visit lately found something new (moving average; see hostBonus).
   // (A host seen before this was tracked starts from its own record: new events per visit.)
   if (r.status === 'ok') h.newRate = 0.8 * (h.newRate ?? Math.min(0.5, h.visits ? (h.added || 0) / h.visits : 0.5)) + 0.2 * (r.added > 0 ? 1 : 0);
@@ -241,7 +267,8 @@ function pickFromFrontier(state, hostCounts, busyHosts, eventPages) {
     if (busyHosts.has(host) || hostPaused(state, fullHost) || downUntil(state, url)) continue;
     let cap = caps.get(host);
     if (cap === undefined) caps.set(host, (cap = hostCap(state, fullHost)));
-    if ((hostCounts.get(host) || 0) >= cap) continue;
+    // A site whose events are abroad: still its pages about Slovakia ("/d/slovakia--kosice/").
+    if ((hostCounts.get(host) || 0) >= (cap || (regionAt(state, url) === 'sk' ? 3 : 0))) continue;
     const key = effectiveScore(state, url, f) + Math.random() * 4;
     if (key <= bestKey) continue;
     best = { url, host };
@@ -257,12 +284,31 @@ function aiSummary(call) {
   return { id: call.id, tokens: u.input + u.cacheRead + u.cacheWrite + u.output, ms: call.ms, error: call.error };
 }
 
+/**
+ * Sort a page's upcoming events by country; only those in Slovakia go on. An event whose place
+ * isn't known yet is kept unless pages like this one have events abroad, or it's on another
+ * country's site that has shown none in Slovakia (it's located later, and dropped then if it's abroad). Returns { kept, sk, abroad } (sk/abroad: events known to be there).
+ */
+function inSlovakiaOnly(state, events, url, source) {
+  const outside = unknownIsAbroad(state, url);
+  const kept = [];
+  let sk = 0, abroad = 0;
+  for (const ev of events) {
+    // A venue's own site often omits the address; a single-city listing at least gives the city.
+    const city = source.pages[url]?.city || source.city;
+    if (!ev.location && (source.venue || city)) ev.location = source.venue || city;
+    const c = eventCountry(state, ev);
+    if (c === 'sk') sk++;
+    if (c === 'abroad') abroad++;
+    if (c === 'sk' || (!c && !outside)) kept.push(ev);
+  }
+  return { kept, sk, abroad };
+}
+
 function upsertEvents(state, events, source, ctx) {
   let added = 0;
   for (const ev of events) {
     if ((ev.end || ev.start) < ctx.today) continue; // already over
-    // A venue's own site often omits the address; a single-city listing at least gives the city.
-    if (!ev.location && (source.venue || source.city)) ev.location = source.venue || source.city;
     const { id, source: via, ...fields } = ev;
     const { isNew } = ctx.index.add({ kind: 'web', status: 'ok', via, ...fields });
     if (isNew) added++;
@@ -372,7 +418,9 @@ async function visit(state, url, ctx, phase) {
   recordVisit(state, ctx, url, r);
   // Unchanged pages say nothing new about their template; offline failures say nothing at all.
   const offlineFail = r.status === 'error' && NET_DOWN.test(r.note || '');
-  if (r.status !== 'unchanged' && !offlineFail) notePatternVisit(state, url, { events: r.events || 0, added: r.added || 0 });
+  if (r.status !== 'unchanged' && !offlineFail) {
+    notePatternVisit(state, url, { events: r.events || 0, added: r.added || 0, sk: r.sk || 0, abroad: r.abroad || 0 });
+  }
   await watchNetwork(state, url, ctx, r);
   report.end(job, ctx.offline && offlineFail ? { ...r, note: `${r.note} (offline; not counted)` } : r);
   return r.added || 0;
@@ -526,7 +574,10 @@ async function readPage(state, url, ctx, job) {
     && !isArchiveUrl(url)
     // A calendar filled by script that Chrome couldn't render: AI would see it empty too.
     && !blind
-    && source.kind !== 'irrelevant';
+    // (A site retired for its events abroad: only its pages about Slovakia, "/d/slovakia--kosice/".)
+    && (source.kind !== 'irrelevant' || (source.outside && regionAt(state, url) === 'sk'))
+    // Pages like this one list events abroad: not worth a look, nor a recipe.
+    && regionAt(state, url) !== 'abroad';
   const viaQueue = forAi;
   if (aiWorthy && !viaQueue) {
     const repair = Boolean(listing?.recipe);
@@ -595,8 +646,9 @@ async function readPage(state, url, ctx, job) {
       else aiMissed(source);
       if (tpl.recipe && how === 'AI → recipe') health.aiRecipes++;
     }
-  } else if (isListing(events, ctx.today) && source.kind !== 'irrelevant') {
-    // Several upcoming events without AI: treat this page as a listing worth re-checking.
+  } else if ((source.kind !== 'irrelevant' || source.outside) && isListing(inSlovakiaOnly(state, events, url, source).kept, ctx.today)) {
+    // Several upcoming events without AI: treat this page as a listing worth re-checking. (A site
+    // retired for having its events abroad becomes a source again, below: this page has them in Slovakia.)
     source.kind = 'events';
     source.pages[url] ??= {};
   }
@@ -606,9 +658,20 @@ async function readPage(state, url, ctx, job) {
   }
   // How this listing page was read last time, for the Sources tab ("json-ld · 19 events").
   // Only upcoming events count: a page full of past events (an archive) is not a good page.
-  const upcoming = events.filter((e) => (e.end || e.start) >= ctx.today);
+  const future = events.filter((e) => (e.end || e.start) >= ctx.today);
+  const { kept: upcoming, sk, abroad } = inSlovakiaOnly(state, future, url, source);
   const page = source.pages[url];
   if (page) {
+    // A listing whose events are all abroad isn't read again (re-checks skip it).
+    page.geo = { sk, abroad };
+    if (abroad && !upcoming.length) page.abroad = true;
+    else delete page.abroad;
+    // A site retired for having its events abroad whose page now has some in Slovakia: a source again.
+    if (source.outside && sk) {
+      report.log(`${source.origin}: ${url} lists ${sk} events in Slovakia; a source again`);
+      Object.assign(source, { kind: 'events' });
+      delete source.outside;
+    }
     page.lastRead = { how: how || 'nothing found', events: events.length, at: iso(Date.now()) };
     page.parsedWith = PARSER_VERSION;
     page.emptyReads = upcoming.length ? 0 : (page.emptyReads || 0) + 1;
@@ -621,17 +684,27 @@ async function readPage(state, url, ctx, job) {
   // A listing whose heading names one kind ("Program kina CINEMAX") gives that tag to all its events.
   if (events.length >= 2) withTags(events, headingTags(`${$('title').first().text()} ${$('h1').first().text()}`));
   const added = upsertEvents(state, upcoming, source, ctx);
+  // A site whose events are abroad isn't a source for us.
+  if (abroad && source.kind === 'events' && outsideSlovakia(state, source)) {
+    retire(source);
+    report.log(`${source.origin}: its events are outside Slovakia; not a source any more`);
+  }
   const queued = harvestLinks(state, links, source, res.url, ctx, upcoming.length);
   cache.readAt = iso(Date.now());
   health.read++;
+  health.abroadEvents += abroad;
+  const aiUsd = aiCall?.usage?.costUsd || 0;
+  health.aiUsd += aiUsd;
+  if (abroad && !sk) { health.abroadPages++; health.aiAbroadUsd += aiUsd; }
   if (upcoming.length) health.withEvents++;
   health.events += upcoming.length;
   health.added += added;
   ctx.found.events += upcoming.length;
   ctx.found.added += added;
   return {
-    status: 'ok', http: res.status, events: upcoming.length, past: events.length - upcoming.length || undefined,
-    added, links: queued, how, ai: aiSummary(aiCall), kind: source.kind !== 'unknown' ? source.kind : undefined,
+    status: 'ok', http: res.status, events: upcoming.length, past: events.length - future.length || undefined,
+    added, links: queued, how: abroad ? `${how || 'read'}; ${abroad} abroad, dropped` : how, ai: aiSummary(aiCall),
+    kind: source.kind !== 'unknown' ? source.kind : undefined, sk, abroad,
   };
 }
 
@@ -640,14 +713,25 @@ function learnFromAnalysis(state, source, url, a, $, pageUrl, events, report, tp
   source.summary = a.summary;
   source.siteKind = a.siteKind;
   if (a.venue?.name) source.venue = [a.venue.name, a.venue.address].filter(Boolean).join(', ');
-  if (a.listingCity) source.city = a.listingCity;
   source.kind = a.publishesEvents ? 'events' : (source.kind === 'events' ? 'events' : 'irrelevant');
-  source.judgedFor = 'any place';
+  source.judgedFor = 'slovakia';
   source.intervalHours = clampInterval(a.checkEveryHours);
+  // Events abroad: the page (or the whole site) is skipped from now on. The AI's word counts as three
+  // events seen there, enough for the template (or the site) to count as abroad (learn.js: regionAt).
+  const away = (c) => Boolean(c) && !/^(sk|svk|mixed)$/i.test(c.trim());
+  if (away(a.siteCountry) && !(a.eventsCountry && !away(a.eventsCountry))) Object.assign(source, { kind: 'irrelevant', outside: true });
+  if (away(a.eventsCountry) || away(a.siteCountry)) noteCountry(state, url, { abroad: 3 });
 
   const listing = (source.pages[url] ??= {});
   listing.analyzedAt = iso(Date.now());
-  const said = [`${a.publishesEvents ? 'event source' : 'not an event source'} (${a.siteKind})${a.listingCity ? `, events in ${a.listingCity}` : ''}`];
+  // The city of this page's events (null: several, or unknown). The site's city only while every
+  // page the AI read names the same one: a ticket shop's Trnava page doesn't make it a Trnava site.
+  listing.city = a.listingCity || null;
+  const cities = new Set(Object.values(source.pages).filter((p) => p.city !== undefined).map((p) => p.city));
+  source.city = cities.size === 1 && !cities.has(null) ? [...cities][0] : undefined;
+  const said = [`${a.publishesEvents ? 'event source' : 'not an event source'} (${a.siteKind})${a.listingCity ? `, events in ${a.listingCity}` : ''}`
+    + `${away(a.eventsCountry) ? `; events here are in ${a.eventsCountry}, not Slovakia: page skipped from now on` : ''}`
+    + `${away(a.siteCountry) ? `; the site's events are in ${a.siteCountry}: site skipped from now on` : ''}`];
   listing.tags = a.pageTags?.length ? a.pageTags : undefined; // e.g. a cinema programme: every event is "cinema"
   if (a.recipe) {
     const found = withTags(applyRecipe($, a.recipe, pageUrl), listing.tags);
@@ -836,6 +920,97 @@ function repairOfflineVisits(state, report) {
   if (n) report.log(`Repaired ${n} pages that failed while this machine was offline (${OFFLINE_REPAIR.from.slice(11, 16)}–${OFFLINE_REPAIR.to.slice(11, 16)} UTC); queued again`);
 }
 
+/** The page an event was first read from (its primary listing). */
+const viaOf = (ev) => ev.sources?.find((r) => !r.linked)?.via || ev.source;
+
+/**
+ * Drop events outside Slovakia: those found to be abroad (once located, or by their location's
+ * town), and those whose place isn't known from pages whose events are abroad (or another country's
+ * site with none in Slovakia). Each one found abroad counts against its page's template and site.
+ * Links and AI jobs for such pages go too, and a site whose events are abroad stops being a source.
+ * Returns how many events were dropped.
+ */
+function dropAbroad(state) {
+  let n = 0;
+  for (const [id, ev] of Object.entries(state.events)) {
+    const c = eventCountry(state, ev);
+    const via = viaOf(ev);
+    if (c === 'sk' || (!c && !(via && unknownIsAbroad(state, via)))) continue;
+    if (c === 'abroad' && via) noteCountry(state, via, { abroad: 1 });
+    delete state.events[id];
+    n++;
+  }
+  for (const url of Object.keys(state.frontier)) if (regionAt(state, url) === 'abroad') dequeue(state, url);
+  for (const url of Object.keys(state.aiQueue || {})) if (regionAt(state, url) === 'abroad') aiJobDone(state, url);
+  for (const source of Object.values(state.sources)) if (source.kind === 'events' && outsideSlovakia(state, source)) retire(source);
+  return n;
+}
+
+/**
+ * Sites retired for having their events abroad whose look is due: every 45 days, a few listing
+ * pages read with their saved recipes (no AI). An artist's tour, a ticket shop abroad, may list a
+ * date in Bratislava; such a page makes the site a source again (readPage). Sites retired before
+ * this get their first look spread over the 45 days.
+ */
+const OUTSIDE_EVERY = 45 * DAY;
+const OUTSIDE_PAGES = 3;
+function outsideDue(state) {
+  const now = Date.now();
+  return Object.values(state.sources).filter((s) => {
+    if (s.kind !== 'irrelevant' || !s.outside) return false;
+    s.outsideCheckAt ??= iso(now - Math.random() * OUTSIDE_EVERY);
+    return now - Date.parse(s.outsideCheckAt) >= OUTSIDE_EVERY;
+  });
+}
+
+// A source whose site has its events abroad, and none of whose listing pages had any in Slovakia.
+const outsideSlovakia = (state, source) => !Object.values(source.pages).some((p) => p.geo?.sk)
+  && (regionOf(state.hosts[hostOf(source.origin)]) === 'abroad' || siteAbroad(state, hostOf(source.origin)));
+const retire = (source) => Object.assign(source, { kind: 'irrelevant', judgedFor: 'slovakia', outside: true, outsideCheckAt: iso(Date.now()) });
+
+// 18 Oct 2026: the crawler had drifted abroad (Hamburg, Nashville, Singapore… ~60 % of upcoming
+// events). Once: count every stored event's country towards the template and site of each page it
+// was read from, so the crawler knows where each kind of page has its events from the start.
+const GEO_PROFILE = 'geo-profile-2026-10-18';
+
+function bootstrapCountries(state, report) {
+  state.meta.repairs ??= [];
+  if (state.meta.repairs.includes(GEO_PROFILE)) return;
+  const fixed = repairSiteCities(state);
+  report.log(`Site cities: dropped ${fixed.sites} that most of the site's events disagree with, and the place of `
+    + `${fixed.events} events filled in from them; forgot ${fixed.venues} venues without a town learned from a page`);
+  const tally = { sk: 0, abroad: 0, unknown: 0 };
+  for (const ev of Object.values(state.events)) {
+    const c = eventCountry(state, ev);
+    tally[c || 'unknown']++;
+    if (!c) continue;
+    for (const via of new Set(ev.sources.filter((r) => !r.linked && r.via).map((r) => r.via))) {
+      noteCountry(state, via, { sk: c === 'sk' ? 1 : 0, abroad: c === 'abroad' ? 1 : 0 });
+    }
+  }
+  state.meta.repairs.push(GEO_PROFILE);
+  report.log(`Where events are: ${fmtN(tally.sk)} in Slovakia, ${fmtN(tally.abroad)} abroad, ${fmtN(tally.unknown)} not known yet; `
+    + 'counted towards the templates and sites they came from');
+}
+
+// Every Slovak municipality's own website (sk-places.json), most of which have a calendar of
+// events ("kalendár podujatí"). A few a pass, biggest places first, until each has been visited
+// once; from then on what the visit found decides, as for any page.
+const TOWN_WEBS_PER_PASS = 15;
+function queueTownWebs(state, report) {
+  const done = (state.meta.townWebs ??= {}); // origin -> when it was queued
+  let n = 0;
+  for (const p of SK_PLACES) {
+    if (n >= TOWN_WEBS_PER_PASS) break;
+    let origin;
+    try { origin = new URL(p.web).origin; } catch { continue; }
+    if (done[origin] || state.hosts[hostOf(origin)]?.visits) continue;
+    done[origin] = iso(Date.now());
+    if (addToFrontier(state, `${origin}/`, isTown(p) ? 7 : 5, 'town web')) n++;
+  }
+  if (n) report.log(`Queued the websites of ${n} more Slovak towns and villages (${Object.keys(done).length} so far)`);
+}
+
 function pruneEvents(state, today) {
   const cutoff = new Date(Date.parse(today) - 14 * DAY).toISOString().slice(0, 10);
   for (const [id, ev] of Object.entries(state.events)) if ((ev.end || ev.start) < cutoff) delete state.events[id];
@@ -899,6 +1074,9 @@ export async function crawlPass(state, options = {}, control = defaultControl())
     health: {
       fetched: 0, read: 0, unchanged: 0, errors: 0, crashes: 0, lastCrash: null,
       withEvents: 0, events: 0, added: 0, ai: 0, aiRecipes: 0, sitemapFiles: 0, sitemapQueued: 0,
+      // Leakage: pages read whose events were all abroad, events read abroad (not kept), AI spent
+      // on such pages (of all AI on pages), events dropped from the store as abroad.
+      abroadPages: 0, abroadEvents: 0, aiUsd: 0, aiAbroadUsd: 0, dropped: 0,
     },
     hostVisits: {}, // host -> pages fetched this pass
     aiSites: new Set(), // sites whose explored pages AI looked at this pass
@@ -913,17 +1091,21 @@ export async function crawlPass(state, options = {}, control = defaultControl())
   }
   repairUnreadVisits(state, report);
   repairOfflineVisits(state, report);
+  bootstrapCountries(state, report);
   if (!Object.keys(state.patterns).length) {
     const n = bootstrapPatterns(state, CRASH_REPAIR.from);
     report.log(`Page templates: learned from ${n} earlier visits which kinds of pages hold events`);
   }
   for (const url of seeds) addToFrontier(state, url, 10, 'seed');
+  queueTownWebs(state, report);
 
   // 1. Known sources that are due. Each source's pages are fetched one after another;
   //    different sources run in parallel.
+  //    Sites retired for having their events abroad get a look now and then too (outsideDue).
   const due = Object.values(state.sources)
     .filter((s) => s.kind === 'events' && (!s.nextCheckAt || Date.parse(s.nextCheckAt) <= Date.now()))
-    .sort((a, b) => Date.parse(a.nextCheckAt || 0) - Date.parse(b.nextCheckAt || 0));
+    .sort((a, b) => Date.parse(a.nextCheckAt || 0) - Date.parse(b.nextCheckAt || 0))
+    .concat(outsideDue(state));
   report.phase('Re-checking sources', `${due.length} due`);
   await runPool(() => {
     const source = due.shift();
@@ -935,14 +1117,22 @@ export async function crawlPass(state, options = {}, control = defaultControl())
       if (resumeAt()) { source.nextCheckAt = iso(resumeAt()); return; }
       // The listing pages read longest ago first, so a site with many (one per town and kind of
       // event) gets all of them re-read over a few checks.
-      const pages = Object.entries(source.pages)
-        .filter(([, p]) => !(p.failures >= 5) && !resting(p)) // dead, or empty for a while
-        .sort((a, b) => (a[1].lastRead?.at || '').localeCompare(b[1].lastRead?.at || ''))
-        .slice(0, RECHECK_PAGES);
+      const outside = source.outside;
+      // A retired site: its few pages that had the most events, abroad or not (any in Slovakia now?).
+      const pages = outside
+        ? Object.entries(source.pages).filter(([, p]) => !(p.failures >= 5))
+          .sort((a, b) => (b[1].lastRead?.events || 0) - (a[1].lastRead?.events || 0)).slice(0, OUTSIDE_PAGES)
+        : Object.entries(source.pages)
+          // Dead, empty for a while, or its events are abroad (a mixed site's other pages still are).
+          .filter(([u, p]) => !(p.failures >= 5) && !resting(p) && !p.abroad && regionAt(state, u) !== 'abroad')
+          .sort((a, b) => (a[1].lastRead?.at || '').localeCompare(b[1].lastRead?.at || ''))
+          .slice(0, RECHECK_PAGES);
       for (const [url] of pages) {
         if (ctx.budget.pages <= 0 || control.stopped() || resumeAt()) break;
         added += await visit(state, url, ctx, 'recheck');
       }
+      if (outside) source.outsideCheckAt = iso(Date.now());
+      if (source.kind !== 'events') return; // still retired
       if (resumeAt()) source.nextCheckAt = iso(resumeAt()); // went down meanwhile
       else scheduleNext(source, added);
     };
@@ -1046,11 +1236,18 @@ export async function crawlPass(state, options = {}, control = defaultControl())
   if (!control.stopped() && aiReady('tag')) await tagUncertainEvents(state, today, report);
 
   // 9. Coordinates for upcoming events (cached per place; OpenStreetMap lookups for new places).
+  //    Events already known to be abroad go first, so no lookup is spent on them.
+  let gone = dropAbroad(state);
   if (!control.stopped()) {
     report.phase('Locating events');
     const r = await locateEvents(state, today, maxGeocode, report);
     report.log(`Located ${r.located} of ${r.total} upcoming events (${r.looked} new places looked up, ${r.found} found)`);
   }
+
+  // 10. Events outside Slovakia (found by locating them, or by what's now known about their pages) go.
+  gone += dropAbroad(state);
+  ctx.health.dropped += gone;
+  if (gone) report.log(`Dropped ${fmtN(gone)} events outside Slovakia`);
 
   pruneEvents(state, today);
   trimFrontier(state);

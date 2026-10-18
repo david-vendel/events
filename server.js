@@ -39,7 +39,10 @@ function send(req, res, { text, gzip }, status = 200) {
 }
 
 // What the public page reads is built at most every 30 s, however many people open it.
-const PUBLIC = { 'GET /api/events': () => engine.events(), 'GET /api/sites': () => engine.sites() };
+// (towns.json is outside api/, so a proxy that guards api/ leaves it public.)
+const PUBLIC = {
+  'GET /api/events': () => engine.events(), 'GET /api/sites': () => engine.sites(), 'GET /towns.json': () => engine.towns(),
+};
 const PUBLIC_CACHE_MS = 30_000;
 const publicCache = new Map();
 function cachedJson(key, ms, build) {
