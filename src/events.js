@@ -98,7 +98,7 @@ export function migrate(state, today = new Date().toISOString().slice(0, 10)) {
       description: ev.description, status: 'ok', seenAt: ev.lastSeenAt,
     }];
     tidyRows(ev);
-    if (!ev.sources.some((r) => !r.linked) || tooFarAhead(ev.start)) delete state.events[ev.id];
+    if (!ev.sources.some((r) => !r.linked) || tooFarAhead(ev.start) || Number.isNaN(Date.parse(ev.start))) delete state.events[ev.id];
   }
   for (const ev of Object.values(state.events)) splitUnrelated(state, ev);
   for (const ev of Object.values(state.events)) syncFromPrimary(ev, state.tagRules);

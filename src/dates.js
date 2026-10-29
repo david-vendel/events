@@ -38,6 +38,7 @@ function makeDate(d, m, y, now) {
   }
   y = +y;
   if (y < 100) y += 2000;
+  if (new Date(Date.UTC(y, m - 1, d)).getUTCDate() !== d) return null; // 31 November
   return `${y}-${pad(m)}-${pad(d)}`;
 }
 
@@ -138,10 +139,10 @@ export function parseDateText(text, now = new Date()) {
   let m;
 
   if ((m = t.match(/(\d{4})-(\d{2})-(\d{2})(?:[t ](\d{2}):(\d{2}))?/))) {
-    start = `${m[1]}-${m[2]}-${m[3]}`;
+    start = makeDate(m[3], m[2], m[1], now); // "2026-11-92" is no date
     const e = t.slice(m.index + m[0].length).match(/(\d{4})-(\d{2})-(\d{2})(?:[t ](\d{2}):(\d{2}))?/);
-    if (e) end = `${e[1]}-${e[2]}-${e[3]}`;
-    if (m[4]) return finishDate({ start, end, time: hhmm(m[4], m[5]), endTime: hhmm(e?.[4], e?.[5]) });
+    if (e) end = makeDate(e[3], e[2], e[1], now) || undefined;
+    if (start && m[4]) return finishDate({ start, end, time: hhmm(m[4], m[5]), endTime: hhmm(e?.[4], e?.[5]) });
   } else if ((m = t.match(DMY_RANGE))) {
     const y = m[3] || m[8];
     start = makeDate(m[1], m[2], y, now);
