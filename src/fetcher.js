@@ -14,6 +14,18 @@ const robotsCache = new Map(); // origin -> { rules: disallowed path prefixes, s
 export const sha1 = (s) => crypto.createHash('sha1').update(s).digest('hex');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// fetch() plus reading its body, given up after ms no matter what. AbortSignal.timeout alone
+// is not enough: a wedged connection once left a page fetch pending for days, and the Run with it.
+async function fetchBody(url, opts, ms, read) {
+  let timer;
+  const timeout = new Promise((_, no) => { timer = setTimeout(() => no(new Error('timeout')), ms); });
+  try {
+    return await Promise.race([fetch(url, { ...opts, signal: AbortSignal.timeout(ms) }).then(read), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Reserve the next free slot for this host before sleeping, so parallel workers hitting the
 // same host queue up HOST_DELAY_MS apart instead of all waking at once.
 async function politeWait(host) {
@@ -28,20 +40,16 @@ async function robots(origin) {
   const rules = [], sitemaps = [];
   try {
     await politeWait(new URL(origin).host);
-    const res = await fetch(`${origin}/robots.txt`, {
-      headers: { 'User-Agent': USER_AGENT },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-    if (res.ok) {
-      let applies = false;
-      for (const raw of (await res.text()).split('\n')) {
-        const line = raw.replace(/#.*/, '').trim();
-        const [key, ...rest] = line.split(':');
-        const value = rest.join(':').trim();
-        if (/^user-agent$/i.test(key)) applies = value === '*' || /kosiceevents/i.test(value);
-        else if (applies && /^disallow$/i.test(key) && value) rules.push(value);
-        else if (/^sitemap$/i.test(key) && /^https?:\/\//.test(value)) sitemaps.push(value);
-      }
+    const text = await fetchBody(`${origin}/robots.txt`, { headers: { 'User-Agent': USER_AGENT } }, TIMEOUT_MS,
+      (res) => (res.ok ? res.text() : ''));
+    let applies = false;
+    for (const raw of text.split('\n')) {
+      const line = raw.replace(/#.*/, '').trim();
+      const [key, ...rest] = line.split(':');
+      const value = rest.join(':').trim();
+      if (/^user-agent$/i.test(key)) applies = value === '*' || /kosiceevents/i.test(value);
+      else if (applies && /^disallow$/i.test(key) && value) rules.push(value);
+      else if (/^sitemap$/i.test(key) && /^https?:\/\//.test(value)) sitemaps.push(value);
     }
   } catch {
     // Unreachable robots.txt: treat as allowed.
@@ -65,9 +73,10 @@ export async function fetchText(url, maxBytes = 30_000_000) {
   if (await disallowed(u)) return { status: 0, error: 'robots.txt' };
   await politeWait(u.host);
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, redirect: 'follow', signal: AbortSignal.timeout(TIMEOUT_MS * 2) });
+    const res = await fetchBody(url, { headers: { 'User-Agent': USER_AGENT }, redirect: 'follow' }, TIMEOUT_MS * 2,
+      async (r) => Object.assign(r, { buf: r.ok ? Buffer.from(await r.arrayBuffer()) : null }));
     if (!res.ok) return { status: res.status, error: res.statusText || `HTTP ${res.status}` };
-    let buf = Buffer.from(await res.arrayBuffer());
+    let buf = res.buf;
     if (buf[0] === 0x1f && buf[1] === 0x8b) buf = zlib.gunzipSync(buf, { maxOutputLength: maxBytes });
     return { status: res.status, text: buf.subarray(0, maxBytes).toString('utf8') };
   } catch (err) {
@@ -105,7 +114,10 @@ export async function fetchPage(url, cache = {}, { ignoreRobots = false } = {}) 
 
   let res;
   try {
-    res = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(TIMEOUT_MS) });
+    // The body only for pages we read: 200s that are HTML.
+    res = await fetchBody(url, { headers, redirect: 'follow' }, TIMEOUT_MS, async (r) => Object.assign(r, {
+      buf: r.ok && /html|xml/i.test(r.headers.get('content-type') || '') ? Buffer.from(await r.arrayBuffer()) : null,
+    }));
   } catch (err) {
     return { status: 0, error: err.cause?.code || err.message };
   }
@@ -117,7 +129,7 @@ export async function fetchPage(url, cache = {}, { ignoreRobots = false } = {}) 
     return { status: res.status, error: 'not html' };
   }
 
-  const html = decodeHtml(Buffer.from(await res.arrayBuffer()), res.headers.get('content-type')).slice(0, MAX_BYTES);
+  const html = decodeHtml(res.buf, res.headers.get('content-type')).slice(0, MAX_BYTES);
   // Hash only the visible text: scripts and attributes often carry per-request
   // nonces/timestamps that would make every fetch look like a change.
   const hash = sha1(
