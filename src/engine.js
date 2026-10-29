@@ -3,7 +3,7 @@
 import { loadState, saveState } from './store.js';
 import { crawlPass } from './crawler.js';
 import {
-  AI_JOBS, AI_MODELS, aiAvailable, aiConfig, aiInput, aiPausedUntil, aiStatus, lastPlanUsage, planUsage, setAiConfig, setAiRecorder,
+  AI_JOBS, AI_MODELS, aiAvailable, aiConfig, aiInput, aiPausedUntil, aiStatus, lastPlanUsage, planUsage, setAiConfig, setAiParallel, setAiRecorder,
 } from './ai.js';
 import { facebookEnabled } from './corroborate.js';
 import { domainOf, hostOf } from './urls.js';
@@ -55,14 +55,23 @@ export const DEFAULT_SETTINGS = {
   coverageGoal: 90,
   limitFiveHour: 80,
   limitWeekly: 80,
+  // A Run works in passes (crawler.js), so every step (re-checks, verifying, exploring, the AI queue,
+  // dates, tags, the map) keeps getting its turn. They follow each other without a break.
+  pagesPerPass: 200,
+  aiPerPass: 30, // pages the bigger model reads a pass
+  triagePerPass: 60, // cheap pre-checks a pass
+  aiParallel: 1, // AI calls at the same time; each is a Claude Code process (~200 MB)
 };
 const LIMITS = {
   concurrency: [1, 50], coverageGoal: [1, 100], limitFiveHour: [1, 100], limitWeekly: [1, 100],
+  pagesPerPass: [20, 2000], aiPerPass: [1, 300], triagePerPass: [0, 500], aiParallel: [1, 4],
 };
-// A Run works in passes of this size (crawler.js), so every step (re-checks, verifying, exploring, the
-// AI queue, dates, tags, the map) keeps getting its turn. They follow each other without a break; AI use
-// is held back by the plan limits above, not per pass.
-const PASS = { maxPages: 200, maxAi: 30, maxVerify: 15 };
+// One click in Settings sets all of these (and the pre-check model).
+export const PRESETS = {
+  normal: { ...DEFAULT_SETTINGS, triageModel: 'haiku' },
+  berserk: { concurrency: 20, coverageGoal: 100, limitFiveHour: 95, limitWeekly: 95,
+    pagesPerPass: 600, aiPerPass: 100, triagePerPass: 200, aiParallel: 3, triageModel: 'sonnet' },
+};
 const PAUSE_CHECK_MS = 30 * 60e3; // a Run paused at a goal or limit looks again this often
 const IDLE_CHECK_MS = 5 * 60e3; // …with nothing to crawl
 const OFFLINE_CHECK_MS = 60e3; // …without a network
@@ -89,6 +98,7 @@ export class Engine {
     for (const k of ['pagesPerCycle', 'aiPerCycle', 'verifyPerCycle', 'cycleEveryMin']) delete this.settings[k]; // no more cycles
     delete this.state.meta.cycles;
     this.state.settings = this.settings;
+    setAiParallel(this.settings.aiParallel);
     this.running = false; // a Run is active (crawling or paused)
     this.stopping = false;
     this.phase = { name: 'Stopped', detail: '' };
@@ -169,6 +179,11 @@ export class Engine {
   }
 
   updateSettings(patch) {
+    if (PRESETS[patch.preset]) {
+      this.message(`Settings: ${patch.preset}`);
+      const { triageModel, ...preset } = PRESETS[patch.preset];
+      patch = { ...preset, ai: { jobs: { triage: { model: triageModel } } } };
+    }
     if (patch.ai) {
       this.settings.ai = setAiConfig(patch.ai);
       const a = this.settings.ai;
@@ -180,6 +195,7 @@ export class Engine {
       const v = Math.round(Number(patch[k]));
       if (Number.isFinite(v)) this.settings[k] = Math.min(max, Math.max(min, v));
     }
+    setAiParallel(this.settings.aiParallel);
     this.dirty = true;
     this.save();
   }
@@ -204,7 +220,9 @@ export class Engine {
       this.run.paused = null;
       let ctx = null;
       try {
-        ctx = await crawlPass(this.state, PASS, this.control());
+        const st = this.settings;
+        ctx = await crawlPass(this.state, { maxPages: st.pagesPerPass, maxAi: st.aiPerPass, maxTriage: st.triagePerPass, maxVerify: 15 },
+          this.control());
       } catch (err) {
         this.message(`crawler error: ${err.stack || err}`);
         wait = { reason: 'crawler error (see the log)', ms: PAUSE_CHECK_MS };
@@ -310,6 +328,7 @@ export class Engine {
       stopping: this.stopping,
       phase: this.phase,
       settings: this.settings,
+      presets: PRESETS,
       // The Run's totals so far, the pass in progress included.
       run: r && { area: r.area, startedAt: r.startedAt, endedAt: r.endedAt, paused: r.paused,
         health: this.pass ? sumHealth(r.health, this.pass.health) : r.health },

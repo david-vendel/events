@@ -59,7 +59,6 @@ const EMPTY_LISTING_REST = 14 * DAY;
 const NOT_LISTING_FOR = 30 * DAY; // a page AI said lists no events isn't taken as a listing again for this long
 const AI_MISSES_PER_SITE = 3;
 const AI_MISSES_FORGET = 30 * DAY; // after this, a site AI gave up on gets one more look (a month apart)
-const TRIAGE_PER_PASS = 60; // cheap pre-checks, on top of the AI budget for the bigger model
 // A template recipe that finds events on fewer than 10 % of at least 10 pages read the wrong pages
 // (an event page's recipe borrowed by the same site's news articles reads their publish time).
 const RECIPE_MIN_VISITS = 10;
@@ -441,7 +440,8 @@ async function readPage(state, url, ctx, job) {
   ctx.used.pages++;
 
   // A page from the AI queue is fetched whole (not "unchanged since last time"): AI needs to see it.
-  const forAi = ctx.aiJob?.url === url;
+  const aiJob = ctx.aiJobs.get(url);
+  const forAi = Boolean(aiJob);
   if (forAi) { delete cache.etag; delete cache.lastModified; }
   let res = await fetchPage(url, cache);
   health.fetched++;
@@ -593,7 +593,7 @@ async function readPage(state, url, ctx, job) {
   if (blind) {
     how = how ? `${how}; ${calendar.name} calendar: needs Chrome` : `${calendar.name} calendar: needs Chrome`;
   }
-  if (viaQueue) ctx.aiJob.worthy = aiWorthy;
+  if (viaQueue) aiJob.worthy = aiWorthy;
   // Pages without a working recipe: one look per site a pass (repairs and seeds aside).
   const wantsAi = aiWorthy && viaQueue && ctx.budget.ai > 0 && aiReady('analyze')
     && (ctx.seeds.has(url) || listing?.recipe || !ctx.aiSites.has(source.origin));
@@ -616,9 +616,9 @@ async function readPage(state, url, ctx, job) {
       tpl.aiSaid = `pre-check: no upcoming events (${precheck.reason || ''})`;
       aiMissed(source);
       how = 'pre-check: no events';
-      ctx.aiJob.answer = 'ok';
+      aiJob.answer = 'ok';
     } else if (precheck.listsEvents === null) {
-      ctx.aiJob.answer = precheck.call?.error || 'no answer';
+      aiJob.answer = precheck.call?.error || 'no answer';
     }
   }
 
@@ -627,7 +627,7 @@ async function readPage(state, url, ctx, job) {
     ctx.budget.ai--;
     ctx.used.ai++;
     health.ai++;
-    // AI runs one page at a time; parallel workers wait their turn here.
+    // AI runs a few pages at a time at most (Settings); parallel workers wait their turn here.
     report.update?.(job, { note: 'waiting for AI…', ai: 'waiting' });
     const { html, truncated, title } = simplifyHtml(res.html);
     const { analysis: a, call } = await analyzePage({
@@ -636,7 +636,7 @@ async function readPage(state, url, ctx, job) {
       onStart: () => report.update?.(job, { note: 'AI is reading the page…', ai: 'running' }),
     });
     aiCall = call;
-    ctx.aiJob.answer = a ? 'ok' : call?.error || 'no answer';
+    aiJob.answer = a ? 'ok' : call?.error || 'no answer';
     if (a || !isLimitError(call?.error)) tpl.aiAt = iso(Date.now());
     if (a) {
       const outcome = learnFromAnalysis(state, source, url, a, $, res.url, events, report, tpl);
@@ -1018,7 +1018,7 @@ function pruneEvents(state, today) {
 
 /**
  * Work through the AI queue (aiqueue.js): each page is fetched again and read with AI, within the
- * pass's AI budget. Pages are read one after another (AI takes one call at a time anyway). A page
+ * pass's AI budget, a few at a time (Settings: AI calls at once). A page
  * that no longer needs AI (its template got a recipe meanwhile) just leaves the queue.
  */
 async function runAiQueue(state, ctx) {
@@ -1031,28 +1031,45 @@ async function runAiQueue(state, ctx) {
   }
   if (ctx.budget.ai <= 0) return;
   report.phase('AI reading pages', `${due.length} pages waiting`);
-  for (const j of due) {
-    if (ctx.budget.ai <= 0 || ctx.control.stopped() || ctx.offline) break;
-    if (!aiReady('analyze')) {
-      report.log(`AI hit the plan's limit: the rest of the queue waits until ${new Date(aiPausedUntil()).toISOString().slice(11, 16)} UTC`);
-      break;
+  const picked = new Set(); // sites given to AI by this step so far
+  let i = 0, limitHit = false;
+  await runPool(() => {
+    while (i < due.length) {
+      if (ctx.budget.ai <= 0 || ctx.offline || limitHit) return null;
+      if (!aiReady('analyze')) {
+        limitHit = true;
+        report.log(`AI hit the plan's limit: the rest of the queue waits until ${new Date(aiPausedUntil()).toISOString().slice(11, 16)} UTC`);
+        return null;
+      }
+      const j = due[i++];
+      // A new site's page waits for the next pass if this pass already showed AI a page of that site.
+      if (!j.repair && (ctx.aiSites.has(j.origin) || picked.has(j.origin))) continue;
+      if (downUntil(state, j.url)) continue;
+      picked.add(j.origin);
+      return () => learnFromQueue(state, ctx, j);
     }
-    // A new site's page waits for the next pass if this pass already showed AI a page of that site.
-    if (!j.repair && ctx.aiSites.has(j.origin)) continue;
-    if (downUntil(state, j.url)) continue;
-    ctx.aiJob = { url: j.url };
+    return null;
+  }, { ...ctx.control, concurrency: () => state.settings?.aiParallel || 1 });
+}
+
+async function learnFromQueue(state, ctx, j) {
+  const aiJob = { url: j.url };
+  ctx.aiJobs.set(j.url, aiJob);
+  try {
     await visit(state, j.url, ctx, 'learn');
-    const { worthy, answer } = ctx.aiJob;
-    ctx.aiJob = null;
-    if (worthy === false || answer === 'ok') aiJobDone(state, j.url); // read, or no longer needs AI
-    else if (!answer) aiJobFailed(state, j.url, worthy ? 'skipped' : 'page could not be read');
-    else if (isLimitError(answer)) aiJobPostponed(state, j.url, aiPausedUntil() || Date.now() + 3600e3);
-    else aiJobFailed(state, j.url, answer);
+  } finally {
+    ctx.aiJobs.delete(j.url);
   }
+  const { worthy, answer } = aiJob;
+  if (worthy === false || answer === 'ok') aiJobDone(state, j.url); // read, or no longer needs AI
+  else if (!answer) aiJobFailed(state, j.url, worthy ? 'skipped' : 'page could not be read');
+  else if (isLimitError(answer)) aiJobPostponed(state, j.url, aiPausedUntil() || Date.now() + 3600e3);
+  else aiJobFailed(state, j.url, answer);
 }
 
 export async function crawlPass(state, options = {}, control = defaultControl()) {
-  const { maxPages = 60, maxAi = 5, maxVerify = 15, maxGeocode = 40, seedsFile = 'seeds.json' } = options;
+  // maxTriage: cheap pre-checks, on top of the AI budget for the bigger model.
+  const { maxPages = 60, maxAi = 5, maxTriage = 60, maxVerify = 15, maxGeocode = 40, seedsFile = 'seeds.json' } = options;
   const { report } = control;
   const today = new Date().toISOString().slice(0, 10);
   const seeds = new Set(fs.existsSync(seedsFile) ? JSON.parse(fs.readFileSync(seedsFile, 'utf8')) : []);
@@ -1067,7 +1084,7 @@ export async function crawlPass(state, options = {}, control = defaultControl())
     for (const s of ev.sources || []) if (s.url && s.url !== s.via) eventPages.add(urlKey(s.url));
   }
   const ctx = {
-    budget: { pages: maxPages, ai: aiAvailable() ? maxAi : 0, verify: maxVerify, triage: TRIAGE_PER_PASS },
+    budget: { pages: maxPages, ai: aiAvailable() ? maxAi : 0, verify: maxVerify, triage: maxTriage },
     used: { pages: 0, ai: 0, verify: 0, triage: 0 },
     found: { events: 0, added: 0 },
     // How well this pass is going: pages fetched / read / failed, crawler bugs, pages with events…
@@ -1080,6 +1097,7 @@ export async function crawlPass(state, options = {}, control = defaultControl())
     },
     hostVisits: {}, // host -> pages fetched this pass
     aiSites: new Set(), // sites whose explored pages AI looked at this pass
+    aiJobs: new Map(), // url -> { worthy, answer }: AI queue pages being read right now
     netFails: [], offline: false, // network errors in a row; set when we found we're offline
     today, seeds, control, eventPages, index: new EventIndex(state),
   };

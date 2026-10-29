@@ -161,23 +161,37 @@ function subscriptionEnv() {
 
 const modelFor = (job) => (config.jobs[job]?.model === 'default' ? undefined : config.jobs[job]?.model);
 
-// AI calls run strictly one at a time, even when the crawler fetches pages in parallel:
-// callers queue here in order. aiStatus() tells the dashboard what's running and what's waiting.
-let chain = Promise.resolve();
-let busy = null;
-let waiting = 0;
-function oneAtATime(info, onStart, fn) {
-  waiting++;
-  const run = chain.then(() => {
-    waiting--;
-    busy = { ...info, startedAt: Date.now() };
-    onStart?.();
-    return fn();
-  }).finally(() => { busy = null; });
-  chain = run.catch(() => {});
-  return run;
+// AI calls run at most aiParallel at a time (Settings; 1 by default), even when the crawler fetches
+// pages in parallel: callers queue here in order. Each call is a Claude Code process (~200 MB).
+// aiStatus() tells the dashboard what's running and what's waiting.
+let aiParallel = 1;
+const runningCalls = new Set();
+const queue = [];
+export function setAiParallel(n) {
+  aiParallel = n;
+  pump();
 }
-export const aiStatus = () => ({ busy, waiting });
+function pump() {
+  while (runningCalls.size < aiParallel && queue.length) queue.shift()();
+}
+function oneAtATime(info, onStart, fn) {
+  return new Promise((resolve, reject) => {
+    queue.push(() => {
+      const call = { ...info, startedAt: Date.now() };
+      runningCalls.add(call);
+      onStart?.();
+      Promise.resolve().then(fn).then(resolve, reject).finally(() => {
+        runningCalls.delete(call);
+        pump();
+      });
+    });
+    pump();
+  });
+}
+export const aiStatus = () => {
+  const busy = [...runningCalls];
+  return { busy: busy[0] || null, busyAll: busy, waiting: queue.length };
+};
 
 const Recipe = z.object({
   item: z.string().describe('CSS selector matching one element per event in the listing'),

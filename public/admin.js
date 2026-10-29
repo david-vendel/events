@@ -865,6 +865,26 @@ const HELP = {
       there are, and robots.txt is obeyed. More workers help when the work is spread over many sites; on one big site
       they just wait their turn. AI calls also run strictly one at a time, so more workers don't mean more AI.</p>
     <p><b>Raise it</b> to crawl faster; <b>lower it</b> if the server is slow or short on memory or network.</p>`,
+  presets: `<p><b>Normal</b> is the default: 5 parallel pages, 1 AI call at a time, 30 AI page reads and 60 pre-checks a
+      pass, pre-checks on Haiku, pauses at 90 % coverage or 80 % of the plan's AI use.</p>
+    <p><b>Berserk</b> uses the plan hard: 20 parallel pages, 3 AI calls at once, 600 pages, 100 AI page reads and 200
+      pre-checks a pass, pre-checks on Sonnet (fewer event pages wrongly skipped, ~3–4× the cost of that job), never pauses
+      for coverage, pauses only at 95 % of the plan's 5-hour or weekly use.</p>
+    <p>Either one sets all the fields below; change any of them afterwards and Save.</p>`,
+  limitFiveHour: `<p><b>What:</b> Run pauses while the Claude plan's 5-hour window is used above this (1–100 %). Same as the
+      slider under Run.</p>`,
+  limitWeekly: `<p><b>What:</b> Run pauses while the Claude plan's weekly window is used above this (1–100 %). Same as the
+      slider under Run.</p>`,
+  pagesPerPass: `<p><b>What:</b> pages fetched in one pass of the Run (20–2000, default 200). A pass runs every step once
+      (re-checks, verifying, sitemaps, exploring, the AI queue, dates, tags, the map); bigger passes explore more between
+      the other steps.</p>`,
+  aiPerPass: `<p><b>What:</b> pages the bigger model (the page reader) reads in one pass (1–300, default 30). It writes the
+      recipe for each.</p>`,
+  triagePerPass: `<p><b>What:</b> quick AI pre-checks in one pass (0–500, default 60): does a newly found page list
+      events at all? Their model is set in the AI tab.</p>`,
+  aiParallel: `<p><b>What:</b> AI calls running at the same time (1–4, default 1).</p>
+    <p><b>Cost:</b> each call is its own Claude Code process of about 200 MB, so 3 at once needs ~600 MB of memory on top
+      of the server. Uses the plan faster; the AI limits above still pause the Run.</p>`,
   coverageGoal: `<p><b>What:</b> <b>Run</b> pauses while the estimated coverage of its town (or of all towns) is at least
       this (1–100 %, default 90). A town with too few events to estimate ("?") never counts as covered.</p>
     <p><b>Why:</b> once nearly everything that's on is found, more crawling mostly re-reads what we have. The AI limits are the
@@ -878,10 +898,23 @@ function settingsTab() {
   const s = snap.settings;
   const field = (key, label) => `<label for="set-${key}">${label} ${info(key)}</label>
     <input id="set-${key}" type="number" min="0" value="${s[key]}">${help(key)}`;
+  // The preset every setting matches, if any (the pre-check model too).
+  const current = Object.entries(snap.presets || {}).find(([, p]) => Object.entries(p)
+    .every(([k, v]) => (k === 'triageModel' ? s.ai.jobs.triage?.model === v : s[k] === v)))?.[0];
+  const preset = (key, label) => `<button class="btn${current === key ? ' primary' : ''}" data-preset="${key}"
+    aria-pressed="${current === key}">${label}</button>`;
   return `<p class="muted">How a Run works ${info('run')}</p>${help('run')}
+    <p>${preset('normal', 'Normal')} ${preset('berserk', 'Berserk')} ${info('presets')}
+      <span class="muted">${current ? '' : 'custom'}</span></p>${help('presets')}
     <div class="form">
       ${field('concurrency', 'Parallel pages')}
       ${field('coverageGoal', 'Run pauses at coverage %')}
+      ${field('limitFiveHour', 'Pause at 5-hour AI use %')}
+      ${field('limitWeekly', 'Pause at weekly AI use %')}
+      ${field('pagesPerPass', 'Pages a pass')}
+      ${field('aiPerPass', 'AI page reads a pass')}
+      ${field('triagePerPass', 'AI pre-checks a pass')}
+      ${field('aiParallel', 'AI calls at once')}
     </div>
     <p><button class="btn primary" id="save-settings">Save</button> <span class="muted" id="saved"></span></p>
     <p class="note">Each site still gets one request every 2 seconds, however many pages run in parallel.<br>
@@ -1096,13 +1129,21 @@ $('#tab').onclick = (e) => {
     helpBtn.setAttribute('aria-expanded', openHelp.has(key));
     return;
   }
+  const preset = e.target.closest('[data-preset]');
+  if (preset) {
+    postJson('api/settings', { preset: preset.dataset.preset }).then((s) => {
+      apply(s);
+      renderTab(); // the fields show the preset's values
+      $('#saved').textContent = `${preset.textContent} applied.`;
+    });
+  }
   if (e.target.id === 'save-settings') {
     const patch = {};
     for (const key of Object.keys(snap.settings)) {
       const input = $(`#set-${key}`);
       if (input) patch[key] = Number(input.value);
     }
-    postJson('api/settings', patch).then((s) => { apply(s); $('#saved').textContent = 'Saved.'; });
+    postJson('api/settings', patch).then((s) => { apply(s); renderTab(); $('#saved').textContent = 'Saved.'; });
   }
 };
 
