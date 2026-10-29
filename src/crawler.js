@@ -1021,8 +1021,7 @@ function pruneEvents(state, today) {
  * pass's AI budget, a few at a time (Settings: AI calls at once). A page
  * that no longer needs AI (its template got a recipe meanwhile) just leaves the queue.
  */
-async function runAiQueue(state, ctx) {
-  const { report } = ctx.control;
+async function runAiQueue(state, ctx, report = ctx.control.report) {
   const due = aiJobsDue(state);
   if (!due.length || !aiAvailable('analyze')) return;
   if (!aiReady('analyze')) {
@@ -1116,6 +1115,20 @@ export async function crawlPass(state, options = {}, control = defaultControl())
   }
   for (const url of seeds) addToFrontier(state, url, 10, 'seed');
   queueTownWebs(state, report);
+
+  // The AI steps (6–8) run alongside the crawling steps (1–5), so pages keep being fetched while AI
+  // works. They take what earlier passes found; this pass's finds get their turn in the next one.
+  // Their steps go to the log; the phase shown stays the crawling one.
+  let aiDone = false;
+  const aiReport = { ...report, phase: (name, detail) => report.log(`${name}${detail ? ` — ${detail}` : ''}`) };
+  const aiSteps = (async () => {
+    // 6. Pages waiting for AI: no recipe yet, or one that stopped reading the page well.
+    if (!control.stopped()) await runAiQueue(state, ctx, aiReport);
+    // 7. Date formats not confirmed yet (or due for a re-check), and schedules written as prose.
+    if (!control.stopped() && aiReady('dates')) await checkDates(state, ctx, aiReport);
+    // 8. Tag events the rules couldn't place, with the cheap model; its answers become rules.
+    if (!control.stopped() && aiReady('tag')) await tagUncertainEvents(state, today, aiReport);
+  })().catch((err) => report.log(`AI steps failed: ${err.stack || err}`)).finally(() => { aiDone = true; });
 
   // 1. Known sources that are due. Each source's pages are fetched one after another;
   //    different sources run in parallel.
@@ -1228,11 +1241,13 @@ export async function crawlPass(state, options = {}, control = defaultControl())
     }, control);
   }
 
-  // 5. Explore.
-  if (!control.stopped()) {
+  // 5. Explore. Each site gets its share of a round (hostCap); while the AI steps are still busy,
+  //    another round starts, so the crawler doesn't sit idle waiting for AI.
+  for (let round = 1; !control.stopped() && ctx.budget.pages > 0; round++) {
     const hostCounts = new Map();
     const busyHosts = new Set();
-    report.phase('Exploring', `${Object.keys(state.frontier).length} URLs in queue`);
+    const before = ctx.used.pages;
+    report.phase('Exploring', `${fmtN(Object.keys(state.frontier).length)} URLs in queue${round > 1 ? `, round ${round}` : ''}`);
     await runPool(() => {
       if (ctx.budget.pages <= 0) return null;
       const pick = pickFromFrontier(state, hostCounts, busyHosts, ctx.eventPages);
@@ -1241,17 +1256,11 @@ export async function crawlPass(state, options = {}, control = defaultControl())
       busyHosts.add(pick.host);
       return () => visit(state, pick.url, ctx, 'explore').finally(() => busyHosts.delete(pick.host));
     }, control);
+    if (aiDone || ctx.used.pages === before) break;
   }
 
-  // Dates, tagging and locating run last, so events found this pass get done this pass.
-  // 6. Pages waiting for AI: no recipe yet, or one that stopped reading the page well.
-  if (!control.stopped()) await runAiQueue(state, ctx);
-
-  // 7. Date formats not confirmed yet (or due for a re-check), and schedules written as prose.
-  if (!control.stopped() && aiReady('dates')) await checkDates(state, ctx, report);
-
-  // 8. Tag events the rules couldn't place, with the cheap model; its answers become rules.
-  if (!control.stopped() && aiReady('tag')) await tagUncertainEvents(state, today, report);
+  if (!aiDone) report.phase('Waiting for AI', 'the AI queue, dates and tags');
+  await aiSteps;
 
   // 9. Coordinates for upcoming events (cached per place; OpenStreetMap lookups for new places).
   //    Events already known to be abroad go first, so no lookup is spent on them.

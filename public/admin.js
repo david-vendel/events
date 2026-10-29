@@ -855,9 +855,12 @@ const HELP = {
       <li><b>AI discovery</b>: every 6 hours, one AI web search for new event sites, aimed at the town and kind of event
         we cover worst (see the Coverage tab).</li>
       <li><b>Sitemaps</b>: up to 4 sites that have events get their sitemap read, to find event pages no listing links to.</li>
-      <li><b>Explore</b>: the queue of links found so far, best-scoring first, 200 pages at a time.</li>
-      <li><b>AI queue</b>, <b>check dates</b>, <b>tag</b> and <b>locate</b> the events found, then back to step 1.</li>
-    </ol>`,
+      <li><b>Explore</b>: the queue of links found so far, best-scoring first, up to the pages a pass (Settings).
+        While the AI steps are still busy it starts another round instead of waiting.</li>
+      <li><b>Locate</b> the events found, then back to step 1.</li>
+    </ol>
+    <p>Alongside steps 1–5, not after them: the <b>AI queue</b>, <b>check dates</b> and <b>tag</b>, for what earlier passes
+      found. So pages keep being fetched while AI works.</p>`,
   concurrency: `<p><b>What:</b> how many pages are fetched at the same time (1–50, default 5).</p>
     <p><b>How:</b> a pool of workers; each takes the next page as soon as it's free. Changing it takes effect within half a
       second, even in the middle of a step.</p>
