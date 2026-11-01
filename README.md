@@ -271,6 +271,9 @@ stored event towards its pages' templates and hosts, drops the city of 49 multi-
 
 The website lists upcoming events by day, or shows them on a **map** (List / Map at the top;
 `?view=map` opens the map directly). Both use the same filters: dates, search, **town** and kind of event.
+In the list, today's events that are over sit folded in "Ended earlier today" above the list (open
+on click): over means past their end time, or 2 hours after they (or the day's last showing) began;
+one without a time, or going on after today, isn't.
 Picking a town shows its events **and those within 25 km of it** (by the event's coordinates, or its
 town's centre; `RADIUS_KM` in [public/events.js](public/events.js)). The list offers the towns that
 have events of their own, most first, each with the number picking it shows ("Pezinok +25 km (1 564)"

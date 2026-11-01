@@ -163,6 +163,10 @@ input[type=search] { flex: 1 1 200px; padding: 9px 12px; border: 1px solid var(-
 .chips button { border: 0; background: var(--chip); padding: 8px 12px; border-radius: 999px; }
 .chips button[aria-pressed=true] { background: var(--text); color: var(--bg); }
 h4.day { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 24px 0 8px; }
+details.past { margin: 16px 0 0; font-size: 13px; }
+details.past summary { cursor: pointer; color: var(--muted); width: max-content; }
+details.past[open] summary { margin-bottom: 8px; }
+details.past .event { opacity: .7; }
 h5.running { font-size: 12px; font-weight: 500; color: var(--muted); margin: 16px 0 6px; }
 .event { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
   margin-bottom: 8px; display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 12px; }

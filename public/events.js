@@ -154,6 +154,21 @@ function rangeBounds() {
 }
 
 const weekday = new Intl.DateTimeFormat('sk-SK', { weekday: 'short' });
+// Has an event on today's list (d) ended? By its end time, or 2 hours after it (or the day's last
+// showing) started. One without a time (all day, an exhibition) or going on past today hasn't.
+const ENDS_AFTER_MIN = 120;
+const minutes = (t) => { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+function endedToday(e, d) {
+  if ((e.end || e.start) > d) return false;
+  const day = e.schedule?.find((x) => x.date === d);
+  const [t, end] = day?.time ? [day.time, day.endTime] : [e.time, e.endTime];
+  const starts = [t, ...(e.showings?.[d] || []).flatMap((s) => s.times)].map(minutes).filter((m) => m !== null);
+  if (!starts.length) return false;
+  const last = Math.max(...starts);
+  const endsAt = minutes(end) !== null && minutes(end) > last ? minutes(end) : last + ENDS_AFTER_MIN;
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes() >= endsAt;
+}
 // Start (and end) time on day d: that day's own hours when the event has a per-day schedule.
 function timeCell(e, d) {
   const day = e.schedule?.find((x) => x.date === d);
@@ -220,9 +235,10 @@ function renderEvents() {
     const running = all.filter((e) => e.start < d).sort((a, b) => (a.end || a.start).localeCompare(b.end || b.start) || byTime(a, b));
     return [...all.filter((e) => e.start >= d).sort(byTime), ...running];
   };
-  $('#list').innerHTML = days.length ? days.map((d) => `
-    <h4 class="day">${esc(dayLabel(d))}</h4>
-    ${ordered(d).map((e, i, list) => `
+  // Today's events that are over go into a small "Ended earlier today" fold above the list.
+  const today = ymd(new Date());
+  const ended = byDay.has(today) ? ordered(today).filter((e) => endedToday(e, today)) : [];
+  const cards = (d, list) => list.map((e, i) => `
       ${e.start < d && !(list[i - 1]?.start < d) ? '<h5 class="running">Still running</h5>' : ''}
       <article class="event">
         ${timeCell(e, d)}
@@ -240,8 +256,18 @@ function renderEvents() {
             ${moreBtn('desc', e, 'Show more')}` : ''}
           ${sourcesTable(e)}
         </div>
-      </article>`).join('')}`).join('')
+      </article>`).join('');
+  const past = ended.length ? `<details class="past" ${opened.has('past') ? 'open' : ''}>
+      <summary>Ended earlier today (${fmtCount(ended.length)})</summary>${cards(today, ended)}</details>` : '';
+  const rest = days.map((d) => [d, d === today ? ordered(d).filter((e) => !ended.includes(e)) : ordered(d)])
+    .filter(([, list]) => list.length);
+  $('#list').innerHTML = days.length
+    ? past + rest.map(([d, list]) => `<h4 class="day">${esc(dayLabel(d))}</h4>${cards(d, list)}`).join('')
     : '<p class="empty">No events found for this filter yet.</p>';
+  $('#list .past')?.addEventListener('toggle', (ev) => {
+    if (ev.target.open) opened.add('past'); else opened.delete('past');
+    fitDescs(); // descriptions inside were measured while hidden
+  });
   fitDescs();
 }
 
