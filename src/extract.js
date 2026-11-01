@@ -260,6 +260,17 @@ export function isSocial(url) {
 }
 
 /**
+ * A page that is never a list of events, from its address alone: logins and carts, terms, privacy,
+ * contacts, galleries, jobs, shops and press pages ("…/vseobecne-obchodne-podmienky", "…/shop").
+ */
+export function boringUrl(url) {
+  let u;
+  try { u = new URL(url); } catch { return true; }
+  if (/login|signin|register|cart|kosik|wp-admin|secret=|token=|api\/|live-preview|\/tag\/|\/author\/|print=|share=|mailto:|cdn-cgi|\/(prihlasenie|registracia|cookies?|gdpr|ochrana-osobnych-udajov|privacy|kontakt|contact)(\/|$)/i.test(url)) return true;
+  return /\/((vseobecne-)?obchodn[eiy]-podmienky|(vseobecne-)?obchodni-podminky|vop|reklamac\w*|kontakty?|o-nas|about(-us)?|kariera|jobs?|faq|galeri[ae]|fotogaleri[ae]|gallery|cennik|pravidla|zasady-\w+-osobnych-udajov|ochrana-sukromia|e-?shop|shop|obchod|produkty?|products?|press|tlacove-spravy)(\/|\.html?|$)/i.test(u.pathname);
+}
+
+/**
  * Priority for exploring a link, from the link alone: higher = more likely to lead to upcoming
  * events in Slovakia (links to other countries' sites and towns rank low). (What the crawler has learned about the link's template and host is added
  * when it picks from the frontier; see learn.js.)
@@ -268,9 +279,7 @@ export function scoreLink(url, anchorText) {
   let u;
   try { u = new URL(url); } catch { return -1; }
   if (!/^https?:$/.test(u.protocol) || SKIP_EXT.test(u.pathname) || SKIP_HOSTS.test(u.hostname)) return -1;
-  if (/login|signin|register|cart|kosik|wp-admin|secret=|token=|api\/|live-preview|\/tag\/|\/author\/|print=|share=|mailto:|cdn-cgi|\/(prihlasenie|registracia|cookies?|gdpr|ochrana-osobnych-udajov|privacy|kontakt|contact)(\/|$)/i.test(url)) return -1;
-  // Terms, contacts, galleries, jobs…: never a list of events.
-  if (/\/(obchodn[eiy]-podmienky|obchodni-podminky|vop|reklamac\w*|kontakty?|o-nas|about(-us)?|kariera|jobs?|faq|galeri[ae]|fotogaleri[ae]|gallery|cennik|pravidla)(\/|\.html?|$)/i.test(u.pathname)) return -1;
+  if (boringUrl(url)) return -1;
   // Calendar exports, feeds, and e-mail addresses written as links: never a page to read.
   if (/[?&](ical|outlook-ical|ics)=|\/(feed|rss|ical)\/?$|@/i.test(u.pathname + u.search)) return -1;
   let path;

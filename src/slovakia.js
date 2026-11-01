@@ -327,3 +327,20 @@ export function slovakWords(text) {
 export function czechWords(text) {
   return ((text || '').match(/[ěřů]/gi) || []).length >= 2;
 }
+
+// Letters only Slovak and Czech write (č, š and ž are Latvian, Lithuanian, Croatian… too).
+const SK_CZ_LETTERS = /[ľĺŕťďňěřůĽĹŔŤĎŇĚŘŮ]/g;
+
+/**
+ * Could this page be about events in Slovakia at all? A Slovak domain or address, a page in Slovak
+ * (or Czech: Czech sites sell tickets for Slovak events), or one naming Slovakia or a Slovak town. The cheap
+ * check before any AI looks at a page: "capitalone.com" or an Apache project's docs are not.
+ */
+export function slovakPage({ url, lang, text }) {
+  let host;
+  try { host = new URL(url).hostname; } catch { return false; }
+  if (/\.sk$/.test(host) || /^(sk|cs)\b/i.test(lang || '') || countryInUrl(url) === 'sk') return true;
+  const sample = (text || '').slice(0, 6000);
+  const folded = fold(sample);
+  return (sample.match(SK_CZ_LETTERS) || []).length >= 3 || /slova[kc]|slowak|slovensk/.test(folded) || namesSkTown(folded);
+}

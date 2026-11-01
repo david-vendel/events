@@ -182,7 +182,9 @@ function joinRuns(state) {
     evs.sort((a, b) => a.start.localeCompare(b.start));
     let run = evs[0];
     for (const ev of evs.slice(1)) {
-      if (dateDistance(run, ev) > 1) { run = ev; continue; }
+      // Rows back to back, as splitUnrelated groups them: not the events' spans, which the event's
+      // own page can stretch (a weekly class's schedule) over days its listing doesn't give.
+      if (!rowsConnect(run, ev)) { run = ev; continue; }
       for (const s of ev.sources) if (!run.sources.some((r) => rowKey(r) === rowKey(s))) run.sources.push(s);
       run.aliases = [...new Set([...(run.aliases || []), ev.id, ...(ev.aliases || [])])];
       if (ev.firstSeenAt < run.firstSeenAt) run.firstSeenAt = ev.firstSeenAt;

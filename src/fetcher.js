@@ -14,6 +14,22 @@ const robotsCache = new Map(); // origin -> { rules: disallowed path prefixes, s
 export const sha1 = (s) => crypto.createHash('sha1').update(s).digest('hex');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// undici (Node's fetch) has a bug: a server closing the socket while a response body sits unread
+// and paused fails assert(!this.paused) in a socket 'end' handler, outside any promise, which would
+// end the whole process. Unread bodies are cancelled below so it rarely happens; when it still
+// does, only that one request is lost (fetchBody's deadline gives up on it), not the process.
+process.on('uncaughtException', (err) => {
+  if (err?.code === 'ERR_ASSERTION' && /undici/.test(err.stack || '') && /paused/.test(err.message || '')) {
+    console.error(`Ignored undici bug: ${err.message.split('\n').find((l) => /assert/.test(l))?.trim()}`);
+    return;
+  }
+  console.error(err);
+  process.exit(1);
+});
+
+// A body we don't read is cancelled, so the connection is released instead of left paused.
+const skip = (res, value = null) => { res.body?.cancel().catch(() => {}); return value; };
+
 // fetch() plus reading its body, given up after ms no matter what. AbortSignal.timeout alone
 // is not enough: a wedged connection once left a page fetch pending for days, and the Run with it.
 async function fetchBody(url, opts, ms, read) {
@@ -41,7 +57,7 @@ async function robots(origin) {
   try {
     await politeWait(new URL(origin).host);
     const text = await fetchBody(`${origin}/robots.txt`, { headers: { 'User-Agent': USER_AGENT } }, TIMEOUT_MS,
-      (res) => (res.ok ? res.text() : ''));
+      (res) => (res.ok ? res.text() : skip(res, '')));
     let applies = false;
     for (const raw of text.split('\n')) {
       const line = raw.replace(/#.*/, '').trim();
@@ -74,7 +90,7 @@ export async function fetchText(url, maxBytes = 30_000_000) {
   await politeWait(u.host);
   try {
     const res = await fetchBody(url, { headers: { 'User-Agent': USER_AGENT }, redirect: 'follow' }, TIMEOUT_MS * 2,
-      async (r) => Object.assign(r, { buf: r.ok ? Buffer.from(await r.arrayBuffer()) : null }));
+      async (r) => Object.assign(r, { buf: r.ok ? Buffer.from(await r.arrayBuffer()) : skip(r) }));
     if (!res.ok) return { status: res.status, error: res.statusText || `HTTP ${res.status}` };
     let buf = res.buf;
     if (buf[0] === 0x1f && buf[1] === 0x8b) buf = zlib.gunzipSync(buf, { maxOutputLength: maxBytes });
@@ -116,7 +132,7 @@ export async function fetchPage(url, cache = {}, { ignoreRobots = false } = {}) 
   try {
     // The body only for pages we read: 200s that are HTML.
     res = await fetchBody(url, { headers, redirect: 'follow' }, TIMEOUT_MS, async (r) => Object.assign(r, {
-      buf: r.ok && /html|xml/i.test(r.headers.get('content-type') || '') ? Buffer.from(await r.arrayBuffer()) : null,
+      buf: r.ok && /html|xml/i.test(r.headers.get('content-type') || '') ? Buffer.from(await r.arrayBuffer()) : skip(r),
     }));
   } catch (err) {
     return { status: 0, error: err.cause?.code || err.message };

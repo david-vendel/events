@@ -18,7 +18,7 @@ import dns from 'node:dns/promises';
 import * as cheerio from 'cheerio';
 import { fetchPage } from './fetcher.js';
 import {
-  PARSER_VERSION, applyRecipe, clean, extractLinks, makeEvent, isArchiveUrl, isSocial, eventOnEvents, jsonLdEvents, pageSignals, pageText,
+  PARSER_VERSION, applyRecipe, boringUrl, clean, extractLinks, makeEvent, isArchiveUrl, isSocial, eventOnEvents, jsonLdEvents, pageSignals, pageText,
   partialStructured, scoreLink, scriptCalendar,
   simplifyHtml,
 } from './extract.js';
@@ -30,7 +30,7 @@ import {
 import { aiJobDone, aiJobFailed, aiJobPostponed, aiJobsDue, enqueueAi } from './aiqueue.js';
 import { eventTags, headingTags, learnTags } from './tags.js';
 import { eventCountry, locateEvents, repairSiteCities } from './geo.js';
-import { SK_PLACES, isTown, regionOf, slovakVariants } from './slovakia.js';
+import { SK_PLACES, isTown, regionOf, slovakPage, slovakVariants } from './slovakia.js';
 import { EventIndex, migrate } from './events.js';
 import { dueForVerification, verifyEvent } from './corroborate.js';
 import { defaultControl, runPool } from './pool.js';
@@ -463,6 +463,7 @@ async function readPage(state, url, ctx, job) {
   const listing = source.pages[url];
   const wentDown = noteFetch(state, url, res);
   if (wentDown) report.log(`${hostOf(url)} is down (${res.status || ''} ${res.error}): its pages wait until ${new Date(wentDown).toISOString().slice(11, 16)} UTC`);
+  if (aiJob && res.error) aiJob.error = res.error; // why the queue's try didn't get to AI
   if (res.error && serverTrouble(res)) {
     // The site's server is in trouble, not this page: as if not visited; back in the queue for later.
     health.errors++;
@@ -577,7 +578,11 @@ async function readPage(state, url, ctx, job) {
     // (A site retired for its events abroad: only its pages about Slovakia, "/d/slovakia--kosice/".)
     && (source.kind !== 'irrelevant' || (source.outside && regionAt(state, url) === 'sk'))
     // Pages like this one list events abroad: not worth a look, nor a recipe.
-    && regionAt(state, url) !== 'abroad';
+    && regionAt(state, url) !== 'abroad'
+    // Pages nobody vouches for are shown to AI only if they could be about Slovakia at all (a
+    // Slovak domain or language, Slovakia or a Slovak town named) and aren't terms, shops, press…
+    && (ctx.seeds.has(url) || Boolean(listing) || (!boringUrl(url)
+      && slovakPage({ url: res.url, lang: $('html').attr('lang'), text: pageText($, 6000, calendar?.root) })));
   const viaQueue = forAi;
   if (aiWorthy && !viaQueue) {
     const repair = Boolean(listing?.recipe);
@@ -1022,6 +1027,8 @@ function pruneEvents(state, today) {
  * that no longer needs AI (its template got a recipe meanwhile) just leaves the queue.
  */
 async function runAiQueue(state, ctx, report = ctx.control.report) {
+  // Terms, shops, press pages… queued before boringUrl() knew them: never worth a look.
+  for (const j of Object.values(state.aiQueue || {})) if (!j.repair && !ctx.seeds.has(j.url) && boringUrl(j.url)) aiJobDone(state, j.url);
   const due = aiJobsDue(state);
   if (!due.length || !aiAvailable('analyze')) return;
   if (!aiReady('analyze')) {
@@ -1059,9 +1066,9 @@ async function learnFromQueue(state, ctx, j) {
   } finally {
     ctx.aiJobs.delete(j.url);
   }
-  const { worthy, answer } = aiJob;
+  const { worthy, answer, error } = aiJob;
   if (worthy === false || answer === 'ok') aiJobDone(state, j.url); // read, or no longer needs AI
-  else if (!answer) aiJobFailed(state, j.url, worthy ? 'skipped' : 'page could not be read');
+  else if (!answer) aiJobFailed(state, j.url, worthy ? 'skipped' : `page could not be read${error ? ` (${error})` : ''}`);
   else if (isLimitError(answer)) aiJobPostponed(state, j.url, aiPausedUntil() || Date.now() + 3600e3);
   else aiJobFailed(state, j.url, answer);
 }
