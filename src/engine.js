@@ -355,14 +355,12 @@ export class Engine {
         upcoming: Object.values(s.events).filter((e) => (e.end || e.start) >= today).length,
         located: Object.values(s.events).filter((e) => (e.end || e.start) >= today && e.place).length,
         tagRules: activeRuleCount(s.tagRules),
-        templates: Object.keys(s.patterns || {}).length,
-        recipes: Object.values(s.patterns || {}).filter((p) => p.recipe).length,
+        ...this.tableCounts(),
         events: Object.keys(s.events).length,
         sources: sources.filter((x) => x.kind === 'events').length,
         irrelevant: sources.filter((x) => x.kind === 'irrelevant').length,
         sites: sources.length,
         queue: Object.keys(s.frontier).length,
-        pagesKnown: Object.keys(s.pages).length,
         social: Object.keys(s.social).length,
       },
       unknownCountry: this.unknownCountry(today),
@@ -412,18 +410,36 @@ export class Engine {
       .slice(0, limit);
   }
 
+  /** Templates, those with a recipe, and pages known (SQLite counts, refreshed at most once a minute). */
+  tableCounts() {
+    if (!this.counted || Date.now() - this.counted.at > 60_000) {
+      const s = this.state;
+      this.counted = {
+        at: Date.now(),
+        templates: s.patterns.count(),
+        recipes: s.patterns.query("SELECT count(*) AS n FROM patterns WHERE json_extract(data, '$.recipe') IS NOT NULL")[0].n,
+        pagesKnown: s.pages.count(),
+      };
+    }
+    const { at, ...counts } = this.counted;
+    return counts;
+  }
+
   /**
    * Page templates (learn.js) with what the crawler learned about each: visits, how many had
    * upcoming events, new events, AI verdict, recipe, and how much that moves their links' score.
    */
   patterns(limit = 400) {
-    const list = Object.entries(this.state.patterns || {})
+    // All templates read once (linkBonus looks at coarse ones too), without filling the records cache.
+    const all = new Map(this.state.patterns.query('SELECT key, data FROM patterns').map(({ key, data }) => [key, JSON.parse(data)]));
+    const view = { ...this.state, patterns: { get: (k) => all.get(k) } };
+    const list = [...all]
       .filter(([key]) => !key.includes('/…')) // the coarse ones are a fallback, not worth a row
       .map(([key, p]) => ({
         key, visits: p.visits, withEvents: p.withEvents, events: p.events, added: p.added, lastAt: p.lastAt,
         example: p.example, aiAt: p.aiAt, aiSaid: p.aiSaid, recipe: Boolean(p.recipe), recipeFrom: p.recipeFrom,
         sk: p.sk, abroad: p.abroad,
-        effect: p.example ? Math.round(linkBonus(this.state, p.example, patternKeys(p.example)) * 10) / 10 : 0,
+        effect: p.example ? Math.round(linkBonus(view, p.example, patternKeys(p.example)) * 10) / 10 : 0,
       }));
     const wasted = list.filter((p) => !p.withEvents).reduce((t, p) => t + p.visits, 0);
     const visits = list.reduce((t, p) => t + p.visits, 0);
@@ -473,7 +489,7 @@ export class Engine {
       });
     }
     for (const [host, n] of Object.entries(runVisits)) row(host).runVisits = n;
-    for (const url of Object.keys(s.pages)) { const h = hostOf(url); if (h) row(h).pages++; }
+    for (const { host, n } of s.pages.query('SELECT host, count(*) AS n FROM pages WHERE host IS NOT NULL GROUP BY host')) row(host).pages += n;
     for (const url of Object.keys(s.frontier)) { const h = hostOf(url); if (h) row(h).queued++; }
     for (const src of Object.values(s.sources)) {
       const r = hosts[hostOf(src.origin)];

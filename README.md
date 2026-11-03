@@ -94,7 +94,7 @@ to 30 AI calls, so every step keeps getting its turn; AI use overall is held bac
 Pages of one site built from one template share a URL shape ([src/urls.js](src/urls.js)):
 `kamdomesta.sk/kosice/*`, `kosicak.sk/clanky/#/*`, `sfk.sk/sk/podujatia/*?page`. Numbers become `#`,
 dates `D`, slugs `*`; short words stay. A rougher shape (host, first segment, depth) covers sites
-whose ids look like words. For every template, `data/patterns.json` counts visits, visits that found
+whose ids look like words. For every template, the `patterns` table counts visits, visits that found
 **upcoming** events (a page of past events is an archive, not a source) and new events
 ([src/learn.js](src/learn.js)). That is used three ways:
 
@@ -225,7 +225,7 @@ good sources. Now only events in Slovakia are kept ([src/slovakia.js](src/slovak
 
 The crawler learns **where each kind of page has its events**: every page template and every host
 counts the events it gave that are known to be in Slovakia (`sk`) and abroad (`abroad`) in
-`patterns.json` and `hosts.json`. With 3 or more known, a template or host is *Slovakia* (over 85 % in
+the `patterns` table and `hosts.json`. With 3 or more known, a template or host is *Slovakia* (over 85 % in
 Slovakia), *abroad* (under 15 %) or *mixed*; the exact template's verdict counts first, then the
 rougher template's, then the host's (`regionAt` in [src/learn.js](src/learn.js)). Before all of
 them, a page of a site outside `.sk` whose address names a country or a town abroad is that
@@ -385,18 +385,22 @@ starting state before anything is saved in the panel.
 
 ### Data
 
-All state is JSON files in `data/` (gitignored). [src/store.js](src/store.js) is the only code that
-reads or writes them, so moving to a database later means changing that one file.
+All state is in `data/` (gitignored): JSON files, and the two biggest collections in SQLite
+(`data/crawler.db`, tables `pages` and `patterns`). They were JSON files too, held in memory, until
+they had half a million records each and filled the heap. [src/store.js](src/store.js) loads and saves
+the JSON files; [src/records.js](src/records.js) keeps the SQLite records in use in memory and writes
+changes back on each save. On the first start, existing `pages.json` / `patterns.json` are imported and
+renamed to `*.json.imported`.
 
 | file | contents |
 |---|---|
 | `sources.json` | known websites: kind, summary, listing pages and their recipes, schedule, stats |
 | `events.json` | events, each with its list of sources and the date each source gives |
 | `frontier.json` | links waiting to be explored, with scores |
-| `pages.json` | HTTP cache info per URL (ETag, Last-Modified, text hash) |
+| `crawler.db` → `pages` | per visited URL: when, HTTP cache info (ETag, Last-Modified, text hash; trimmed a day later on pages that gave nothing), failures |
 | `social.json` | Facebook/Instagram/etc. links found while crawling, saved for later |
 | `dateFormats.json` | date text shapes: samples, how each is read (built-in / AI rule), last AI check |
-| `patterns.json` | page templates: visits, visits with events, new events, events in Slovakia / abroad, AI verdict, shared recipe |
+| `crawler.db` → `patterns` | page templates: visits, visits with events, new events, events in Slovakia / abroad, AI verdict, shared recipe |
 | `sitemaps.json` | per site: when its sitemap was last read and what it gave |
 | `hosts.json` | per host: visits, errors, events, new events, events in Slovakia / abroad (site-level learning, failure pauses) |
 | `ai.json` | every AI call: model, tokens, cost, duration, what it returned |

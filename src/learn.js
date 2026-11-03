@@ -22,7 +22,7 @@ export const patternKeys = (url) => [urlPattern(url), coarsePattern(url)];
 /** The exact template's record (recipe, AI verdict, counts), created if missing. */
 export function templateOf(state, url) {
   const key = urlPattern(url);
-  return key ? (state.patterns[key] ??= blank()) : blank();
+  return key ? state.patterns.ensure(key, blank) : blank();
 }
 
 /**
@@ -32,7 +32,7 @@ export function templateOf(state, url) {
 export function notePatternVisit(state, url, { events = 0, added = 0, sk = 0, abroad = 0 } = {}, at = new Date().toISOString()) {
   for (const key of new Set(patternKeys(url))) {
     if (!key) continue;
-    const p = (state.patterns[key] ??= blank());
+    const p = state.patterns.ensure(key, blank);
     p.visits++;
     if (sk) p.sk = (p.sk || 0) + sk;
     if (abroad) p.abroad = (p.abroad || 0) + abroad;
@@ -82,26 +82,28 @@ const PRUNE_TEMPLATES_AFTER = 2 * 864e5;
 /**
  * Forget templates seen fewer than MIN_VISITS times that found nothing and taught nothing else,
  * once their last visit is 2 days old. Most templates are like that (one article, one profile…),
- * they were most of patterns.json, and below MIN_VISITS linkBonus() relies on the coarse
+ * they were most of the patterns table, and below MIN_VISITS linkBonus() relies on the coarse
  * template anyway. Returns how many were dropped.
  */
 export function prunePatterns(state, now = Date.now()) {
   const before = new Date(now - PRUNE_TEMPLATES_AFTER).toISOString();
-  let n = 0;
-  for (const [k, p] of Object.entries(state.patterns)) {
+  const drop = [];
+  const rows = state.patterns.query(`SELECT key, data FROM patterns
+    WHERE json_extract(data, '$.visits') < ? AND json_extract(data, '$.lastAt') < ?`, MIN_VISITS, before);
+  for (const { key: k, data } of rows) {
+    const p = JSON.parse(data);
     if (p.visits >= MIN_VISITS || !(p.lastAt < before) || KEEP_FIELDS.some((f) => p[f])) continue;
-    delete state.patterns[k];
-    n++;
+    drop.push(k);
   }
-  // The recipe index (recipeIndex) is keyed by this object and stays valid: no template with a
-  // recipe is ever dropped.
-  return n;
+  for (const k of drop) state.patterns.delete(k);
+  // The recipe index (recipeIndex) stays valid: no template with a recipe is ever dropped.
+  return drop.length;
 }
 
 /** Count events found abroad (or in Slovakia) on a page after it was read: its templates and host. */
 export function noteCountry(state, url, { sk = 0, abroad = 0 }) {
   const h = state.hosts[hostOf(url)];
-  for (const rec of [...new Set(patternKeys(url))].filter(Boolean).map((k) => state.patterns[k]).concat(h)) {
+  for (const rec of [...new Set(patternKeys(url))].filter(Boolean).map((k) => state.patterns.get(k)).concat(h)) {
     if (!rec) continue;
     if (sk) rec.sk = (rec.sk || 0) + sk;
     if (abroad) rec.abroad = (rec.abroad || 0) + abroad;
@@ -118,7 +120,7 @@ export function noteCountry(state, url, { sk = 0, abroad = 0 }) {
 export function regionAt(state, url, keys = patternKeys(url), host = hostOf(url)) {
   const inUrl = !host?.endsWith('.sk') && countryInUrl(url);
   if (inUrl) return inUrl;
-  for (const rec of [state.patterns[keys[0]], state.patterns[keys[1]], state.hosts[host]]) {
+  for (const rec of [state.patterns.get(keys[0]), state.patterns.get(keys[1]), state.hosts[host]]) {
     const r = regionOf(rec);
     if (r) return r;
   }
@@ -150,7 +152,7 @@ export function unknownIsAbroad(state, url) {
  */
 export function linkBonus(state, url, keys = patternKeys(url), host = hostOf(url)) {
   if (regionAt(state, url, keys, host) === 'abroad') return ABROAD_PENALTY;
-  const fine = state.patterns[keys[0]], coarse = state.patterns[keys[1]];
+  const fine = state.patterns.get(keys[0]), coarse = state.patterns.get(keys[1]);
   const p = fine?.visits >= MIN_VISITS ? fine : coarse?.visits >= MIN_VISITS ? coarse : fine || coarse;
   const t = p?.visits ? yieldScore(p) * (p.visits >= MIN_VISITS ? 1 : 0.5) : 0;
   return t + hostBonus(state.hosts[host]);
@@ -170,7 +172,7 @@ export function siblingRecipes(state, url, limit = 3) {
   const depth = key.split('/').length;
   const out = [];
   for (const k of recipeIndex(state).get(host) || []) {
-    const p = state.patterns[k];
+    const p = state.patterns.get(k);
     if (p?.recipe && k !== key && k.split('/').length === depth) out.push([k, p]);
   }
   return out
@@ -186,7 +188,7 @@ function recipeIndex(state) {
   let index = recipeIndexes.get(state.patterns);
   if (!index) {
     index = new Map();
-    for (const [k, p] of Object.entries(state.patterns)) if (p.recipe) addToIndex(index, k);
+    for (const { key } of state.patterns.query("SELECT key FROM patterns WHERE json_extract(data, '$.recipe') IS NOT NULL")) addToIndex(index, key);
     recipeIndexes.set(state.patterns, index);
   }
   return index;
@@ -207,7 +209,7 @@ export function noteRecipe(state, url) {
 
 /** Has this template (or, for odd ids, its coarse template) produced events? Used for sitemaps. */
 export function productiveTemplate(state, url) {
-  const [fine, coarse] = patternKeys(url).map((k) => state.patterns[k]);
+  const [fine, coarse] = patternKeys(url).map((k) => state.patterns.get(k));
   return fine?.withEvents > 0 || (coarse?.withEvents >= 2 && coarse.withEvents / coarse.visits >= 0.2);
 }
 
@@ -239,7 +241,7 @@ export function bootstrapPatterns(state, before) {
     }
   }
   let pages = 0;
-  for (const [url, p] of Object.entries(state.pages)) {
+  for (const [url, p] of state.pages.entries()) {
     if (!p.visitedAt || p.visitedAt >= before) continue;
     // Every stored event was new when it was first read.
     const events = p.error ? 0 : found.get(urlKey(url)) || 0;

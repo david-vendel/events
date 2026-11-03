@@ -94,8 +94,8 @@ function sourceFor(state, url) {
 
 // ---------------------------------------------------------------- what we've seen / queued
 
-// Per state object: urlKey -> page record (visited pages) and urlKey -> frontier URL (queued),
-// so http/https, www and trailing-slash variants of one page count as the same page.
+// Per state object: urlKey -> frontier URL (queued), so http/https, www and trailing-slash variants
+// of one page count as the same page. (Visited pages are found by urlKey in the database: seenPage.)
 const indexes = new WeakMap();
 
 function idx(state) {
@@ -103,12 +103,8 @@ function idx(state) {
   if (ix) return ix;
   // keys: queued url -> its page templates; parsed: queued url -> { key: urlKey, host } (pickFromFrontier
   // looks at every queued link for every page it picks; parsing each URL again each time was most of its work)
-  ix = { seen: new Map(), queued: new Map(), keys: new Map(), parsed: new Map() };
+  ix = { queued: new Map(), keys: new Map(), parsed: new Map() };
   indexes.set(state, ix);
-  for (const [url, rec] of Object.entries(state.pages)) {
-    ix.seen.set(urlKey(url), rec);
-    if (rec.finalUrl) ix.seen.set(urlKey(rec.finalUrl), rec);
-  }
   // Rebuild the queue once: merge duplicate URLs and drop pages visited recently. Links queued
   // before the current scoreLink() are scored again from their URL (their anchor text is gone).
   const frontier = {};
@@ -128,9 +124,23 @@ function idx(state) {
   return ix;
 }
 
+/**
+ * The stored record of this page, under any of its URL variants (urlKey) or as where another URL
+ * redirected: the one visited last.
+ */
+function seenPage(state, url) {
+  const k = urlKey(url);
+  let best;
+  for (const u of new Set([...state.pages.keysWhere('ukey', k), ...state.pages.keysWhere('fkey', k)])) {
+    const rec = state.pages.get(u);
+    if (rec && (!best || (rec.visitedAt || rec.fetchedAt || '') > (best.visitedAt || best.fetchedAt || ''))) best = rec;
+  }
+  return best;
+}
+
 /** Visited (or tried and failed) recently enough that exploring it again is a waste. */
 function visitedRecently(state, url) {
-  const rec = idx(state).seen.get(urlKey(url));
+  const rec = seenPage(state, url);
   const at = Date.parse(rec?.visitedAt || rec?.fetchedAt);
   if (!at) return false;
   const wait = rec.error
@@ -355,7 +365,7 @@ async function online() {
 
 // A visit that failed only because we were offline: as if it never happened.
 function forgetVisit(state, url, host) {
-  const p = state.pages[url];
+  const p = state.pages.get(url);
   if (p) for (const k of ['visitedAt', 'error', 'failures']) delete p[k];
   const h = state.hosts[host];
   if (h) {
@@ -431,7 +441,7 @@ async function visit(state, url, ctx, phase) {
     h.crashes++;
     h.lastCrash = { url, at: iso(Date.now()), error: String(err.stack || err).split('\n').slice(0, 4).join('\n') };
     if (h.crashes <= 3) report.log(`CRAWLER BUG while reading ${url}: ${err.stack || err}`);
-    const cache = state.pages[url];
+    const cache = state.pages.get(url);
     if (cache) { delete cache.visitedAt; delete cache.hash; }
     if (h.crashes >= CRASHES_BEFORE_GIVING_UP && h.crashes > h.read && ctx.budget.pages > 0) {
       ctx.budget.pages = 0; // don't burn the whole queue on a bug
@@ -456,12 +466,10 @@ async function visit(state, url, ctx, phase) {
 async function readPage(state, url, ctx, job) {
   const report = ctx.control.report;
   const health = ctx.health;
-  const { seen } = idx(state);
-  const cache = (state.pages[url] ??= {});
+  const cache = state.pages.ensure(url);
   // Mark the visit before fetching, so links found meanwhile by other workers don't re-queue it,
   // and so failed fetches are remembered too.
   cache.visitedAt = iso(Date.now());
-  seen.set(urlKey(url), cache);
   dequeue(state, url);
   ctx.budget.pages--;
   ctx.used.pages++;
@@ -475,7 +483,7 @@ async function readPage(state, url, ctx, job) {
   if (res.url && urlKey(res.url) !== urlKey(url)) {
     // Redirected: the target is the same page, so it counts as visited too.
     cache.finalUrl = res.url;
-    seen.set(urlKey(res.url), cache);
+    state.pages.touchColumns(url); // findable under the new address at once (seenPage)
     dequeue(state, res.url);
   }
   if (res.error) {
@@ -921,7 +929,8 @@ function repairUnreadVisits(state, report) {
   state.meta.repairs ??= [];
   if (state.meta.repairs.includes(CRASH_REPAIR.id)) return;
   let n = 0;
-  for (const [url, p] of Object.entries(state.pages)) {
+  for (const url of [...state.pages.keys()]) {
+    const p = state.pages.get(url);
     if (!p.visitedAt || p.visitedAt < CRASH_REPAIR.from || p.readAt || p.error) continue;
     for (const k of ['visitedAt', 'hash', 'etag', 'lastModified']) delete p[k];
     const score = scoreLink(url, '');
@@ -940,7 +949,8 @@ function repairOfflineVisits(state, report) {
   state.meta.repairs ??= [];
   if (state.meta.repairs.includes(OFFLINE_REPAIR.id)) return;
   let n = 0;
-  for (const [url, p] of Object.entries(state.pages)) {
+  for (const url of [...state.pages.keys()]) {
+    const p = state.pages.get(url);
     if (p.error !== 'ENOTFOUND' || !(p.visitedAt >= OFFLINE_REPAIR.from && p.visitedAt <= OFFLINE_REPAIR.to)) continue;
     forgetVisit(state, url, hostOf(url));
     const score = scoreLink(url, '');
@@ -1047,8 +1057,8 @@ function queueTownWebs(state, report) {
 
 // Page records only need their visit date for visitedRecently() (and failures for the retry wait).
 // Pages that gave no events, aren't a source's listing and aren't waiting for AI keep only that
-// after a day: their hash, etag and fetch times were most of pages.json, which grows by up to
-// 100k pages a day, all held in memory. Such a page read again in a month is fetched and read
+// after a day: their hash, etag and fetch times were most of the table, which grows by up to
+// 100k pages a day. Such a page read again in a month is fetched and read
 // whole instead of maybe "unchanged". Records past the longest revisit wait go entirely.
 const COMPACT_PAGES_AFTER = DAY;
 const DROP_PAGES_AFTER = REVISIT_EXPLORED_AFTER + 5 * DAY;
@@ -1060,28 +1070,32 @@ function prunePages(state, now = Date.now()) {
   for (const src of Object.values(state.sources)) for (const u of Object.keys(src.pages || {})) keep.add(urlKey(u));
   for (const u of Object.keys(state.aiQueue || {})) keep.add(urlKey(u));
   const compactBefore = iso(now - COMPACT_PAGES_AFTER), dropBefore = iso(now - DROP_PAGES_AFTER);
-  const { seen } = idx(state);
   let compacted = 0, dropped = 0;
-  for (const url in state.pages) {
-    const p = state.pages[url];
+  const drop = [], slim = []; // decided while reading the table, done after
+  // Only rows that could need work: older than a day and still carrying bulky fields, or past the
+  // drop age (SQLite picks them out; parsing all half a million rows held the event loop for seconds).
+  const rows = state.pages.query(`SELECT key, data FROM pages
+    WHERE coalesce(json_extract(data, '$.visitedAt'), json_extract(data, '$.fetchedAt')) < ?
+      AND (${BULKY_PAGE_FIELDS.map((f) => `instr(data, '"${f}":') > 0`).join(' OR ')}
+        OR coalesce(json_extract(data, '$.visitedAt'), json_extract(data, '$.fetchedAt')) < ?)`, compactBefore, dropBefore);
+  for (const { key: url, data } of rows) {
+    const p = JSON.parse(data);
     const at = p.visitedAt || p.fetchedAt;
     if (!at || at >= compactBefore) continue;
     const old = at < dropBefore;
     if (!old && !BULKY_PAGE_FIELDS.some((k) => k in p)) continue; // trimmed already: skip cheaply
     if (keep.has(urlKey(url)) || (p.finalUrl && keep.has(urlKey(p.finalUrl)))) continue;
-    if (old) {
-      delete state.pages[url];
-      if (seen.get(urlKey(url)) === p) seen.delete(urlKey(url));
-      if (p.finalUrl && seen.get(urlKey(p.finalUrl)) === p) seen.delete(urlKey(p.finalUrl));
-      dropped++;
-      continue;
-    }
-    // A new small record rather than deleting fields: V8 turns an object that loses fields into a
-    // slower, bigger dictionary, which undid most of the saving.
-    const slim = { visitedAt: at };
-    for (const k of ['error', 'failures', 'finalUrl']) if (p[k] !== undefined) slim[k] = p[k];
-    state.pages[url] = slim;
-    for (const u of [url, p.finalUrl]) if (u && seen.get(urlKey(u)) === p) seen.set(urlKey(u), slim);
+    if (old) { drop.push(url); continue; }
+    const small = { visitedAt: at };
+    for (const k of ['error', 'failures', 'finalUrl']) if (p[k] !== undefined) small[k] = p[k];
+    slim.push([url, small]);
+  }
+  for (const url of drop) { state.pages.delete(url); dropped++; }
+  for (const [url, small] of slim) {
+    // In use right now (read again since): leave it for the next pass.
+    const cur = state.pages.get(url);
+    if (cur && (cur.visitedAt || cur.fetchedAt) !== small.visitedAt) continue;
+    state.pages.set(url, small);
     compacted++;
   }
   return { compacted, dropped };
@@ -1153,7 +1167,6 @@ export async function crawlPass(state, options = {}, control = defaultControl())
   migrate(state);
   useDateFormats((state.dateFormats ??= {})); // learned date formats, filled as pages are read
   setAiConfig(state.settings?.ai); // AI switches and models from the admin panel
-  state.patterns ??= {};
   state.sitemaps ??= {};
   // Pages of events we already have (their own pages, not the listing they came from).
   const eventPages = new Set();
@@ -1187,7 +1200,7 @@ export async function crawlPass(state, options = {}, control = defaultControl())
   repairUnreadVisits(state, report);
   repairOfflineVisits(state, report);
   bootstrapCountries(state, report);
-  if (!Object.keys(state.patterns).length) {
+  if (!state.patterns.count()) {
     const n = bootstrapPatterns(state, CRASH_REPAIR.from);
     report.log(`Page templates: learned from ${n} earlier visits which kinds of pages hold events`);
   }
