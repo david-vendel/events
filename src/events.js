@@ -137,10 +137,27 @@ function joinDuplicates(state, today) {
   const evs = Object.values(state.events).filter((e) => (e.end || e.start) >= today && e.start)
     .sort((a, b) => a.start.localeCompare(b.start));
   const plus3 = (d) => new Date(Date.parse(d) + 3 * 864e5).toISOString().slice(0, 10);
+  // Only events whose titles share a word can match (titleMatch scores shared words), so each event
+  // is compared with those, not with every event in its date window: a months-long exhibition has
+  // thousands, and comparing them all held the server up for a minute and a half every pass.
+  const byWord = new Map(); // title word -> indexes into evs, ascending
+  evs.forEach((ev, i) => {
+    for (const w of matchWords(ev.title)) {
+      const list = byWord.get(w);
+      if (list) list.push(i); else byWord.set(w, [i]);
+    }
+  });
   const pairs = [];
   for (let i = 0; i < evs.length; i++) {
-    const a = evs[i], last = plus3(a.end || a.start), sitesA = listingSitesOf(a), townA = townOf(state, a);
-    for (let j = i + 1; j < evs.length && evs[j].start <= last; j++) {
+    const a = evs[i], last = plus3(a.end || a.start);
+    const near = new Set();
+    for (const w of matchWords(a.title)) {
+      const list = byWord.get(w);
+      for (let k = firstAfter(list, i); k < list.length && evs[list[k]].start <= last; k++) near.add(list[k]);
+    }
+    if (!near.size) continue;
+    const sitesA = listingSitesOf(a), townA = townOf(state, a);
+    for (const j of [...near].sort((x, y) => x - y)) { // in the order the full scan met them
       const b = evs[j];
       const score = sameEventScore(a, b);
       if (!score) continue;
@@ -164,6 +181,29 @@ function joinDuplicates(state, today) {
   }
   if (joined) console.log(`  ⇄ joined ${joined} events that other sites list too`);
   return joined;
+}
+
+/**
+ * Every word titleMatch could find two titles sharing: the title's words, and those of each part
+ * after a colon (a series' items are compared by what follows "Series name:").
+ */
+function matchWords(title) {
+  title ||= '';
+  const words = new Set(titleTokens(title));
+  for (let i = title.indexOf(':'); i >= 0; i = title.indexOf(':', i + 1)) {
+    for (const w of titleTokens(title.slice(i + 1))) words.add(w);
+  }
+  return words;
+}
+
+/** Position of the first entry greater than i in an ascending list. */
+function firstAfter(list, i) {
+  let lo = 0, hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (list[mid] <= i) lo = mid + 1; else hi = mid;
+  }
+  return lo;
 }
 
 /**

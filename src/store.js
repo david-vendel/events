@@ -18,7 +18,8 @@ export function load(name, fallback = {}) {
 export function save(name, value) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const file = path.join(DATA_DIR, `${name}.json`);
-  fs.writeFileSync(`${file}.tmp`, JSON.stringify(value, null, 2));
+  // Compact: the big collections are 100+ MB; indenting made them a third bigger and slower to write.
+  fs.writeFileSync(`${file}.tmp`, JSON.stringify(value));
   fs.renameSync(`${file}.tmp`, file);
 }
 
@@ -74,5 +75,21 @@ function hostsFromSources(sources) {
 }
 
 export function saveState(state) {
-  for (const [name, value] of Object.entries(state)) save(name, value);
+  for (const name of saveOrder(state)) save(name, state[name]);
 }
+
+/**
+ * The same, one collection at a time with a break between them, so the server answers requests
+ * while the crawler's state is written (all of it at once held the event loop for seconds).
+ */
+export async function saveStateGently(state) {
+  for (const name of saveOrder(state)) {
+    save(name, state[name]);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+// Events before the page cache: after a crash between the two, a page whose new events weren't
+// saved is still read again (its stored hash is the old one), not skipped as unchanged.
+const LAST = ['pages', 'patterns'];
+const saveOrder = (state) => [...Object.keys(state).filter((k) => !LAST.includes(k)), ...LAST.filter((k) => k in state)];

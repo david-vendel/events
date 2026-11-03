@@ -1,6 +1,6 @@
 // Runs the crawler inside the server so the admin panel can watch and control it:
 // one continuous Run (Run/Stop), parallel workers, and a live record of what's happening.
-import { loadState, saveState } from './store.js';
+import { loadState, saveState, saveStateGently } from './store.js';
 import { crawlPass } from './crawler.js';
 import {
   AI_JOBS, AI_MODELS, aiAvailable, aiConfig, aiInput, aiPausedUntil, aiStatus, lastPlanUsage, planUsage, setAiConfig, setAiParallel, setAiRecorder,
@@ -78,7 +78,7 @@ const OFFLINE_CHECK_MS = 60e3; // …without a network
 const MAX_RECENT = 300;
 const fmtTokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 const MAX_AI_LOG = 5000;
-const SAVE_EVERY_MS = 15000;
+const SAVE_EVERY_MS = 60e3; // writing the state is heavy (hundreds of MB of JSON); on exit it's saved too
 
 // Pass health (crawler.js) added up: counts summed, the latest crawler bug kept.
 function sumHealth(a, b) {
@@ -119,7 +119,7 @@ export class Engine {
       const u = rec.usage;
       this.message(`AI ${rec.kind}: ${rec.target} — ${rec.error || `${fmtTokens(u.input + u.cacheRead + u.cacheWrite + u.output)} tokens, ${(rec.ms / 1000).toFixed(1)} s`}`);
     });
-    setInterval(() => this.save(), SAVE_EVERY_MS).unref();
+    setInterval(() => this.saveSoon(), SAVE_EVERY_MS).unref();
     planUsage().catch(() => {}); // your Claude plan's usage, for the AI tab
     if (this.state.meta.run) this.start(this.state.meta.run); // a Run carries on after a restart
   }
@@ -197,7 +197,7 @@ export class Engine {
     }
     setAiParallel(this.settings.aiParallel);
     this.dirty = true;
-    this.save();
+    this.saveSoon();
   }
 
   async loop() {
@@ -236,7 +236,7 @@ export class Engine {
         else if (idle && !ctx.control.stopped()) wait = { reason: 'nothing to crawl right now', ms: IDLE_CHECK_MS };
       }
       this.dirty = true;
-      this.save();
+      this.saveSoon();
       planUsage({ refresh: true }).catch(() => {});
     }
     this.running = false;
@@ -294,10 +294,26 @@ export class Engine {
     if (this.log.length > 100) this.log.length = 100;
   }
 
+  /** Write the state now, all at once (on exit). */
   save() {
     if (!this.dirty) return;
     this.dirty = false;
     saveState(this.state);
+  }
+
+  /** Write the state, yielding between files so requests are served meanwhile; one save at a time. */
+  async saveSoon() {
+    if (!this.dirty || this.saving) return;
+    this.dirty = false;
+    this.saving = true;
+    try {
+      await saveStateGently(this.state);
+    } catch (err) {
+      this.dirty = true;
+      this.message(`saving failed: ${err.message}`);
+    } finally {
+      this.saving = false;
+    }
   }
 
   // ---------------------------------------------------------------- views for the API

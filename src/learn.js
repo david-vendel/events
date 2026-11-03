@@ -136,16 +136,49 @@ export function linkBonus(state, url, keys = patternKeys(url), host = hostOf(url
  * Recipes of other templates on the same host and at the same depth, best first: a site usually
  * builds "kamdomesta.sk/kosice/koncerty" and "kamdomesta.sk/bratislava/vystavy" from one layout, so
  * a recipe written for one often reads the other, and the AI isn't needed again.
+ * Called for every page read, so it looks only at the host's templates that had a recipe
+ * (recipeIndex), not at all of state.patterns (hundreds of thousands).
  */
 export function siblingRecipes(state, url, limit = 3) {
   const key = urlPattern(url);
+  if (!key) return [];
   const host = key.slice(0, key.indexOf('/'));
   const depth = key.split('/').length;
-  return Object.entries(state.patterns)
-    .filter(([k, p]) => p.recipe && k !== key && k.startsWith(`${host}/`) && k.split('/').length === depth)
+  const out = [];
+  for (const k of recipeIndex(state).get(host) || []) {
+    const p = state.patterns[k];
+    if (p?.recipe && k !== key && k.split('/').length === depth) out.push([k, p]);
+  }
+  return out
     .sort((a, b) => b[1].events - a[1].events)
     .slice(0, limit)
     .map(([k, p]) => ({ key: k, recipe: p.recipe }));
+}
+
+// state.patterns -> host -> keys of templates that have (or had: a removed recipe is skipped when
+// read) a recipe. Built on first use; noteRecipe() adds templates that get one later.
+const recipeIndexes = new WeakMap();
+function recipeIndex(state) {
+  let index = recipeIndexes.get(state.patterns);
+  if (!index) {
+    index = new Map();
+    for (const [k, p] of Object.entries(state.patterns)) if (p.recipe) addToIndex(index, k);
+    recipeIndexes.set(state.patterns, index);
+  }
+  return index;
+}
+function addToIndex(index, key) {
+  const host = key.slice(0, key.indexOf('/'));
+  let keys = index.get(host);
+  if (!keys) index.set(host, (keys = new Set()));
+  keys.add(key);
+}
+
+/** Tell siblingRecipes that the template of this URL now has a recipe. */
+export function noteRecipe(state, url) {
+  const key = urlPattern(url);
+  const index = recipeIndexes.get(state.patterns);
+  if (key && index) addToIndex(index, key);
 }
 
 /** Has this template (or, for odd ids, its coarse template) produced events? Used for sitemaps. */

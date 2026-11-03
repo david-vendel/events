@@ -36,7 +36,7 @@ import { dueForVerification, verifyEvent } from './corroborate.js';
 import { defaultControl, runPool } from './pool.js';
 import { hostOf, normalizeUrl, urlKey, urlPattern } from './urls.js';
 import {
-  MAX_BONUS, bootstrapPatterns, hostCap, linkBonus, noteCountry, notePatternVisit, patternKeys, regionAt, siblingRecipes, siteAbroad, templateOf, unknownIsAbroad,
+  MAX_BONUS, bootstrapPatterns, hostCap, linkBonus, noteCountry, notePatternVisit, patternKeys, regionAt, noteRecipe, siblingRecipes, siteAbroad, templateOf, unknownIsAbroad,
 } from './learn.js';
 import { readSitemaps, sitemapsDue } from './sitemaps.js';
 import { downUntil, noteFetch, serverTrouble } from './hosthealth.js';
@@ -100,7 +100,9 @@ const indexes = new WeakMap();
 function idx(state) {
   let ix = indexes.get(state);
   if (ix) return ix;
-  ix = { seen: new Map(), queued: new Map(), keys: new Map() }; // keys: url -> its page templates
+  // keys: queued url -> its page templates; parsed: queued url -> { key: urlKey, host } (pickFromFrontier
+  // looks at every queued link for every page it picks; parsing each URL again each time was most of its work)
+  ix = { seen: new Map(), queued: new Map(), keys: new Map(), parsed: new Map() };
   indexes.set(state, ix);
   for (const [url, rec] of Object.entries(state.pages)) {
     ix.seen.set(urlKey(url), rec);
@@ -153,8 +155,30 @@ function queue(state, url, entry) {
 function dequeue(state, url) {
   const { queued } = idx(state);
   const key = urlKey(url);
-  delete state.frontier[queued.get(key) ?? url];
+  const queuedUrl = queued.get(key) ?? url;
+  delete state.frontier[queuedUrl];
   queued.delete(key);
+  forgetParsed(state, queuedUrl);
+  if (queuedUrl !== url) forgetParsed(state, url);
+}
+
+/** A queued link's urlKey and hostname (null hostname: not a valid URL), parsed once. */
+function parsedLink(state, url) {
+  const { parsed } = idx(state);
+  let p = parsed.get(url);
+  if (!p) {
+    let host = null;
+    try { host = new URL(url).hostname; } catch { /* invalid */ }
+    parsed.set(url, (p = { key: host === null ? url : urlKey(url), host }));
+  }
+  return p;
+}
+
+// Links that left the queue: drop what was cached about them.
+function forgetParsed(state, url) {
+  const ix = idx(state);
+  ix.parsed.delete(url);
+  ix.keys.delete(url);
 }
 
 /**
@@ -205,6 +229,7 @@ function trimFrontier(state) {
   const worth = new Map(entries.map(([url, f]) => [url, effectiveScore(state, url, f)]));
   entries.sort((a, b) => worth.get(b[0]) - worth.get(a[0]));
   state.frontier = Object.fromEntries(entries.slice(0, MAX_FRONTIER));
+  for (const [url] of entries.slice(MAX_FRONTIER)) forgetParsed(state, url);
   idx(state).queued = new Map(Object.keys(state.frontier).map((u) => [urlKey(u), u]));
 }
 
@@ -259,9 +284,10 @@ function pickFromFrontier(state, hostCounts, busyHosts, eventPages) {
   const caps = new Map();
   for (const [url, f] of Object.entries(state.frontier)) {
     if (f.score + MAX_BONUS + 4 <= bestKey) continue; // can't win
-    if (eventPages.has(urlKey(url))) { dequeue(state, url); continue; } // verification re-reads those
-    let fullHost;
-    try { fullHost = new URL(url).hostname; } catch { dequeue(state, url); continue; }
+    const link = parsedLink(state, url);
+    if (eventPages.has(link.key)) { dequeue(state, url); continue; } // verification re-reads those
+    const fullHost = link.host;
+    if (fullHost === null) { dequeue(state, url); continue; }
     const host = fullHost.replace(/^www\./, ''); // www.x.sk and x.sk are one site for the per-site cap
     if (busyHosts.has(host) || hostPaused(state, fullHost) || downUntil(state, url)) continue;
     let cap = caps.get(host);
@@ -545,6 +571,7 @@ async function readPage(state, url, ctx, job) {
       const found = applyRecipe($, sib.recipe, res.url);
       if (!found.length) continue;
       Object.assign(tpl, { recipe: sib.recipe, recipeFrom: sib.key });
+      noteRecipe(state, url);
       events.push(...found);
       how = partial ? 'json-ld + template recipe' : 'template recipe';
       break;
@@ -749,6 +776,7 @@ function learnFromAnalysis(state, source, url, a, $, pageUrl, events, report, tp
       listing.recipeStats = recipeStats(found);
       // Other pages built from the same template ("…/podujatia/<any event>") get the same recipe.
       tpl.recipe = a.recipe;
+      noteRecipe(state, url);
       tpl.tags = listing.tags;
       events.push(...found);
       said.push(`recipe saved, finds ${found.length} events (later visits, and pages like ${urlPattern(url)}, need no AI)`);
