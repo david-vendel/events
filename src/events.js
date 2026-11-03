@@ -85,7 +85,12 @@ function syncFromPrimary(ev, rules) {
 
 /** Older data had no sources[] or tags; fill them in. Tags are recomputed as the rules improve. */
 export function migrate(state, today = new Date().toISOString().slice(0, 10)) {
-  useTitleWeights(Object.values(state.events).map((e) => e.title || e.sources?.[0]?.title || ''));
+  // Word weights from the distinct titles of all listing rows, not from the events' titles: those
+  // change when events are joined or split, which moved the weights enough to undo the join or
+  // split next pass ("VIDEO OLDIES PÁRTY" joined, split, joined… every pass, 1,700 events).
+  const titles = new Set();
+  for (const e of Object.values(state.events)) for (const r of e.sources || []) if (!r.linked && r.title) titles.add(r.title);
+  useTitleWeights([...titles]);
   // Sites judged "irrelevant" back when only Košice events counted get judged again.
   for (const s of Object.values(state.sources)) {
     if (s.kind === 'irrelevant' && !['any place', 'slovakia'].includes(s.judgedFor)) s.kind = 'unknown';
