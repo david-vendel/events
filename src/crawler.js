@@ -37,6 +37,7 @@ import { defaultControl, runPool } from './pool.js';
 import { hostOf, normalizeUrl, urlKey, urlPattern } from './urls.js';
 import {
   MAX_BONUS, bootstrapPatterns, hostCap, linkBonus, noteCountry, notePatternVisit, patternKeys, regionAt, noteRecipe, siblingRecipes, siteAbroad, templateOf, unknownIsAbroad,
+  prunePatterns,
 } from './learn.js';
 import { readSitemaps, sitemapsDue } from './sitemaps.js';
 import { downUntil, noteFetch, serverTrouble } from './hosthealth.js';
@@ -1044,6 +1045,48 @@ function queueTownWebs(state, report) {
   if (n) report.log(`Queued the websites of ${n} more Slovak towns and villages (${Object.keys(done).length} so far)`);
 }
 
+// Page records only need their visit date for visitedRecently() (and failures for the retry wait).
+// Pages that gave no events, aren't a source's listing and aren't waiting for AI keep only that
+// after a day: their hash, etag and fetch times were most of pages.json, which grows by up to
+// 100k pages a day, all held in memory. Such a page read again in a month is fetched and read
+// whole instead of maybe "unchanged". Records past the longest revisit wait go entirely.
+const COMPACT_PAGES_AFTER = DAY;
+const DROP_PAGES_AFTER = REVISIT_EXPLORED_AFTER + 5 * DAY;
+const BULKY_PAGE_FIELDS = ['hash', 'etag', 'lastModified', 'readAt', 'fetchedAt', 'status'];
+
+function prunePages(state, now = Date.now()) {
+  const keep = new Set(); // urlKeys of pages events came from, source listings and AI jobs
+  for (const ev of Object.values(state.events)) for (const s of ev.sources || []) if (s.via) keep.add(urlKey(s.via));
+  for (const src of Object.values(state.sources)) for (const u of Object.keys(src.pages || {})) keep.add(urlKey(u));
+  for (const u of Object.keys(state.aiQueue || {})) keep.add(urlKey(u));
+  const compactBefore = iso(now - COMPACT_PAGES_AFTER), dropBefore = iso(now - DROP_PAGES_AFTER);
+  const { seen } = idx(state);
+  let compacted = 0, dropped = 0;
+  for (const url in state.pages) {
+    const p = state.pages[url];
+    const at = p.visitedAt || p.fetchedAt;
+    if (!at || at >= compactBefore) continue;
+    const old = at < dropBefore;
+    if (!old && !BULKY_PAGE_FIELDS.some((k) => k in p)) continue; // trimmed already: skip cheaply
+    if (keep.has(urlKey(url)) || (p.finalUrl && keep.has(urlKey(p.finalUrl)))) continue;
+    if (old) {
+      delete state.pages[url];
+      if (seen.get(urlKey(url)) === p) seen.delete(urlKey(url));
+      if (p.finalUrl && seen.get(urlKey(p.finalUrl)) === p) seen.delete(urlKey(p.finalUrl));
+      dropped++;
+      continue;
+    }
+    // A new small record rather than deleting fields: V8 turns an object that loses fields into a
+    // slower, bigger dictionary, which undid most of the saving.
+    const slim = { visitedAt: at };
+    for (const k of ['error', 'failures', 'finalUrl']) if (p[k] !== undefined) slim[k] = p[k];
+    state.pages[url] = slim;
+    for (const u of [url, p.finalUrl]) if (u && seen.get(urlKey(u)) === p) seen.set(urlKey(u), slim);
+    compacted++;
+  }
+  return { compacted, dropped };
+}
+
 function pruneEvents(state, today) {
   const cutoff = new Date(Date.parse(today) - 14 * DAY).toISOString().slice(0, 10);
   for (const [id, ev] of Object.entries(state.events)) if ((ev.end || ev.start) < cutoff) delete state.events[id];
@@ -1312,6 +1355,9 @@ export async function crawlPass(state, options = {}, control = defaultControl())
   if (gone) report.log(`Dropped ${fmtN(gone)} events outside Slovakia`);
 
   pruneEvents(state, today);
+  const pp = prunePages(state);
+  const pt = prunePatterns(state);
+  if (pp.compacted || pp.dropped || pt) report.log(`Memory: trimmed ${fmtN(pp.compacted)} page records, forgot ${fmtN(pp.dropped)} old pages and ${fmtN(pt)} one-off templates`);
   trimFrontier(state);
   return ctx;
 }

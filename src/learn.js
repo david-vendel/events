@@ -74,6 +74,30 @@ export function hostBonus(h) {
   return read >= 6 ? -Math.min(5, 1 + Math.floor(read / 8)) : 0;
 }
 
+// A template record worth keeping although it was seen only once or twice: anything learned
+// besides the counts (events found, a recipe, the AI's verdict, a region…).
+const KEEP_FIELDS = ['withEvents', 'recipe', 'recipeFrom', 'aiAt', 'aiSaid', 'sk', 'abroad', 'structured', 'tags', 'noRecipe'];
+const PRUNE_TEMPLATES_AFTER = 2 * 864e5;
+
+/**
+ * Forget templates seen fewer than MIN_VISITS times that found nothing and taught nothing else,
+ * once their last visit is 2 days old. Most templates are like that (one article, one profile…),
+ * they were most of patterns.json, and below MIN_VISITS linkBonus() relies on the coarse
+ * template anyway. Returns how many were dropped.
+ */
+export function prunePatterns(state, now = Date.now()) {
+  const before = new Date(now - PRUNE_TEMPLATES_AFTER).toISOString();
+  let n = 0;
+  for (const [k, p] of Object.entries(state.patterns)) {
+    if (p.visits >= MIN_VISITS || !(p.lastAt < before) || KEEP_FIELDS.some((f) => p[f])) continue;
+    delete state.patterns[k];
+    n++;
+  }
+  // The recipe index (recipeIndex) is keyed by this object and stays valid: no template with a
+  // recipe is ever dropped.
+  return n;
+}
+
 /** Count events found abroad (or in Slovakia) on a page after it was read: its templates and host. */
 export function noteCountry(state, url, { sk = 0, abroad = 0 }) {
   const h = state.hosts[hostOf(url)];
