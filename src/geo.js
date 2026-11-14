@@ -12,6 +12,7 @@
 // cached. Set a venue's status to "manual" in data/venues.json to pin coordinates by hand.
 // EVENTS_GEOCODER=off disables lookups. A location that is just a Slovak town or village needs no
 // lookup: its coordinates come from the list of municipalities (slovakia.js).
+import { fetchBody } from './fetcher.js';
 import { regionAt } from './learn.js';
 import { hostOf } from './urls.js';
 import {
@@ -137,6 +138,19 @@ function townIn(text) {
  * Poprad": a tour) has no single place: { multi: [towns] }.
  */
 export function parseLocation(text, cityHint) {
+  // The same strings come up again and again (every event, every source row, every pass and every
+  // build of the public list): kept, since splitting them was a good part of building that list.
+  const key = `${text || ''}\u0000${cityHint || ''}`;
+  let p = parsed.get(key);
+  if (!p) {
+    if (parsed.size >= 100_000) parsed.clear();
+    parsed.set(key, (p = Object.freeze(splitLocation(text, cityHint))));
+  }
+  return p;
+}
+const parsed = new Map();
+
+function splitLocation(text, cityHint) {
   // A country on its own ("…, Slovensko", "…, Czechia") is no part of the address.
   const parts = (text || '').split(/\s*[,|;]\s*/).map((p) => p.trim()).filter((p) => p && !countryPart(p));
   let name, street, postcode, city, district;
@@ -216,13 +230,17 @@ async function nominatim(params) {
   const url = `${NOMINATIM}?${new URLSearchParams({
     format: 'jsonv2', limit: '1', 'accept-language': 'sk,en', addressdetails: '1', ...params,
   })}`;
-  const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(15000) });
-  if (res.status === 429 || res.status === 403) {
-    pausedUntil = Date.now() + PAUSE_MS;
-    throw new Error(`OpenStreetMap HTTP ${res.status}: too many requests, pausing lookups for an hour`);
-  }
-  if (!res.ok) throw new Error(`Nominatim HTTP ${res.status}`);
-  const [hit] = await res.json();
+  // A hard deadline (fetcher.js): with AbortSignal.timeout alone, one lookup stayed pending for two
+  // days (10 Nov 2026) and held the Run in "Locating events" with it.
+  const [hit] = await fetchBody(url, { headers: { 'User-Agent': USER_AGENT } }, 15000, (res) => {
+    if (!res.ok) res.body?.cancel().catch(() => {}); // release the connection
+    if (res.status === 429 || res.status === 403) {
+      pausedUntil = Date.now() + PAUSE_MS;
+      throw new Error(`OpenStreetMap HTTP ${res.status}: too many requests, pausing lookups for an hour`);
+    }
+    if (!res.ok) throw new Error(`Nominatim HTTP ${res.status}`);
+    return res.json();
+  });
   return hit ? {
     lat: Number(hit.lat), lon: Number(hit.lon), label: hit.display_name, osm: `${hit.osm_type}/${hit.osm_id}`,
     country: hit.address?.country_code,

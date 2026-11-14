@@ -1,6 +1,6 @@
 // Runs the crawler inside the server so the admin panel can watch and control it:
 // one continuous Run (Run/Stop), parallel workers, and a live record of what's happening.
-import { loadState, saveState, saveStateGently } from './store.js';
+import { DATA_DIR, loadState, saveState, saveStateGently } from './store.js';
 import { crawlPass } from './crawler.js';
 import {
   AI_JOBS, AI_MODELS, aiAvailable, aiConfig, aiInput, aiPausedUntil, aiStatus, lastPlanUsage, planUsage, setAiConfig, setAiParallel, setAiRecorder,
@@ -13,6 +13,7 @@ import { SK_PLACES, isTown, skPlace } from './slovakia.js';
 import { linkBonus, patternKeys } from './learn.js';
 import { coverageReport, discoveryEveryHours, discoveryTargets, searchResult } from './coverage.js';
 import { aiJobsDue } from './aiqueue.js';
+import { tableCounts } from './tablecounts.js';
 
 /**
  * Where and when an event is on, day by day, when that's more than one place or time (a film at two
@@ -28,17 +29,21 @@ function showings(state, e) {
     const day = (days[r.start] ??= new Map());
     // A location that's only the town names no venue.
     const name = (loc && parseLocation(loc).name) || '';
-    // Its own pin on the map, once the place is known.
-    const v = day.get(key) || { venue: name, times: new Set(), place: loc && placeFor(state, { location: loc, source: e.source }) };
+    const v = day.get(key) || { venue: name, times: new Set(), loc };
     if (name && (!v.venue || name.length < v.venue.length)) v.venue = name; // the shortest way the sites write it
     if (r.time) v.times.add(r.time);
     day.set(key, v);
   }
   const out = {};
   for (const [d, m] of Object.entries(days)) {
-    const list = [...m.values()].map((v) => ({ venue: v.venue, times: [...v.times].sort(),
-      ...(v.place && { place: { lat: v.place.lat, lon: v.place.lon, name: v.place.name, address: v.place.address, precision: v.place.precision } }) }));
-    if (list.length > 1 || list[0].times.length > 1) out[d] = list.sort((a, b) => (a.times[0] || '').localeCompare(b.times[0] || ''));
+    if (m.size === 1 && [...m.values()][0].times.size <= 1) continue; // one place, one time: nothing to show
+    // Its own pin on the map, once the place is known (looked up only here: it's the slow part).
+    const list = [...m.values()].map((v) => {
+      const place = v.loc && placeFor(state, { location: v.loc, source: e.source });
+      return { venue: v.venue, times: [...v.times].sort(),
+        ...(place && { place: { lat: place.lat, lon: place.lon, name: place.name, address: place.address, precision: place.precision } }) };
+    });
+    out[d] = list.sort((a, b) => (a.times[0] || '').localeCompare(b.times[0] || ''));
   }
   return Object.keys(out).length ? out : undefined;
 }
@@ -410,19 +415,9 @@ export class Engine {
       .slice(0, limit);
   }
 
-  /** Templates, those with a recipe, and pages known (SQLite counts, refreshed at most once a minute). */
+  /** Templates, those with a recipe, and pages known: SQLite counts, taken in a worker (tablecounts.js). */
   tableCounts() {
-    if (!this.counted || Date.now() - this.counted.at > 60_000) {
-      const s = this.state;
-      this.counted = {
-        at: Date.now(),
-        templates: s.patterns.count(),
-        recipes: s.patterns.query("SELECT count(*) AS n FROM patterns WHERE json_extract(data, '$.recipe') IS NOT NULL")[0].n,
-        pagesKnown: s.pages.count(),
-      };
-    }
-    const { at, ...counts } = this.counted;
-    return counts;
+    return tableCounts(DATA_DIR);
   }
 
   /**

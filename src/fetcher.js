@@ -32,7 +32,7 @@ const skip = (res, value = null) => { res.body?.cancel().catch(() => {}); return
 
 // fetch() plus reading its body, given up after ms no matter what. AbortSignal.timeout alone
 // is not enough: a wedged connection once left a page fetch pending for days, and the Run with it.
-async function fetchBody(url, opts, ms, read) {
+export async function fetchBody(url, opts, ms, read) {
   let timer;
   const timeout = new Promise((_, no) => { timer = setTimeout(() => no(new Error('timeout')), ms); });
   try {

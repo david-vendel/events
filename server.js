@@ -45,9 +45,22 @@ const PUBLIC = {
 };
 const PUBLIC_CACHE_MS = 30_000;
 const publicCache = new Map();
+// Once there is a copy, an old one is served at once and the new one built right after, so no
+// visitor waits for the build (the events list takes seconds with 55k events).
 function cachedJson(key, ms, build) {
   let c = publicCache.get(key);
-  if (!c || Date.now() - c.at > ms) publicCache.set(key, (c = { at: Date.now(), ...encode(build()) }));
+  if (!c) publicCache.set(key, (c = { at: Date.now(), ...encode(build()) }));
+  else if (Date.now() - c.at > ms && !c.rebuilding) {
+    c.rebuilding = true;
+    setTimeout(() => {
+      try {
+        publicCache.set(key, { at: Date.now(), ...encode(build()) });
+      } catch (err) {
+        c.rebuilding = false;
+        console.error(`building ${key} failed:`, err);
+      }
+    }, 0);
+  }
   return c;
 }
 
@@ -69,13 +82,20 @@ async function readBody(req) {
   try { return JSON.parse(body || '{}'); } catch { return {}; }
 }
 
-// Live status: one snapshot per second to every connected admin panel.
+// Live status: a snapshot to every connected admin panel, once a second, or less often when one
+// takes long: with 450k sites and 70k events a snapshot outlasted the second, and an open admin tab
+// kept the event loop busy for two days (Nov 2026), starving the crawler and the public site.
 const streams = new Set();
-setInterval(() => {
-  if (!streams.size) return;
-  const data = `data: ${JSON.stringify(engine.snapshot())}\n\n`;
-  for (const res of streams) res.write(data);
-}, 1000).unref();
+(function tick() {
+  let wait = 1000;
+  if (streams.size) {
+    const t0 = performance.now();
+    const data = `data: ${JSON.stringify(engine.snapshot())}\n\n`;
+    for (const res of streams) res.write(data);
+    wait = Math.max(1000, 5 * (performance.now() - t0)); // at most ~1/6 of the CPU
+  }
+  setTimeout(tick, wait).unref();
+}());
 
 // Admin API. Behind a proxy, only the PUBLIC and ro/ routes above should be reachable without a login.
 const routes = {
