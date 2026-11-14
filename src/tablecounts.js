@@ -20,6 +20,7 @@ if (!isMainThread && workerData?.tableCounts) {
         templates: n('SELECT count(*) AS n FROM patterns'),
         recipes: n("SELECT count(*) AS n FROM patterns WHERE json_extract(data, '$.recipe') IS NOT NULL"),
         pagesKnown: n('SELECT count(*) AS n FROM pages'),
+        social: n('SELECT count(*) AS n FROM social'),
       });
     } catch (err) {
       parentPort.postMessage({ error: err.message });
@@ -27,7 +28,7 @@ if (!isMainThread && workerData?.tableCounts) {
   });
 }
 
-let latest = {}; // { templates, recipes, pagesKnown } once counted
+let latest = {}; // { templates, recipes, pagesKnown, social } once counted
 let worker = null;
 let busy = false;
 let lastAt = 0;

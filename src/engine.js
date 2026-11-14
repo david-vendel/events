@@ -366,7 +366,6 @@ export class Engine {
         irrelevant: sources.filter((x) => x.kind === 'irrelevant').length,
         sites: sources.length,
         queue: Object.keys(s.frontier).length,
-        social: Object.keys(s.social).length,
       },
       unknownCountry: this.unknownCountry(today),
       ai: { ...ai, enabled: aiAvailable(), ...aiStatus(), jobs: this.aiJobs(today), models: AI_MODELS, byModel: this.aiByModel(), plan: lastPlanUsage(),

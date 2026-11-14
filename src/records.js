@@ -1,4 +1,4 @@
-// Big keyed collections (pages, patterns) kept in SQLite (data/crawler.db) instead of in memory.
+// Big keyed collections (pages, patterns, social) kept in SQLite (data/crawler.db) instead of in memory.
 // They held a record per page the crawler ever visited and per URL template it ever saw, half a
 // million each and ~100k more a day, and filled Node's heap.
 //
@@ -86,6 +86,13 @@ export class Records {
     this.live.set(key, { rec, at: Date.now(), json: null });
     if (Object.keys(this.columns).length) this.write(key, rec); // indexed columns are looked up at once
     return rec;
+  }
+
+  /** Store the record only if the key is new; it isn't kept in memory (for write-mostly tables). */
+  add(key, rec) {
+    if (this.live.has(key) || this.weak.has(key)) return;
+    this.q.add ??= this.db.prepare(`INSERT OR IGNORE INTO ${this.name} (key, data) VALUES (?, ?)`);
+    this.q.add.run(key, JSON.stringify(rec));
   }
 
   delete(key) {

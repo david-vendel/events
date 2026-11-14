@@ -37,8 +37,8 @@ export function loadState() {
     frontier: load('frontier'),
     // event id -> event
     events: load('events'),
-    // social-network profile/page URLs we noticed, for later handling
-    social: load('social'),
+    // social-network profile/page URLs we noticed, for later handling (in SQLite: a million of them)
+    social: openSocial(),
     // host -> visits, errors, events found (for spotting hosts that eat the crawl budget)
     hosts: load('hosts', null) ?? hostsFromSources(sources),
     // tag rules learned from the AI's verdicts: venue / listing page / title word -> tag counts
@@ -65,7 +65,7 @@ export function loadState() {
 // pages and patterns were JSON files (pages.json, patterns.json) until 2026-11-03: hundreds of
 // thousands of records each, all in memory. They live in data/crawler.db now; the first start
 // imports the old file and renames it to *.json.imported.
-let pages = null, patterns = null;
+let pages = null, patterns = null, social = null;
 function openPages() {
   // ukey / fkey: urlKey of the page and of where it redirected (crawler.js: seenPage); host: per-host counts
   pages ??= imported(new Records(openDb(DATA_DIR), 'pages', {
@@ -78,6 +78,11 @@ function openPages() {
 function openPatterns() {
   patterns ??= imported(new Records(openDb(DATA_DIR), 'patterns'), 'patterns');
   return patterns;
+}
+// social.json held ~1M links (777 MB of heap) that are only ever added to and counted (2026-11-14).
+function openSocial() {
+  social ??= imported(new Records(openDb(DATA_DIR), 'social'), 'social');
+  return social;
 }
 function imported(records, name) {
   const file = path.join(DATA_DIR, `${name}.json`);
@@ -122,5 +127,5 @@ export async function saveStateGently(state) {
 
 // Events before the page cache: after a crash between the two, a page whose new events weren't
 // saved is still read again (its stored hash is the old one), not skipped as unchanged.
-const LAST = ['pages', 'patterns'];
+const LAST = ['pages', 'patterns', 'social'];
 const saveOrder = (state) => [...Object.keys(state).filter((k) => !LAST.includes(k)), ...LAST.filter((k) => k in state)];

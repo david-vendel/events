@@ -855,7 +855,7 @@ function harvestLinks(state, links, source, pageUrl, ctx, eventsHere) {
   const pagePattern = urlPattern(pageUrl);
   for (const [href, text] of links) {
     if (isSocial(href)) {
-      state.social[href] ??= { foundOn: pageUrl, text, addedAt: iso(Date.now()) };
+      state.social.add(href, { foundOn: pageUrl, text, addedAt: iso(Date.now()) });
       continue;
     }
     // Pages of events we already have are re-read by verification, not by exploring.
