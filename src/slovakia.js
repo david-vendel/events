@@ -131,7 +131,7 @@ export function foreignTown(text) {
 export function countryPart(text) {
   const t = (text || '').trim();
   if (/^(SK|SVK)$/.test(t)) return 'sk';
-  if (/^(CZ|AT|HU|PL|DE|UA|UK|GB|US|USA|NL|BE|FR|IT|ES|CH|DK|SE|NO|IE|AU|NZ|CA)$/.test(t)) return 'abroad';
+  if (/^(CZ|ČR|AT|HU|PL|DE|UA|UK|GB|US|USA|NL|BE|FR|IT|ES|CH|DK|SE|NO|IE|AU|NZ|CA)$/.test(t)) return 'abroad';
   const f = bare(t);
   if (SLOVAKIA_RE.test(f) && f.split(' ').length <= 3 && !f.includes(',')) return SLOVAKIA_RE.exec(f)[0].trim() === f ? 'sk' : undefined;
   return COUNTRIES.includes(f) ? 'abroad' : undefined;
@@ -142,7 +142,8 @@ export function countryNamed(text) {
   const f = fold(text);
   if (!f) return undefined;
   if (SLOVAKIA_RE.test(f) || /\((sr|sk)\b/.test(f)) return 'sk';
-  return COUNTRY_RE.test(f) || /\((cz|cr|at|hu|pl|de|ua)\)/.test(f) ? 'abroad' : undefined;
+  // "ČR" (Česká republika) as a word of its own, anywhere: "ČR, Bílovec".
+  return COUNTRY_RE.test(f) || /\((cz|cr|at|hu|pl|de|ua)\)/.test(f) || /(^|[\s,(])ČR([\s,)]|$)/.test(text) ? 'abroad' : undefined;
 }
 
 // Letters Slovak never uses (Czech ě ř ů, German ß, Spanish ñ, Nordic å ø æ…; not the ö ü ő ű of

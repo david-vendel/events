@@ -17,14 +17,15 @@ import { regionAt } from './learn.js';
 import { hostOf } from './urls.js';
 import { languageOf } from './language.js';
 import {
-  SK_ALIASES, SK_TOWN_NAMES, boroughOf, countryCode, countryInUrl, countryNamed, countryPart, foreignTown, inSlovakia, isOnline, isTown, looksAbroad, skPlace, slovakWords, townOfPlace, uniqueName, usState,
+  SK_ALIASES, SK_PLACES, SK_TOWN_NAMES, boroughOf, countryCode, countryInUrl, countryNamed, countryPart, foreignTown, inSlovakia, isOnline,
+  isTown, locativeTown, looksAbroad, skPlace, slovakWords, townOfPlace, uniqueName, usState,
 } from './slovakia.js';
 
 const NOMINATIM = process.env.EVENTS_NOMINATIM_URL || 'https://nominatim.openstreetmap.org/search';
 const USER_AGENT = 'KosiceEventsBot/0.1 (+https://github.com/david-vendel/events)';
 const KOSICE = { lat: 48.7164, lon: 21.2611 };
 const RETRY_NOT_FOUND = 30 * 864e5;
-const MIN_GAP_MS = 1100;
+const MIN_GAP_MS = 1100; // EVENTS_NOMINATIM_GAP_MS overrides it (tests, a local Nominatim)
 
 export const geocoderEnabled = () => process.env.EVENTS_GEOCODER !== 'off';
 
@@ -58,6 +59,8 @@ const TOWN_NAMES = [
   'Liptovský Hrádok', 'Svit', 'Vrútky', 'Turany', 'Rajec', 'Kolárovo', 'Štúrovo', 'Hurbanovo', 'Želiezovce',
   'Šahy', 'Vráble', 'Šurany', 'Nesvady', 'Modra', 'Svätý Jur', 'Vrbové', 'Leopoldov', 'Trstená', 'Hriňová',
   'Poltár', 'Tornaľa', 'Hnúšťa', 'Dobšiná', 'Fiľakovo', 'Giraltovce', 'Lipany', 'Vysoké Tatry',
+  // Resorts that aren't municipalities but are where people say an event is ("Jasná" is also a word).
+  'Nový Smokovec', 'Tatranské Matliare', 'Podbanské', 'Ľubovnianske Kúpele', 'Tatranská Kotlina', 'Ždiar',
   'Praha', 'Brno', 'Ostrava', 'Olomouc', 'Budapest', 'Budapešť', 'Wien', 'Viedeň', 'Vienna', 'Kraków', 'Krakov',
   'Miskolc', 'Užhorod', 'Uzhhorod',
 ];
@@ -65,27 +68,35 @@ const TOWN_NAMES = [
 // a location ("…, Jasov"; see wholeTown), never inside a venue's name.
 // Their names in other languages ("Kassa", "Pressburg") count only as a whole part, like villages.
 const TOWNS = new Map([...TOWN_NAMES, ...SK_TOWN_NAMES].map((n) => [fold(n), n]));
-const ALIASES = new Set(SK_ALIASES.map(([a]) => fold(a)));
-for (const [a, name] of SK_ALIASES) TOWNS.set(fold(a), name);
+// Names slovakia.js leaves out of its aliases (they're words or places elsewhere too), but which a
+// whole part of a location means: adamis.sk writes Kolárovo in Hungarian, "AA VMK, Templom tér 4, Gúta".
+const MORE_ALIASES = [['Gúta', 'Kolárovo']];
+const ALIASES = new Set([...SK_ALIASES, ...MORE_ALIASES].map(([a]) => fold(a)));
+for (const [a, name] of [...SK_ALIASES, ...MORE_ALIASES]) TOWNS.set(fold(a), name);
 // The towns outside Slovakia, by country; lookups for a known town search only its country, so
 // "Športová hala, Martin" can't land in Martin County, Texas.
 const ABROAD = { cz: ['praha', 'brno', 'ostrava', 'olomouc'], hu: ['budapest', 'miskolc'], at: ['wien', 'vieden', 'vienna'],
   pl: ['krakow', 'krakov'], ua: ['uzhorod', 'uzhhorod'] };
 const COUNTRY = new Map(Object.entries(ABROAD).flatMap(([cc, towns]) => towns.map((t) => [t, cc])));
-// The country to look a town up in: its own; null for a town that isn't a Slovak municipality (look
-// anywhere: searching Slovakia first found "KINO Moskva" in Martin for Москва, a shop called "Boston"
-// in Senica for Boston, Nov 2026), unless the location reads as Slovak; undefined when there's no town
-// (Slovakia first, then anywhere).
+// The country to look a town up in: its own; null for a town abroad or a location that doesn't read as
+// Slovak (look anywhere: searching Slovakia first found "KINO Moskva" in Martin for Москва, a shop
+// called "Boston" in Senica for Boston, Nov 2026); 'any' for any other town that isn't a Slovak
+// municipality (anywhere first, then Slovakia, where a hamlet or a building merely named like it
+// doesn't count: "Polička" found Políčka by Piešťany, "Dubai" a building in Košice, "Rodina" a shop);
+// undefined when there's no town (Slovakia first, then anywhere).
 function countryOf(city, text = '') {
   if (!city) return undefined;
   if (COUNTRY.has(fold(city))) return COUNTRY.get(fold(city));
   const sk = skPlace(city);
   if (foreignTown(city) && !isTown(sk)) return null;
   if (sk || TOWNS.has(fold(city))) return 'sk';
-  return slovakLooking(text) ? undefined : null;
+  return slovakLooking(text) ? 'any' : null;
 }
-// Letters and words of Slovak (or Czech, which the Slovakia-first search and its checks sort out).
-const slovakLooking = (text) => /[áäčďéíĺľňóôŕšťúýž]/i.test(text) || slovakWords(text);
+// Words only Czech writes so (Slovak: divadelný, zámok, mlynská, ulica, námestie…), and "ČR".
+const CZECH_WORDS = /(^|[^\p{L}])(divadeln[íi]|z[áa]mek|zámku|ml[ýy]nsk[áa]|ulice|n[áa]m[ěe]st[íi]|kulturn[íi]|d[ůu]m|amfite[áa]tr|sokolovna|hrad[ěe]|kostel|knihovna|společensk[ýá]|městsk[ýáé]|ČR|Česko)(?=$|[^\p{L}])/iu;
+const czechLooking = (text) => CZECH_WORDS.test(text || '');
+// Letters and words of Slovak (not Czech: a location with Czech-only words is abroad).
+const slovakLooking = (text) => (/[áäčďéíĺľňóôŕšťúýž]/i.test(text) || slovakWords(text)) && !czechLooking(text);
 // One town's names in other languages, as OpenStreetMap may write it in an address ("Wien" → "Viedeň").
 const SAME_TOWN = [['wien', 'vieden', 'vienna'], ['krakow', 'krakov'], ['uzhorod', 'uzhhorod']];
 const townNames = (town) => SAME_TOWN.find((names) => names.includes(town)) || [town];
@@ -111,6 +122,7 @@ export const withoutTowns = (folded) => folded.replace(TOWN_RE, ' ').replace(TOW
 // is its city's district ("Petržalka" → Bratislava, Petržalka). A village is marked as one: two
 // villages in a location aren't a tour ("Bory Mall, Lozorno, Bory").
 function townNamed(name) {
+  name = name.replace(/^(obec|mesto)\s+(?=\p{Lu})/iu, ''); // "Obec Marianka", "Mesto Šamorín"
   const f = fold(name);
   const sk = skPlace(f);
   if (sk?.partOf) return { city: sk.partOf, district: sk.name };
@@ -160,14 +172,14 @@ const parsed = new Map();
 function splitLocation(text, cityHint) {
   // "Online", "ZOOM", "Virtual": no place at all (looked up, they found a tyre shop "Pneu Online" in
   // Košice and "Bistro Zoom" in Nové Zámky for thousands of American webinars, Nov 2026).
-  if (isOnline(text)) return { online: true };
+  if (onlineOnly(text)) return { online: true };
   // Eventbrite's "Town · Venue" ("Dallas · Johnny Cabron's", "Staré Mesto · KC Dunaj"): the venue,
   // then its town, so the town is the location's own and not the listing's (a Dallas bar was looked
   // up in Trnava, the town of eventbrite's "/d/slovakia--trnava/" that lists American events too).
   const dot = /^([^·,|;]+?)\s+·\s+(.+)$/.exec(text || '');
   if (dot) text = `${dot[2]}, ${dot[1]}`;
-  // A country on its own ("…, Slovensko", "…, Czechia") is no part of the address.
-  const parts = (text || '').split(/\s*[,|;]\s*/).map((p) => p.trim()).filter((p) => p && !countryPart(p));
+  // A country on its own ("…, Slovensko", "…, Czechia", "ČR") is no part of the address.
+  const parts = (text || '').split(/\s*[,|;]\s*/).map((p) => p.trim()).filter((p) => p && !countryPart(p) && !/^(ČR|CR|SR)$/i.test(p));
   let name, street, postcode, city, district;
   const rest = [];
   for (let p of parts) {
@@ -185,6 +197,14 @@ function splitLocation(text, cityHint) {
   const towns = [...new Set(whole.filter((t) => t && !t.village).map((t) => t.city))];
   if (towns.length >= 2 && !street) return { multi: towns };
   let at = whole.findIndex((t) => t && !t.village);
+  // A village, then the region's town last: "Trnovec nad Váhom, Trnovec nad Váhom, Nitra", "Kalná nad
+  // Hronom, Nitra", "HYGGE, Bojnická cesta 590,Kanianka, Trencin" are in the village (the town is the
+  // listing's region, 20–40 km off). Not a borough of that town, nor a lower-case word ("rybník, Levice").
+  if (at >= 0 && at === rest.length - 1) {
+    const v = whole.findIndex((t, i) => i < at && t?.village && /^\p{Lu}/u.test(rest[i].p)
+      && skPlace(t.city)?.partOf !== whole[at].city);
+    if (v >= 0) { rest.splice(at, 1); whole.splice(at, 1); at = v; } // the region's town is no venue either
+  }
   if (at < 0) at = whole.findIndex(Boolean);
   if (at < 0) { // "040 01 Staré Mesto": a borough, by the postcode
     at = rest.findIndex((r) => boroughOf(r.p, postcode));
@@ -195,27 +215,87 @@ function splitLocation(text, cityHint) {
     rest.splice(at, 1);
   } else {
     // Otherwise the city is the last plain part after the street (or the last part, when there's
-    // no street), unless that part is a venue that merely names its town ("Miestny úrad Košice").
-    const cityPart = [...rest].reverse().find((r) => r.afterStreet || !street);
-    // A Slovak town named inside another part, when the last part names none: "Štátna filharmónia
-    // Košice, Dom umenia" is in Košice, not in a town called "Dom umenia".
-    const inName = !street && !looksAbroad(text) && cityPart && !townIn(cityPart.p)
-      && rest.map((r) => townIn(r.p)).find(Boolean);
+    // no street), unless that part is a venue that merely names its town ("Miestny úrad Košice"), or
+    // can't be a town at all ("kanc.č.107 a 111", "miestnosť ST121", an e-mail address).
+    const cityPart = [...rest].reverse().find((r) => (r.afterStreet || !street) && !notATown(r.p));
+    // A Slovak town named inside another part, when the city part names none: "Štátna filharmónia
+    // Košice, Dom umenia" is in Košice, not in a town called "Dom umenia"; "Dom kultúry, Štefánikova
+    // 208/7, Námestovo Duchovné, Kultúra, Rodina" in Námestovo, not in "Rodina".
+    const pool = street ? rest.filter((r) => r.afterStreet).reverse() : rest;
+    const inName = !looksAbroad(text) && cityPart && !townOfPart(cityPart.p)
+      && pool.map((r) => townOfPart(r.p)).find(Boolean);
     if (inName) city = inName;
-    else if (cityPart && (rest.length > 1 || street) && !notATown(cityPart.p)) {
-      const named = townIn(cityPart.p);
+    else if (cityPart && (rest.length > 1 || street)) {
+      const named = townOfPart(cityPart.p);
       city = named || cityPart.p;
       if (!named || rest.length > 1) rest.splice(rest.indexOf(cityPart), 1);
     }
   }
   name = rest.find((r) => !r.afterStreet)?.p ?? rest[0]?.p;
-  city ??= townIn(text); // "Dom umenia Košice", "Národné divadlo Košice"
-  return { name, street, postcode, city: city || cityHint || undefined, district };
+  // "Dom umenia Košice", "Tatranská galéria v Poprade", "ZŠ Martin", "Slovenské národné divadlo".
+  city ??= townIn(text) || townOfPart(text) || venueTown(text);
+  // The town to look the place up in (and to key the venue cache by): as written, so a town abroad
+  // nobody listed is found ("Mikulov", "Barnaul"). The town shown: only a real one. A Slovak-written
+  // location's last part that is no municipality is a category or a room ("…, Kultúra, Rodina").
+  const cityText = city || cityHint || undefined;
+  const shown = cityText && (realTown(cityText) || !slovakLooking(text)) ? cityText : undefined;
+  return { name, street, postcode, city: shown, district, cityText };
+}
+
+// A Slovak town, a town in our lists or a known town abroad.
+const realTown = (city) => Boolean(skPlace(city) || TOWNS.has(fold(city)) || foreignTown(city) || COUNTRY.has(fold(city)));
+
+// The town one part names: by name ("Dom umenia Košice"), in the locative ("Hornonitrianske múzeum v
+// Prievidzi"), or a town that is also a word or a first name as the last word after a venue's kind
+// ("ZŠ Martin", "Slovenské komorné divadlo - Martin"; not "na Martina", "Kostol sv. Martin").
+function townOfPart(part) {
+  // Not "pri X" (= near X): "Village Resort HANULIAK, Belá pri Žiline" is in Belá, not in Žilina.
+  return townIn(part) || locativeTown(part.replace(/(^|\s)pri\s+\S+/giu, ' ')) || afterVenueWord(part);
+}
+const VENUE_WORDS = 'zs|zus|ss|sos|ms|gym|gymnazium|skola|dk|kd|msks|mks|ks|sh|msh|hala|haly|divadlo|kino|stadion|stadium|arena|stadio|kostol|kniznica|muzeum|galeria|amfiteater|klub|centrum|dom kultury|kulturny dom|kupalisko|ihrisko';
+const AFTER_VENUE = new Set([...AMBIGUOUS].filter((t) => !['sala', 'svit', 'modra', 'cana', 'raca', 'rakova'].includes(t)));
+const AFTER_VENUE_RE = new RegExp(`(?:^|[^a-z])(?:${VENUE_WORDS})(?:[^a-z]+[a-z]+)*?[^a-z]+([a-z]+)$`);
+function afterVenueWord(part) {
+  const f = fold(part).replace(/[.\s]+$/, '');
+  const m = AFTER_VENUE_RE.exec(f);
+  if (!m || !AFTER_VENUE.has(m[1]) || /(^|[^a-z])(sv|svat[a-z]*)[.\s]+[a-z]+$/.test(f)) return undefined;
+  return TOWNS.get(m[1]) || skPlace(m[1])?.name;
+}
+// Venues known well enough that their location gives no town.
+const VENUE_TOWNS = [
+  [/^(slovenske narodne divadlo|historicka budova snd|nova budova snd|snd)\b/, 'Bratislava'],
+  [/^(slovenska filharmonia|koncertna sien sf|reduta bratislava)\b/, 'Bratislava'],
+  [/^stare lyceum$/, 'Bratislava'],
+  [/^slovenske narodne muzeum$/, 'Bratislava'],
+  [/^velke koncertne studio slov/, 'Bratislava'],
+  [/^zimny stadion vladimira dzurillu/, 'Bratislava'],
+  [/^slovenske komorne divadlo\b/, 'Martin'],
+  [/^divadlo jana palarika\b/, 'Trnava'],
+  [/^divadlo andreja bagara\b/, 'Nitra'],
+  [/^fnsp nz\b/, 'Nové Zámky'],
+];
+const venueTown = (text) => VENUE_TOWNS.find(([re]) => re.test(fold(text)))?.[1];
+
+// Online only: isOnline (slovakia.js), and what Slovak sites write ("Forma/on-line", "Virtuálna
+// miestnosť (Microsoft Teams)", "dištančná forma", "ONLINE cez aplikáciu ZOOM", "online (EduPage)",
+// "ONLINE @ Inviton.TV", "Online, Slovensko"): every word one of these, one of them an online one.
+const ONLINE_KEY = /^(online|zoom|teams|webinar|webinare|virtualna|virtualne|virtualny|virtualnej|distancna|distancne|distancnou|edupage|inviton|livestream|stream)$/;
+const ONLINE_FILLER = new Set(['forma', 'formou', 'cez', 'aplikaciu', 'aplikacie', 'platformu', 'platformy', 'prostrednictvom',
+  'seminar', 'live', 'miestnost', 'microsoft', 'ms', 'google', 'meet', 'via', 'na', 'v', 'a', 'tv', 'slovensko', 'youtube', 'kurz']);
+export function onlineOnly(text) {
+  if (!text) return false;
+  if (isOnline(text)) return true;
+  const words = fold(text).replace(/(^|[^a-z])on[\s-]?line(?=$|[^a-z])/g, '$1online').split(/[^a-z0-9]+/).filter(Boolean);
+  return words.some((w) => ONLINE_KEY.test(w)) && words.every((w) => ONLINE_KEY.test(w) || ONLINE_FILLER.has(w));
 }
 
 // A part that can't be a town: a number ("…, 38", the house number), one or two letters, a US state
-// ("…, Pa.", "…, MD": looked up in Slovakia they found a building "PA" in Žilina, Línia MD in Bratislava).
-const notATown = (part) => /^\d/.test(part) || fold(part).replace(/[^\p{L}]/gu, '').length <= 2 || usState(`x, ${part}`);
+// ("…, Pa.", "…, MD": looked up in Slovakia they found a building "PA" in Žilina, Línia MD in Bratislava),
+// a room or an office ("kanc.č.107 a 111", "miestnosť ST121", "č. 5"), an e-mail address, a company
+// ("… s.r.o.)"), "celý svet (…)", a phone number, a street ("Ul. 7. pešieho pluku"), or ticket sales ("vstupenky v sieti …").
+const JUNK_PART = /^(kanc\.|kancel|miestnost|ul\.\s|cely svet|europa$|zahranicie)|(^|[^a-z])(tel[.:]|c\.\s?\d|s\.\s?r\.\s?o\.|predpredaj|predaj|vstupenk[a-z]*|listky|tickets?|kategori[a-z]*|bude doplnene)([^a-z]|$)|@/;
+const notATown = (part) => /^\d/.test(part) || fold(part).replace(/[^\p{L}]/gu, '').length <= 2 || usState(`x, ${part}`)
+  || JUNK_PART.test(fold(part));
 
 const townCache = new Map();
 /**
@@ -227,7 +307,7 @@ export function knownTown(text) {
   if (!text) return undefined;
   if (townCache.has(text)) return townCache.get(text);
   const p = parseLocation(text);
-  const town = p.multi ? undefined : TOWNS.has(fold(p.city)) ? TOWNS.get(fold(p.city)) : skPlace(p.city)?.name || townIn(text);
+  const town = p.multi ? undefined : TOWNS.has(fold(p.cityText)) ? TOWNS.get(fold(p.cityText)) : skPlace(p.cityText)?.name || townIn(text);
   if (townCache.size > 20000) townCache.clear();
   townCache.set(text, town);
   return town;
@@ -238,7 +318,7 @@ export function venueKey(text, cityHint) {
   const p = parseLocation(text, cityHint);
   if (p.multi || p.online) return null; // several towns, or online: no one place to look up
   const what = p.street ? fold(p.street).replace(/\.$/, '') : fold(p.name);
-  return what ? `${what}|${fold(p.city)}` : `city|${fold(p.city)}`;
+  return what ? `${what}|${fold(p.cityText)}` : `city|${fold(p.cityText)}`;
 }
 
 const AREA_TYPES = /^(city|town|village|municipality|hamlet|suburb|quarter|neighbourhood|city_district|borough|county|state|region|province|country|postcode)$/;
@@ -248,7 +328,7 @@ let pausedUntil = 0; // after "too many requests", leave OpenStreetMap alone for
 const PAUSE_MS = 3600e3;
 async function nominatim(params) {
   if (Date.now() < pausedUntil) throw new Error('OpenStreetMap asked us to slow down; lookups resume later');
-  const wait = lastRequest + MIN_GAP_MS - Date.now();
+  const wait = lastRequest + Number(process.env.EVENTS_NOMINATIM_GAP_MS || MIN_GAP_MS) - Date.now();
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   lastRequest = Date.now();
   const url = `${NOMINATIM}?${new URLSearchParams({
@@ -269,6 +349,7 @@ async function nominatim(params) {
     lat: Number(hit.lat), lon: Number(hit.lon), label: hit.display_name, osm: `${hit.osm_type}/${hit.osm_id}`,
     country: hit.address?.country_code,
     area: AREA_TYPES.test(hit.addresstype || ''), // matched a whole town/district, not a building or street
+    type: hit.addresstype,
   } : null;
 }
 
@@ -284,23 +365,68 @@ const nameWords = (s) => fold(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3
 function inTown(label, city) {
   // Escaped: a "town" taken from a location can be anything ("Zámocký hotel****").
   const names = townNames(fold(city)).map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  // The okres counts only for a village (its okres is named after its town, never after itself).
+  // For a town it's any village around: "ZŠ Levice" was found in Šahy ("okres Levice"), "Základná
+  // škola, Košice" in Kysak ("okres Košice-okolie"), Nov 2026.
+  const okres = skPlace(city) && !isTown(skPlace(city)) ? '(okres )?' : '';
   return fold(label).split(/\s*,\s*/).some((part) => names.some((t) => part === t
-    || new RegExp(`^(okres )?${t}( ?[-–]|$| [ivx]+$)`).test(part)));
+    || new RegExp(`^${okres}${t}( ?[-–]|$| [ivx]+$)`).test(part)));
 }
 
 /** A hit that can't be the known town it's meant to be in: wrong town, or far from all of ours. */
 const awayFrom = (hit, city) => Boolean(city && ((TOWNS.has(fold(city))
   && ((hit.label && !inTown(hit.label, city)) || distanceKm(KOSICE, hit) > MAX_KM)) || farFromTown(hit, city)));
 
-// A Slovak town's area: coordinates farther than this from its centre aren't in it.
-const TOWN_KM = 30;
+// A Slovak town's area: coordinates farther than this from its centre aren't in it. 30 km let a
+// venue be pinned in another village of the okres ("Dom kultúry, Pezinok" in Slovenský Grob,
+// "Karadžičova 1" 22 km off by Senec). Bratislava reaches 16 km (Čunovo), Vysoké Tatry is a string
+// of settlements under the mountains.
+const TOWN_KM = 8;
+const BIG_TOWN_KM = { Bratislava: 18, Košice: 15, 'Vysoké Tatry': 16 };
 /**
- * Coordinates that can't be in the Slovak town named: more than 30 km from its centre ("Senec"
- * found as a village of that name in Bohemia; a ticket page giving its organiser's address).
+ * Coordinates that can't be in the Slovak town named: farther from its centre than its radius
+ * ("Senec" found as a village of that name in Bohemia; a ticket page giving its organiser's address).
+ * A town abroad named like a Slovak village ("Praha") isn't checked.
  */
 function farFromTown(at, city) {
-  const p = city && uniqueName(city) && skPlace(city);
-  return Boolean(p) && distanceKm(townOfPlace(p), at) > TOWN_KM;
+  const p = city && uniqueName(city) && countryOf(city) === 'sk' && skPlace(city);
+  if (!p) return false;
+  const town = townOfPlace(p);
+  return distanceKm(town, at) > (BIG_TOWN_KM[town.name] ?? TOWN_KM);
+}
+
+// Several Slovak villages share a name ("Poproč" in okres Košice-okolie and Rimavská Sobota): the one
+// the location's "okres …" names, else the one nearest a town it names or the listing covers; undefined when
+// neither is known (then no pin: a map in the wrong end of the country is worse than none).
+function namesake(city, text, near) {
+  const all = SK_PLACES.filter((p) => !p.partOf && fold(p.name) === fold(city));
+  if (all.length < 2) return all[0];
+  const okres = /okres ([^,;|()]+)/.exec(fold(text || ''))?.[1]?.trim();
+  if (okres) return all.find((p) => fold(p.district) === okres);
+  // A town the location names too ("Krpáčovo (Banská Bystrica), …, Horná Lehota"), else the site's.
+  const at = skPlace(townIn(text || '') || '') || (near && skPlace(near));
+  if (!at) return undefined;
+  const from = townOfPlace(at);
+  return all.reduce((a, b) => (distanceKm(from, a) <= distanceKm(from, b) ? a : b));
+}
+// A shared village name: { place } as above, or null when no namesake can be told; undefined if not shared.
+function sharedVillage(city, text, near) {
+  if (!city || uniqueName(city) || !skPlace(city) || isTown(skPlace(city)) || countryOf(city) !== 'sk') return undefined;
+  if (!SK_PLACES.some((p) => p !== skPlace(city) && !p.partOf && fold(p.name) === fold(city))) return undefined;
+  return { place: namesake(city, text, near) || null };
+}
+
+// A hit in Slovakia for a town that is no Slovak municipality ('any'): not a building or a shop named
+// like it ("MONACO" in Bratislava, "Rodina", "Čajovňa"), nor a hamlet or locality of that name when
+// the name is spelt otherwise ("Políčka" for Polička, "Čákovec" for Čakovec) or the location is Czech
+// ("Zámek Blatná", "Hotel Galant, Mlýnská 739, Mikulov"). Tatra resorts ("Hotel Družba, Jasná") stay.
+const PLACE_TYPES = /^(hamlet|locality|isolated_dwelling|neighbourhood|quarter|suburb|village|town|city|farm|square|place)$/;
+function slovakHitOk(hit, city, text) {
+  if (hit.country !== 'sk') return true;
+  const own = (hit.label || '').split(',')[0].trim();
+  if (fold(own) !== fold(city)) return true;
+  if (!(hit.area || PLACE_TYPES.test(hit.type || ''))) return false;
+  return own.toLowerCase() === city.trim().toLowerCase() && slovakLooking(text) && !looksAbroad(text);
 }
 
 /**
@@ -324,9 +450,10 @@ function plausible(hit, p, { town = true, name = true } = {}) {
 const CHECKS = { venue: {}, town: { name: false }, name: { town: false } };
 
 // A Slovak town or borough from the list of municipalities: no lookup needed for its centre.
-function townCentre(p) {
+function townCentre(p, text, near) {
   const borough = p.district && skPlace(p.district);
-  const at = borough?.partOf === p.city ? borough : skPlace(p.city);
+  const shared = sharedVillage(p.city, text, near);
+  const at = borough?.partOf === p.city ? borough : shared ? shared.place : skPlace(p.city);
   return at && { lat: at.lat, lon: at.lon, label: `${at.name}${at.partOf ? `, ${at.partOf}` : ''}${at.district ? `, okres ${at.district}` : ''}, Slovensko`,
     country: 'sk', precision: 'city', area: true };
 }
@@ -336,16 +463,21 @@ function townCentre(p) {
  * known from its town is looked for in Slovakia first, then anywhere (to learn it's abroad).
  */
 async function geocode(text, cityHint) {
-  const p = parseLocation(text, cityHint);
-  if (p.multi || p.online) return null;
+  const parsed = parseLocation(text, cityHint);
+  if (parsed.multi || parsed.online) return null;
+  // Looked up by the town as written (a town abroad nobody listed is shown as none but found).
+  const p = { ...parsed, city: parsed.cityText };
   const city = p.city;
+  // A village name several share, with no way to tell which: its centre would be a guess.
+  const shared = sharedVillage(city, text, cityHint);
+  if (shared && !shared.place) return null;
   // A venue's name alone, of one word ("Makerspace", "Štúdio", "Wash"): any place of that name anywhere.
   if (!city && !p.street && nameWords(p.name || '').length < 2) return null;
   // Just a Slovak town ("Prešov", "Košice - Juh"): its centre, from the list.
-  if (!p.street && !p.name && townCentre(p)) return townCentre(p);
+  if (!p.street && !p.name && townCentre(p, text, cityHint)) return townCentre(p, text, cityHint);
   // The town came from the site, not from the location: the location may name another place
   // ("Stará Hora - Sebechleby" on a site about Banská Bystrica).
-  const hinted = Boolean(city) && !parseLocation(text).city;
+  const hinted = Boolean(city) && !parseLocation(text).cityText;
   const country = countryOf(city, text);
   const tries = []; // [precision, query, check (see CHECKS; none: any hit)]
   if (p.street && city) {
@@ -362,11 +494,15 @@ async function geocode(text, cityHint) {
     if (fold(text) !== fold(city)) tries.push(['venue', { q: text }, 'venue']);
     tries.push(['city', { q: [p.district, city].filter(Boolean).join(', ') }, 'town']);
   }
-  for (const where of country !== undefined ? [country] : ['sk', null]) {
+  const passes = country === undefined ? ['sk', null] : country === 'any' ? [null, 'sk'] : [country];
+  for (const where of passes) {
     for (const [kind, params, check] of tries) {
-      if (kind === 'city' && where === 'sk' && townCentre(p)) return townCentre(p);
+      if (kind === 'city' && where === 'sk' && townCentre(p, text, cityHint)) return townCentre(p, text, cityHint);
       const hit = await nominatim(where ? { ...params, countrycodes: where } : params);
       if (!hit || (check && !plausible(hit, p, CHECKS[check]))) continue;
+      if ((country === 'any' || country === null) && !slovakHitOk(hit, city, text)) continue;
+      // The namesake meant, not another village of that name.
+      if (shared && distanceKm(shared.place, hit) > TOWN_KM) continue;
       // Asking for the town must find the town, not a shop or a cinema named after it.
       if (kind === 'city' && !(hit.area && inTown(hit.label, city))) continue;
       // Precision from what OpenStreetMap found: a town or district only gives the area's centre
@@ -425,7 +561,7 @@ function pageGeo(ev) {
 
 /** A cached lookup that isn't in the town its location names (found before lookups checked that). */
 function outOfTown(v) {
-  return Number.isFinite(v.lat) && awayFrom(v, parseLocation(v.text).city);
+  return Number.isFinite(v.lat) && awayFrom(v, parseLocation(v.text).cityText);
 }
 
 /**
@@ -447,7 +583,7 @@ function locationEvidence(text, hint) {
   let c = countryNamed(text);
   if (!c) {
     const p = parseLocation(text, hint);
-    const towns = p.multi || [p.city].filter(Boolean);
+    const towns = p.multi || [p.cityText].filter(Boolean);
     // A Slovak town is sure; a village is, unless the text looks foreign (a Czech village of the same name).
     if (towns.some((t) => isTown(skPlace(t)))) c = 'sk';
     else if ((towns.length && towns.every((t) => foreignTown(t))) || looksAbroad(text)) c = 'abroad';
@@ -555,7 +691,7 @@ export function* countrySignals(state, ev) {
   // guess: "Las Vegas" found a bar of that name in Bratislava. It comes after what the AI, the
   // address and the language say.
   const guess = at && !['page', 'manual'].includes(at.precision) && inSlovakia(at)
-    && !parseLocation(ev.location || '', cityHint(state, ev)).city;
+    && !parseLocation(ev.location || '', cityHint(state, ev)).cityText;
   if (at && !guess) yield { step: 'coords', c: inSlovakia(at) ? 'sk' : 'abroad' };
   if (ev.location) {
     const said = locationCountry(ev.location, cityHint(state, ev));
@@ -578,10 +714,13 @@ export function* countrySignals(state, ev) {
   const venue = trustedVenue(src);
   const hint = cityHint(state, ev) || (venue && knownTown(venue));
   if (hint && locationCountry(hint)) yield { step: 'site city', c: locationCountry(hint) };
+  // A site the AI judged to list events in several countries, or abroad (crawler.js: judgeSites):
+  // its domain and what's learned about its pages say nothing (hockey-live.sk lists NHL games).
+  const judgedAway = ['mixed', 'abroad'].includes(src?.siteVerdict?.where);
   let host;
   try { host = new URL(via).hostname; } catch { if (guess) yield { step: 'coords (no town)', c: 'sk' }; yield { step: 'no host' }; return; }
   // No place at all on a Slovak site (a cinema's coming films, a festival's own pages).
-  if (!ev.location && host.endsWith('.sk')) yield { step: '.sk site', c: 'sk' };
+  if (!ev.location && host.endsWith('.sk') && !judgedAway) yield { step: '.sk site', c: 'sk' };
   // The language its title and description are written in (language.js). Slovak is Slovakia; Czech,
   // on a site not known to have its events in Slovakia, is abroad. English is abroad on a site
   // outside .sk when nothing in it names a Slovak town: of 7,392 such events whose country wasn't
@@ -590,12 +729,12 @@ export function* countrySignals(state, ev) {
   const lang = languageOf(text);
   if (lang === 'sk') yield { step: 'slovak text', c: 'sk' };
   else if (lang === 'cz' && regionAt(state, via) !== 'sk') yield { step: 'czech text', c: 'abroad' };
-  else if (lang === 'en' && !host.endsWith('.sk') && regionAt(state, via) !== 'sk'
+  else if (lang === 'en' && (judgedAway || (!host.endsWith('.sk') && regionAt(state, via) !== 'sk'))
     && !/slovak|slovensk|bratislav/i.test(`${text} ${ev.location || ''}`) && !townIn(`${text} ${ev.location || ''}`)) {
     yield { step: 'english text', c: 'abroad' };
   }
   if (guess) yield { step: 'coords (no town)', c: 'sk' };
-  if (!ev.location && regionAt(state, via) === 'sk') yield { step: 'site region', c: 'sk', weak: true };
+  if (!ev.location && !judgedAway && regionAt(state, via) === 'sk') yield { step: 'site region', c: 'sk', weak: true };
   else yield { step: 'none', weak: true };
 }
 
@@ -606,12 +745,15 @@ const stale = (key, v) => key?.startsWith('city|') === false && key.endsWith('|'
 
 // The event's coordinates, from its page or its venue's lookup: unless they're far from the Slovak town
 // its location names (then they're wrong, and the venue is looked up again).
-function coordsFor(state, ev, city = parseLocation(ev.location || '', cityHint(state, ev)).city) {
+function coordsFor(state, ev, city = parseLocation(ev.location || '', cityHint(state, ev)).cityText) {
+  // A village name several share: only near the namesake meant, and none when that can't be told.
+  const shared = sharedVillage(city, ev.location, cityHint(state, ev));
+  const off = (at) => farFromTown(at, city) || (shared && (!shared.place || distanceKm(shared.place, at) > TOWN_KM));
   const geo = pageGeo(ev);
-  if (geo && !farFromTown(geo, city)) return { ...geo, precision: 'page' };
+  if (geo && !off(geo)) return { ...geo, precision: 'page' };
   if (!ev.location) return undefined;
   const [key, v] = venueFor(state, ev);
-  if (!Number.isFinite(v?.lat) || farFromTown(v, city) || stale(key, v)) return undefined;
+  if (!Number.isFinite(v?.lat) || off(v) || stale(key, v)) return undefined;
   return { lat: v.lat, lon: v.lon, precision: v.status === 'manual' ? 'manual' : v.precision, km: v.km };
 }
 
@@ -625,10 +767,10 @@ export function placeFor(state, ev) {
   const p = parseLocation(ev.location, cityHint(state, ev));
   if (p.multi || p.online) return undefined;
   const base = { name: p.name, address: [p.street, p.district, p.city].filter(Boolean).join(', '), city: p.city };
-  const at = coordsFor(state, ev, p.city);
+  const at = coordsFor(state, ev, p.cityText);
   if (at) return { ...base, lat: at.lat, lon: at.lon, precision: at.precision, km: at.km ?? distanceKm(KOSICE, at) };
   // None yet (or they were wrong): a Slovak town's centre, from the list.
-  const centre = townCentre(p);
+  const centre = townCentre({ ...p, city: p.cityText }, ev.location, cityHint(state, ev));
   return centre ? { ...base, lat: centre.lat, lon: centre.lon, precision: 'city', km: distanceKm(KOSICE, centre) } : undefined;
 }
 
@@ -646,7 +788,7 @@ export async function locateEvents(state, today, budget, report) {
     const [key, v] = venueFor(state, ev);
     // (Not for a place without a town: "Kino Lucerna" in Košice isn't the one in Prague.)
     if (geo && key && !key.endsWith('|') && v?.status !== 'manual' && v?.precision !== 'page'
-      && !farFromTown(geo, parseLocation(ev.location, cityHint(state, ev)).city)) {
+      && !farFromTown(geo, parseLocation(ev.location, cityHint(state, ev)).cityText)) {
       state.venues[key] = { ...v, text: ev.location, lat: geo.lat, lon: geo.lon, precision: 'page', status: 'ok',
         km: distanceKm(KOSICE, geo), checkedAt: now };
     }

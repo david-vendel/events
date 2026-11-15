@@ -7,7 +7,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  eventCountry, knownTown, parseLocation, placeFor, purgeDoubtfulVenues, venueKey, withoutTowns,
+  eventCountry, knownTown, locateEvents, locationCountry, onlineOnly, parseLocation, placeFor, purgeDoubtfulVenues, venueKey, withoutTowns,
 } from '../src/geo.js';
 import { patternKeys } from '../src/learn.js';
 
@@ -20,7 +20,7 @@ function fakeState({ venues = {}, hosts = {}, sources = {}, patterns = {} } = {}
 describe('parseLocation', () => {
   test('Eventbrite\'s "Town · Venue": the town is the location\'s own, not the site\'s', () => {
     const p = parseLocation('Dallas · Johnny Cabron\u2019s', 'Trnava');
-    assert.equal(p.city, 'Dallas');
+    assert.equal(p.city, 'Dallas'); // not a town we know, but a location in English: shown as written
     assert.equal(p.name, 'Johnny Cabron\u2019s');
     assert.equal(parseLocation('Bratislava · KC Dunaj').city, 'Bratislava');
     assert.equal(eventCountry(fakeState(), { location: 'Bratislava · KC Dunaj' }), 'sk');
@@ -42,7 +42,7 @@ describe('parseLocation', () => {
 
   test('venue, street, postcode and town', () => {
     assert.deepEqual({ ...parseLocation('CINEMAX, Moldavská cesta 32., OC OPTIMA, Košice 04011') }, {
-      name: 'CINEMAX', street: 'Moldavská cesta 32', postcode: '040 11', city: 'Košice', district: undefined,
+      name: 'CINEMAX', street: 'Moldavská cesta 32', postcode: '040 11', city: 'Košice', district: undefined, cityText: 'Košice',
     });
   });
 
@@ -329,5 +329,203 @@ describe('placeFor', () => {
     assert.equal(p.city, 'Košice');
     assert.equal(p.precision, 'city');
     assert.ok(p.km < 5);
+  });
+});
+
+// The place/town/pin fixes of 15 Nov 2026, from strings of the live data.
+describe('towns from real locations', () => {
+  test('Tatra resorts that are not municipalities still show as the town', () => {
+    assert.equal(parseLocation('Grand Hotel, Nový Smokovec').city, 'Nový Smokovec');
+    assert.equal(parseLocation('Hotel Hutník, Tatranské Matliare').city, 'Tatranské Matliare');
+    assert.equal(parseLocation('Hotel, Podbanské').city, 'Podbanské');
+  });
+  test('"ČR" as a word of its own is the Czech Republic', () => {
+    assert.equal(locationCountry('ČR, Bílovec'), 'abroad');
+    assert.equal(locationCountry('ČRS klub, Košice'), 'sk');
+  });
+  const city = (text, hint) => parseLocation(text, hint).city;
+
+  test('a village, then the region\'s town: the village', () => {
+    assert.equal(city('Trnovec nad Váhom, Trnovec nad Váhom, Nitra'), 'Trnovec nad Váhom');
+    assert.equal(city('Horné Saliby, Horné Saliby, Senec'), 'Horné Saliby');
+    assert.equal(city('Terchová, Malá Fatra a okolie, Terchová, Zilina'), 'Terchová');
+    assert.equal(city('HYGGE, Bojnická cesta 590,Kanianka, Trencin'), 'Kanianka');
+    const p = parseLocation('Kalná nad Hronom, Nitra');
+    assert.equal(p.city, 'Kalná nad Hronom');
+    assert.equal(p.name, undefined); // "Nitra" is no venue
+    // Not a lower-case word that happens to be a village ("rybník" = pond), nor a town before a village.
+    assert.equal(city('rybník, Levice'), 'Levice');
+    assert.equal(city('Zvolen, Pobočka Inter Cars, Kováčová'), 'Zvolen');
+    assert.equal(city('Bory Mall, Lozorno, Bory, Slovakia'), 'Lozorno');
+  });
+
+  test('a town in the locative', () => {
+    assert.equal(city('Hornonitrianske múzeum v Prievidzi'), 'Prievidza');
+    assert.equal(city('Tatranská galéria v Poprade'), 'Poprad');
+    assert.equal(city('Krajská knižnica v Prešove'), 'Prešov');
+    assert.equal(city('Divadlo Jána Palárika v Trnave'), 'Trnava');
+    assert.equal(city('FF UKF v Nitre, Štefánikova 67, miestnosť ST121'), 'Nitra');
+    // "pri X" is near X, not in it.
+    assert.notEqual(city('Village Resort HANULIAK, Belá pri Žiline'), 'Žilina');
+    // Before the site's town.
+    assert.equal(city('Tatranská galéria v Poprade', 'Košice'), 'Poprad');
+  });
+
+  test('a town that is also a word or a name, as the last word after a venue word', () => {
+    assert.equal(city('ZŠ Martin'), 'Martin');
+    assert.equal(city('ZŠ Detva'), 'Detva');
+    assert.equal(city('Slovenské komorné divadlo - Martin'), 'Martin');
+    assert.equal(city('koncert na Martina'), undefined);
+    assert.equal(city('Kostol sv. Martin'), undefined);
+    assert.equal(city('Kino Sála'), undefined);
+    assert.equal(city('Školský dvor ZŠ Martin nad Žitavou, Martin nad Žitavou'), 'Martin nad Žitavou');
+  });
+
+  test('well-known venues without a town', () => {
+    assert.equal(city('Slovenské národné divadlo'), 'Bratislava');
+    assert.equal(city('Slovenská filharmónia'), 'Bratislava');
+    assert.equal(city('Staré Lýceum'), 'Bratislava');
+    assert.equal(city('FNsP NZ – Zasadačka'), 'Nové Zámky');
+  });
+
+  test('Gúta is Kolárovo; "Obec X" is X', () => {
+    assert.equal(city('AA VMK, Templom tér 4, Gúta'), 'Kolárovo');
+    assert.equal(knownTown('AA VMK, Templom tér 4, Gúta'), 'Kolárovo');
+    assert.equal(city('Obec Marianka, futbalové ihrisko'), 'Marianka');
+  });
+
+  test('parts that are no town', () => {
+    assert.equal(city('MsÚ Lučenec, Námestie republiky 26, kanc.č.107 a 111'), 'Lučenec');
+    assert.equal(city('Slovensko, Európa, celý svet (Zahraničie - Európa/Svet)'), undefined);
+    assert.equal(city('Kategória: Pre deti • Dátum a čas: 11:00 • Staré divadlo Karola Spišáka, Ul. 7. pešieho pluku'), undefined);
+    const xmas = parseLocation('Vianočný koncert o 16:00h, Jezuitský kostol, info tel: 034 664 53 41, vstupenky v sieti predpredaj.sk');
+    assert.equal(xmas.city, undefined);
+    assert.equal(xmas.cityText, 'Jezuitský kostol'); // not the phone number nor the ticket shop
+    assert.equal(parseLocation('Miesto konania Crowne Plaza, Hodžovo nám. 2, papiernikova@cp.sk').cityText, undefined);
+    assert.equal(parseLocation('Fitlates Akadémia, Na Riviére 2, Pilates s.r.o.)').cityText, undefined);
+    // "Predajná" is a village, not ticket sales.
+    assert.equal(city('Námestie Juraja Pejku, Predajná'), 'Predajná');
+  });
+
+  test('a Slovak location\'s last part that is no municipality is not shown as its town', () => {
+    // A category glued to the town ("Námestovo Duchovné"): the town in it.
+    assert.equal(city('Dom kultúry, Štefánikova 208/7, Námestovo Duchovné, Kultúra, Rodina'), 'Námestovo');
+    assert.equal(city('Tipsport Aréna, Banská Bystrica Chvály, Duchovné, Mládež'), 'Banská Bystrica');
+    for (const text of ['NATEEVA - kaviareň, čajovňa', 'DPH, DzP, účtovníctvo', 'Hôtel Hermitage Monte-Carlo, Sq. Beaumarchais, Monaco',
+      'UTEP Campus: Tomás Rivera Conference Center, Union Bldg. East - Room 308, El Paso', 'META bar, Čakovec']) {
+      assert.equal(city(text), undefined, text);
+    }
+    // Still looked up by it, and the cache key is unchanged.
+    assert.equal(parseLocation('META bar, Čakovec').cityText, 'Čakovec');
+    assert.equal(venueKey('NATEEVA - kaviareň, čajovňa'), 'nateeva - kaviaren|cajovna');
+    // A town abroad in a location that isn't Slovak is shown as written.
+    assert.equal(city('Klub, Barnaul'), 'Barnaul');
+    assert.equal(city('Hotel Galant, Mlýnská 739, Mikulov'), 'Mikulov');
+  });
+});
+
+describe('online locations', () => {
+  test('what Slovak sites write for online', () => {
+    for (const text of ['Forma/on-line', 'Virtuálna miestnosť (Microsoft Teams)', 'dištančná forma', 'Online seminár (LIVE)',
+      'ONLINE cez aplikáciu ZOOM', 'online (EduPage)', 'ONLINE @ Inviton.TV, ONLINE @ Inviton.TV', 'Online, Slovensko, Online, Slovensko']) {
+      assert.equal(onlineOnly(text), true, text);
+      assert.deepEqual({ ...parseLocation(text) }, { online: true }, text);
+      assert.equal(placeFor(fakeState(), { location: text }), undefined, text);
+      assert.equal(knownTown(text), undefined, text);
+    }
+  });
+  test('a place and online too is a place', () => {
+    assert.equal(onlineOnly('Tatranská Lomnica + ONLINE live stream'), false);
+    assert.equal(onlineOnly('Vienna House Bratislava + online'), false);
+    assert.equal(onlineOnly('História Kolonádového mosta vo virtuálnej realite'), false);
+    assert.equal(parseLocation('Tatranská Lomnica + ONLINE live stream').city, 'Tatranská Lomnica');
+  });
+});
+
+describe('pins', () => {
+  test('a cached pin beyond the town\'s radius falls back to the town centre', () => {
+    // starlib's "Karadžičova 1" (Bratislava) was pinned 22 km off, near Senec.
+    const key = venueKey('Karadžičova 1', 'Bratislava');
+    const venues = { [key]: { status: 'ok', text: 'Karadžičova 1', lat: 48.22, lon: 17.40, precision: 'address', country: 'sk' } };
+    const sources = { 'https://www.starlib.sk': { origin: 'https://www.starlib.sk', siteKind: 'venue', city: 'Bratislava' } };
+    const p = placeFor(fakeState({ venues, sources }), { location: 'Karadžičova 1', source: 'https://www.starlib.sk/akcie' });
+    assert.equal(p.precision, 'city');
+    assert.equal(p.city, 'Bratislava');
+    // Within it: kept (Čunovo is 16 km from the centre of Bratislava).
+    venues[key] = { ...venues[key], lat: 48.032, lon: 17.20 };
+    assert.equal(placeFor(fakeState({ venues, sources }), { location: 'Karadžičova 1', source: 'https://www.starlib.sk/akcie' }).precision, 'address');
+  });
+
+  test('a village name several share: the namesake near the site\'s town, else no pin', () => {
+    // kulthund's "Poproč, Poproč" was pinned in okres Rimavská Sobota.
+    const rs = { status: 'ok', text: 'Poproč, Poproč', lat: 48.5831, lon: 20.0336, precision: 'city', country: 'sk' };
+    const venues = { [venueKey('Poproč, Poproč')]: rs };
+    assert.equal(placeFor(fakeState({ venues }), { location: 'Poproč, Poproč', source: 'https://kulthund.sk/podujatie/x' }), undefined);
+    assert.equal(parseLocation('Poproč, Poproč').city, 'Poproč'); // the town is still shown
+    const sources = { 'https://www.kosice-tickets.sk': { origin: 'https://www.kosice-tickets.sk', siteKind: 'venue', city: 'Košice' } };
+    const p = placeFor(fakeState({ venues, sources }), { location: 'Poproč, Poproč', source: 'https://www.kosice-tickets.sk/e/1' });
+    assert.ok(Math.abs(p.lat - 48.71) < 0.01 && Math.abs(p.lon - 20.98) < 0.01, `${p.lat},${p.lon}`); // okres Košice-okolie
+    // The okres named in the location decides.
+    const q = placeFor(fakeState(), { location: 'Ostrov, okres Sobrance' });
+    assert.ok(q.lon > 22, `${q.lon}`);
+    assert.equal(placeFor(fakeState(), { location: 'Ostrov, Ostrov' }), undefined);
+  });
+});
+
+// The lookups, against a stand-in for OpenStreetMap: what it answered for these places (Nov 2026).
+describe('lookups (fake Nominatim)', () => {
+  const report = { start: () => ({}), end: () => {} };
+  const hit = (display_name, lat, lon, addresstype, country_code = 'sk') => [{ display_name, lat, lon, addresstype, osm_type: 'node', osm_id: 1, address: { country_code } }];
+  async function lookUp(location, answer) {
+    const asked = [];
+    const realFetch = globalThis.fetch;
+    process.env.EVENTS_NOMINATIM_GAP_MS = '1';
+    globalThis.fetch = async (url) => {
+      const q = Object.fromEntries(new URL(url).searchParams);
+      asked.push(q);
+      return new Response(JSON.stringify(answer(q) || []), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    try {
+      const state = fakeState();
+      state.events = { a: { id: 'a', start: '2099-01-01', location, source: 'https://example.sk/e' } };
+      await locateEvents(state, '2026-01-01', 10, report);
+      return { place: state.events.a.place, venue: state.venues[venueKey(location)], asked };
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.EVENTS_NOMINATIM_GAP_MS;
+    }
+  }
+
+  test('a generic venue found in another village of the okres is not in the town', async () => {
+    const levice = await lookUp('ZŠ Levice', () => hit('Zs. Móricza, Homok, Šahy, okres Levice, Nitriansky kraj, 936 01, Slovensko', 48.07, 18.95, 'amenity'));
+    assert.equal(levice.place.precision, 'city');
+    assert.ok(Math.abs(levice.place.lat - 48.2) < 0.05, `${levice.place.lat}`); // Levice, not Šahy
+    const komarno = await lookUp('Mestská športová hala, Komárno', () => hit('Mestská športová hala, Školská, Kolárovo, okres Komárno, Nitriansky kraj, 946 03, Slovensko', 47.915, 17.997, 'amenity'));
+    assert.equal(komarno.place.precision, 'city');
+    const kosice = await lookUp('Základná škola, Juhoslovanská, Košice', () => hit('Základná škola, Ružínska, Kysak, okres Košice-okolie, Košický kraj, 044 81, Slovensko', 48.854, 21.221, 'amenity'));
+    assert.equal(kosice.place.precision, 'city');
+    // In the town itself: kept.
+    const ok = await lookUp('Dom umenia, Košice', () => hit('Dom umenia, Moyzesova, Staré Mesto, Košice, okres Košice I, Košický kraj, Slovensko', 48.72, 21.26, 'amenity'));
+    assert.equal(ok.place.precision, 'venue');
+  });
+
+  test('a town abroad is looked for anywhere first, and a Slovak hamlet or building of its name doesn\'t count', async () => {
+    const policka = await lookUp('Divadelní klub Polička, Vrchlického 53, Polička',
+      () => hit('Políčka, Bašovce, okres Piešťany, Trnavský kraj, 916 23, Slovensko', 48.6, 17.85, 'hamlet'));
+    assert.equal(policka.place, undefined);
+    assert.equal(policka.venue.status, 'not_found');
+    assert.equal(policka.asked[0].countrycodes, undefined); // anywhere first
+    const mikulov = await lookUp('Hotel Galant, Mlýnská 739, Mikulov', () => hit('Mikulov, Čierna Lehota, okres Bánovce nad Bebravou, Trenčiansky kraj, 956 43, Slovensko', 48.8, 18.3, 'locality'));
+    assert.equal(mikulov.place, undefined);
+    const monaco = await lookUp('Hôtel Hermitage Monte-Carlo, Sq. Beaumarchais, Monaco', () => hit('MONACO, 3411/6, Slovinská, Trnávka, Bratislava, okres Bratislava II, Bratislava, Slovensko', 48.16, 17.18, 'building'));
+    assert.equal(monaco.place, undefined);
+    const rodina = await lookUp('Centrum pre rodinu - Sigord, Sigord 134, Zlatá Baňa Duchovné, Rodina', () => hit('Rodina, Rovnice, Bratislava, okres Bratislava IV, Bratislava, Slovensko', 48.2, 17.0, 'shop'));
+    assert.equal(rodina.place, undefined);
+    // Found abroad: abroad.
+    const real = await lookUp('Divadelní klub Polička, Vrchlického 53, Polička', (q) => (q.countrycodes ? [] : hit('53, Vrchlického, Polička, okres Svitavy, Pardubický kraj, Česko', 49.71, 16.26, 'building', 'cz')));
+    assert.equal(real.venue.country, 'cz');
+    // A Slovak resort that is no municipality, written in Slovak: found.
+    const jasna = await lookUp('Hotel Družba, Jasná', () => hit('Hotel Družba, Flow trail, Jasná, Demänovská Dolina, okres Liptovský Mikuláš, Žilinský kraj, Slovensko', 48.97, 19.58, 'tourism'));
+    assert.equal(jasna.place.precision, 'venue');
   });
 });
