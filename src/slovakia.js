@@ -182,6 +182,7 @@ export function usState(text) {
 const ONLINE_PART = /^(online|on-line|on line|virtual(ne|ly)?|virtualne|zoom|webinar|webinár|livestream|live stream|stream|streaming|(ms |microsoft )?teams|google meet|youtube|facebook live|internet|web|digital|remote|virtual event|online event|zoom meeting|via zoom|on zoom|online via zoom|online \(zoom\)|virtual meeting|online meeting|online webinar|virtual webinar|online class|virtual class|online course)$/;
 /** Is this location only an online platform (no place on a map)? */
 export function isOnline(text) {
+  if (ONLINE_PART.test(fold(text).replace(/[.:!]+$/, '').trim())) return true; // whole, before "On-line" is split at its hyphen
   const parts = fold(text).split(/\s*[,|;/()–-]\s*/).map((p) => p.replace(/[.:!]+$/, '').trim()).filter(Boolean);
   return parts.length > 0 && parts.every((p) => ONLINE_PART.test(p));
 }

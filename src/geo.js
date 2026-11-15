@@ -271,7 +271,8 @@ const nameWords = (s) => fold(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3
  * "okres Košice-okolie"). "Martin County, Texas" is not Martin.
  */
 function inTown(label, city) {
-  const names = townNames(fold(city));
+  // Escaped: a "town" taken from a location can be anything ("Zámocký hotel****").
+  const names = townNames(fold(city)).map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   return fold(label).split(/\s*,\s*/).some((part) => names.some((t) => part === t
     || new RegExp(`^(okres )?${t}( ?[-–]|$| [ivx]+$)`).test(part)));
 }
