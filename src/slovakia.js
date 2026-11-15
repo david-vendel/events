@@ -197,9 +197,12 @@ export function countryInUrl(url) {
   let path;
   try { const u = new URL(url); path = decodeURIComponent(u.pathname + u.search); } catch { return undefined; }
   const f = fold(path).replace(/[^a-z]+/g, ' ');
-  if (SLOVAKIA_RE.test(f)) return 'sk';
-  if (COUNTRY_RE.test(f) || FOREIGN_TOWN_RE.test(f)) return 'abroad';
-  return skTownUrlRe().test(f) ? 'sk' : undefined;
+  // The place named first: the listing's section comes before the event's slug, which may name a
+  // performer ("eventland.eu/bratislava/event/…/milan-lieskovsky-…": Milan isn't the Italian city).
+  const at = (re) => re.exec(f)?.index ?? Infinity;
+  const sk = Math.min(at(SLOVAKIA_RE), at(skTownUrlRe())), abroad = Math.min(at(COUNTRY_RE), at(FOREIGN_TOWN_RE));
+  if (sk === Infinity && abroad === Infinity) return undefined;
+  return sk < abroad ? 'sk' : 'abroad';
 }
 
 // A Slovak town in an address ("allevents.in/bratislava/…", "ticketportal…/Kino-Hviezda-Trencin"):

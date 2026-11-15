@@ -161,6 +161,11 @@ function splitLocation(text, cityHint) {
   // "Online", "ZOOM", "Virtual": no place at all (looked up, they found a tyre shop "Pneu Online" in
   // Košice and "Bistro Zoom" in Nové Zámky for thousands of American webinars, Nov 2026).
   if (isOnline(text)) return { online: true };
+  // Eventbrite's "Town · Venue" ("Dallas · Johnny Cabron's", "Staré Mesto · KC Dunaj"): the venue,
+  // then its town, so the town is the location's own and not the listing's (a Dallas bar was looked
+  // up in Trnava, the town of eventbrite's "/d/slovakia--trnava/" that lists American events too).
+  const dot = /^([^·,|;]+?)\s+·\s+(.+)$/.exec(text || '');
+  if (dot) text = `${dot[2]}, ${dot[1]}`;
   // A country on its own ("…, Slovensko", "…, Czechia") is no part of the address.
   const parts = (text || '').split(/\s*[,|;]\s*/).map((p) => p.trim()).filter((p) => p && !countryPart(p));
   let name, street, postcode, city, district;
@@ -433,7 +438,7 @@ function locationEvidence(text, hint) {
 /**
  * Repair, once (18 Oct 2026): the city the AI gave for one listing page used to become its whole
  * site's (eventbrite.com: "Trnava"), and was given to every event of the site without a place, and
- * as the town of venues like "Shoreditch · Basing House". A site's city that most of its events'
+ * as the town of venues like "Shoreditch · Basing House" (parseLocation now reads "Town · Venue" itself). A site's city that most of its events'
  * own locations disagree with is dropped, with the locations it filled in. Places learned from a
  * page's coordinates for a venue without a town are forgotten (they mixed up same-named venues).
  * Returns { sites, events, venues } repaired.

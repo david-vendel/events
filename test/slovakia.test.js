@@ -208,6 +208,12 @@ describe('countryInUrl', () => {
     assert.equal(countryInUrl('https://allevents.in/kosice/all'), 'sk');
     assert.equal(countryInUrl('https://ticketportal.sk/venue/Kino-Hviezda-Trencin'), 'sk');
   });
+  test('the place named first wins: the section before the event\'s slug', () => {
+    assert.equal(countryInUrl('https://eventland.eu/bratislava/event/81958/milan-lieskovsky-in-neptune-club/'), 'sk');
+    assert.equal(countryInUrl('https://eventland.eu/vienna/event/81183/christmas-market-am-hof-2/'), 'abroad');
+    assert.equal(countryInUrl('https://www.ticketlive.sk/sk/event/rfa-35-praha-27-11-2026'), 'abroad');
+    assert.equal(countryInUrl('https://www.eventbrite.com/d/austria--vienna/slovak-folk-night/'), 'abroad');
+  });
   test('towns that are also first names, and bad URLs, say nothing', () => {
     assert.equal(countryInUrl('https://x.com/martin/'), undefined);
     assert.equal(countryInUrl('not a url'), undefined);

@@ -30,7 +30,7 @@ import {
 import { aiJobDone, aiJobFailed, aiJobPostponed, aiJobsDue, enqueueAi } from './aiqueue.js';
 import { eventTags, headingTags, learnTags } from './tags.js';
 import { eventCountry, locateEvents, purgeDoubtfulVenues, repairSiteCities } from './geo.js';
-import { SK_PLACES, isTown, regionOf, slovakPage, slovakVariants } from './slovakia.js';
+import { SK_PLACES, countryInUrl, isTown, regionOf, slovakPage, slovakVariants } from './slovakia.js';
 import { EventIndex, migrate } from './events.js';
 import { dueForVerification, verifyEvent } from './corroborate.js';
 import { defaultControl, runPool } from './pool.js';
@@ -332,7 +332,10 @@ function inSlovakiaOnly(state, events, url, source) {
   for (const ev of events) {
     // A venue's own site often omits the address; a single-city listing at least gives the city.
     const city = source.pages[url]?.city || source.city;
-    if (!ev.location && (source.venue || city)) ev.location = source.venue || city;
+    // Not when the page's or the event's address names a place abroad ("eventland.eu/barcelona/…" on
+    // a site whose city is Bratislava: the Barcelona road race became "Bratislava", Nov 2026).
+    const elsewhere = [url, ev.url].some((u) => sectionAbroad(u));
+    if (!ev.location && !elsewhere && (source.venue || city)) ev.location = source.venue || city;
     // Counted towards what's learned about this page's template and site only when the event itself
     // says where it is: a verdict taken from that record would only feed it.
     const sure = eventCountry(state, ev, { strong: true });
@@ -1040,6 +1043,44 @@ function bootstrapCountries(state, report) {
     + 'counted towards the templates and sites they came from');
 }
 
+/**
+ * Does the section of an address (all but its last part) name a place abroad? "eventland.eu/vienna/
+ * event/81183/…" does; an event's own slug says nothing, it's its title: "…/podujatie/berlin-manson-5304"
+ * is a Slovak band, "…/story-milan-knazko-…" an actor.
+ */
+function sectionAbroad(url) {
+  try {
+    const u = new URL(url);
+    u.pathname = u.pathname.replace(/\/[^/]*\/?$/, '/');
+    u.search = '';
+    return countryInUrl(u.href) === 'abroad';
+  } catch { return false; }
+}
+
+// 15 Nov 2026, once: events given their site's city as the location although their own address names
+// a place abroad ("eventland.eu/vienna/event/…" became "Bratislava") lose it, and are then placed
+// by that address.
+const SITE_CITY_ABROAD = 'site-city-abroad-2026-11-15';
+
+function repairSiteCityAbroad(state, report) {
+  state.meta.repairs ??= [];
+  if (state.meta.repairs.includes(SITE_CITY_ABROAD)) return;
+  let n = 0;
+  for (const ev of Object.values(state.events)) {
+    if (!ev.location) continue;
+    const rows = ev.sources?.filter((r) => !r.linked) || [];
+    const source = state.sources[(() => { try { return new URL(ev.source).origin; } catch { return ''; } })()];
+    const cities = new Set([source?.venue, source?.city, ...Object.values(source?.pages || {}).map((p) => p?.city)].filter(Boolean));
+    if (!cities.has(ev.location)) continue;
+    if (![ev.url, ev.source, ...rows.map((r) => r.via)].some((u) => sectionAbroad(u))) continue;
+    delete ev.location;
+    for (const r of rows) if (cities.has(r.location)) delete r.location;
+    n++;
+  }
+  state.meta.repairs.push(SITE_CITY_ABROAD);
+  report.log(`Places: ${fmtN(n)} events had their site's city for a location although their address is abroad; forgotten`);
+}
+
 // 15 Nov 2026: lookups that searched Slovakia first had put thousands of events abroad on Slovak shops
 // and cinemas, and each such event counted its site and template as Slovak (expomap.ru 7,313 to 9,620).
 // Once: forget those places, and count again where each site's and template's events are in Slovakia,
@@ -1231,6 +1272,7 @@ export async function crawlPass(state, options = {}, control = defaultControl())
   repairOfflineVisits(state, report);
   bootstrapCountries(state, report);
   recountSlovakia(state, report);
+  repairSiteCityAbroad(state, report);
   if (!state.patterns.count()) {
     const n = bootstrapPatterns(state, CRASH_REPAIR.from);
     report.log(`Page templates: learned from ${n} earlier visits which kinds of pages hold events`);

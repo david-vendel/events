@@ -18,6 +18,14 @@ function fakeState({ venues = {}, hosts = {}, sources = {}, patterns = {} } = {}
 }
 
 describe('parseLocation', () => {
+  test('Eventbrite\'s "Town · Venue": the town is the location\'s own, not the site\'s', () => {
+    const p = parseLocation('Dallas · Johnny Cabron\u2019s', 'Trnava');
+    assert.equal(p.city, 'Dallas');
+    assert.equal(p.name, 'Johnny Cabron\u2019s');
+    assert.equal(parseLocation('Bratislava · KC Dunaj').city, 'Bratislava');
+    assert.equal(eventCountry(fakeState(), { location: 'Bratislava · KC Dunaj' }), 'sk');
+    assert.notEqual(venueKey('Dallas · Johnny Cabron\u2019s', 'Trnava'), venueKey('Johnny Cabron\u2019s', 'Trnava'));
+  });
   test('venue name with its town inside, then a building name', () => {
     const p = parseLocation('Štátna filharmónia Košice, Dom umenia');
     assert.equal(p.name, 'Štátna filharmónia Košice');
