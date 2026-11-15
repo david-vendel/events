@@ -96,7 +96,11 @@ const COUNTRIES = ['cesko', 'ceska republika', 'czech republic', 'czechia', 'rak
   'francuzsko', 'france', 'spanielsko', 'spain', 'espana', 'united kingdom', 'great britain', 'england', 'scotland',
   'ireland', 'netherlands', 'nederland', 'holandsko', 'belgium', 'belgie', 'switzerland', 'schweiz', 'svajciarsko',
   'denmark', 'danmark', 'sweden', 'sverige', 'norway', 'norge', 'finland', 'portugal', 'greece', 'romania', 'serbia',
-  'bulgaria', 'usa', 'united states', 'canada', 'australia', 'new zealand', 'argentina', 'singapore', 'hong kong'];
+  'bulgaria', 'usa', 'united states', 'canada', 'australia', 'new zealand', 'argentina', 'singapore', 'hong kong',
+  'russia', 'russian federation', 'rusko', 'belarus', 'moldova', 'estonia', 'latvia', 'lithuania', 'luxembourg', 'iceland',
+  'cyprus', 'malta', 'turkey', 'turkiye', 'israel', 'india', 'pakistan', 'china', 'japan', 'south korea', 'korea',
+  'thailand', 'vietnam', 'indonesia', 'malaysia', 'philippines', 'united arab emirates', 'uae', 'qatar', 'saudi arabia',
+  'egypt', 'south africa', 'nigeria', 'kenya', 'mexico', 'brazil', 'peru', 'chile', 'colombia', 'puerto rico'];
 // Towns abroad that events lists name most (neighbours first), in the spellings they're written in.
 const FOREIGN_TOWNS = ['praha', 'prague', 'brno', 'ostrava', 'olomouc', 'zlin', 'plzen', 'pardubice', 'hradec kralove',
   'ceske budejovice', 'liberec', 'jihlava', 'opava', 'frydek-mistek', 'novy jicin', 'havirov', 'karvina', 'uherske hradiste',
@@ -155,7 +159,31 @@ const FOREIGN_STREET = /(^|[^a-z])(street|st\.|road|rd\.|avenue|ave\.|boulevard|
 export function looksAbroad(text) {
   if (!text) return false;
   if (fold(text).split(/\s*[,|;]\s*/).some((p) => FOREIGN_TOWN_SET.has(bare(p)))) return true;
-  return FOREIGN_LETTERS.test(text) || FOREIGN_STREET.test(text) || GERMAN_STREET.test(text);
+  return FOREIGN_LETTERS.test(text) || FOREIGN_STREET.test(text) || GERMAN_STREET.test(text)
+    || NON_LATIN.test(text) || US_STREET.test(text) || usState(text);
+}
+
+// Scripts Slovak isn't written in: Cyrillic, Greek, Hebrew, Arabic, Thai, Japanese, Chinese, Korean
+// ("Россия, Москва" was looked up in Slovakia and found KINO Moskva in Martin, Nov 2026).
+const NON_LATIN = /[\u0370-\u03ff\u0400-\u04ff\u0590-\u06ff\u0e00-\u0e7f\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]/;
+// An American address: the number before the street ("350 Bulldogger Rd"); Slovak ones put it after.
+const US_STREET = /\b\d+\s+(?:[NSEW]\.?\s+)?[A-Z][\w.'-]*(?:\s+[A-Z][\w.'-]*)*\s+(?:St|Rd|Ave|Blvd|Dr|Ln|Hwy|Pkwy|Ct|Pl)\b/;
+const US_STATES = 'AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|ON|BC|QC|AB';
+// The newspapers' abbreviations of states, as US college sports sites write them ("Chester, Pa.").
+const AP_STATES = 'Ala|Ariz|Ark|Calif|Colo|Conn|Del|Fla|Ga|Ill|Ind|Kan|Kans|Ky|La|Md|Mass|Mich|Minn|Miss|Mo|Mont|Neb|Nev|N\\.H|N\\.J|N\\.M|N\\.Y|N\\.C|N\\.D|Okla|Ore|Pa|R\\.I|S\\.C|S\\.D|Tenn|Tex|Vt|Va|Wash|W\\.Va|Wis|Wyo';
+const US_STATE_PART = new RegExp(`^(?:(?:${US_STATES})(?:\\s+\\d{5}(?:-\\d{4})?)?|(?:${AP_STATES})\\.)$`);
+/** A US state (or Canadian province) as a whole part of a location after the first: "Arlington, Va.", "Wilmington, DE 19801". */
+export function usState(text) {
+  const parts = String(text || '').split(/\s*[,|;]\s*/).map((p) => p.trim());
+  return parts.slice(1).some((p) => US_STATE_PART.test(p));
+}
+
+// Where an event happens online, not at a place: "Online", "ZOOM", "Virtual", "Webinar (MS Teams)".
+const ONLINE_PART = /^(online|on-line|on line|virtual(ne|ly)?|virtualne|zoom|webinar|webinár|livestream|live stream|stream|streaming|(ms |microsoft )?teams|google meet|youtube|facebook live|internet|web|digital|remote|virtual event|online event|zoom meeting|via zoom|on zoom|online via zoom|online \(zoom\)|virtual meeting|online meeting|online webinar|virtual webinar|online class|virtual class|online course)$/;
+/** Is this location only an online platform (no place on a map)? */
+export function isOnline(text) {
+  const parts = fold(text).split(/\s*[,|;/()–-]\s*/).map((p) => p.replace(/[.:!]+$/, '').trim()).filter(Boolean);
+  return parts.length > 0 && parts.every((p) => ONLINE_PART.test(p));
 }
 
 const FOREIGN_TOWN_RE = new RegExp(`(?:^|[^a-z])(${words(FOREIGN_TOWNS)})(?=$|[^a-z])`);
@@ -182,9 +210,15 @@ const skTownUrlRe = () => (townUrlRe ??= new RegExp(`(?:^|\\s)(${words([...new S
   .filter((t) => t.length >= 6 && !URL_TOWN_DENY.has(t) && !shared.has(t)))})(?=$|\\s)`));
 
 // Country domains other than Slovakia's: a site there publishes events abroad unless it shows otherwise.
-const FOREIGN_TLD = /\.(cz|de|at|hu|pl|ua|uk|nl|be|fr|it|es|pt|ch|dk|se|no|fi|ie|gr|ro|hr|si|rs|bg|us|ca|au|nz|sg|hk|mx|ar|br|in|jp|cn)$/;
-/** Is this host on another country's domain ("kinoaero.cz", "eventbrite.co.uk")? */
-export const foreignHost = (host) => FOREIGN_TLD.test(host || '');
+// Every country's domain but Slovakia's (kassir.ru, andes.org.pe…), except those used worldwide as
+// generic ones (.io, .co, .tv, .fm…) and .eu.
+const GENERIC_CC = new Set(['io', 'co', 'me', 'tv', 'fm', 'ai', 'cc', 'ly', 'gg', 'to', 'ws', 'la', 'eu', 'am', 'sh']);
+/** Is this host on another country's domain ("kinoaero.cz", "eventbrite.co.uk", "krs.kassir.ru")? */
+export function foreignHost(host) {
+  const tld = /\.([a-z]{2})$/.exec(host || '')?.[1];
+  if (!tld || tld === 'sk') return false;
+  return !GENERIC_CC.has(tld) || /\.co\.[a-z]{2}$/.test(host);
+}
 
 /** A country as the AI or a geocoder gives it ("Slovakia", "SK", "Česko") → 'sk' / 'abroad'. */
 export function countryCode(c) {

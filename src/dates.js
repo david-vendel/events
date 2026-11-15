@@ -31,10 +31,11 @@ function makeDate(d, m, y, now) {
   d = +d; m = +m;
   if (!(d >= 1 && d <= 31 && m >= 1 && m <= 12)) return null;
   if (!y) {
-    // No year given: assume the nearest upcoming occurrence (allowing ~2 months back
-    // for things that are still running or listings that lag behind).
+    // No year given: assume the nearest upcoming occurrence, allowing ~3 months back for things
+    // still running and for listings that lag behind (a club's fixture list "19. 8." read in
+    // November is last August's match, not next year's: 60 days showed several as next year's, Nov 2026).
     y = now.getFullYear();
-    if (new Date(y, m - 1, d) < new Date(now.getTime() - 60 * 864e5)) y += 1;
+    if (new Date(y, m - 1, d) < new Date(now.getTime() - 100 * 864e5)) y += 1;
   }
   y = +y;
   if (y < 100) y += 2000;
@@ -59,7 +60,7 @@ export const tooFarAhead = (start, now = new Date()) => (Date.parse(start) - now
 // 05.10. 00:00" is 1–4 October with no time; "17:00 – 23:59" just means "from 17:00".
 export function finishDate({ start, end, time, endTime }) {
   if (end && (end < start || placeholderEnd(start, end))) end = endTime = undefined;
-  if (time === '00:00') time = undefined;
+  if (time === '00:00' || time === '23:59') time = undefined; // 23:59: "time not set" (slovakbasket.sk)
   if (endTime === '23:59') endTime = undefined;
   if (endTime === '00:00') {
     if (end && end > start) end = dayBefore(end);

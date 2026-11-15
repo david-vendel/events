@@ -29,7 +29,7 @@ function showings(state, e) {
     const day = (days[r.start] ??= new Map());
     // A location that's only the town names no venue.
     const name = (loc && parseLocation(loc).name) || '';
-    const v = day.get(key) || { venue: name, times: new Set(), loc };
+    const v = day.get(key) || { venue: name, times: new Set(), loc, via: r.via };
     if (name && (!v.venue || name.length < v.venue.length)) v.venue = name; // the shortest way the sites write it
     if (r.time) v.times.add(r.time);
     day.set(key, v);
@@ -39,13 +39,25 @@ function showings(state, e) {
     if (m.size === 1 && [...m.values()][0].times.size <= 1) continue; // one place, one time: nothing to show
     // Its own pin on the map, once the place is known (looked up only here: it's the slow part).
     const list = [...m.values()].map((v) => {
-      const place = v.loc && placeFor(state, { location: v.loc, source: e.source });
+      // With the town of the site that gave this showing (not the event's first source's).
+      const place = v.loc && placeFor(state, { location: v.loc, source: v.via || e.source });
       return { venue: v.venue, times: [...v.times].sort(),
         ...(place && { place: { lat: place.lat, lon: place.lon, name: place.name, address: place.address, precision: place.precision } }) };
     });
     out[d] = list.sort((a, b) => (a.times[0] || '').localeCompare(b.times[0] || ''));
   }
   return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Is an event shown? When it's known to be in Slovakia, or not known but from a Slovak site. Events
+ * whose country isn't known stay stored (they're located later), but most were American webinars and
+ * Russian concerts (Nov 2026).
+ */
+function shownCountry(state, e) {
+  const c = eventCountry(state, e);
+  if (c) return c === 'sk';
+  return e.sources.some((r) => !r.linked && /\.sk$/.test(hostOf(r.via || r.url || '')));
 }
 
 // Fields of an event, and of each of its source rows, that the public website uses.
@@ -617,7 +629,7 @@ export class Engine {
   events() {
     const today = new Date().toISOString().slice(0, 10);
     return Object.values(this.state.events)
-      .filter((e) => (e.end || e.start) >= today)
+      .filter((e) => (e.end || e.start) >= today && shownCountry(this.state, e))
       .map((e) => {
         const tagFrom = tagSources(e, this.state.tagRules);
         // The town, for the website's filter (the map step stores it; older events get it here).

@@ -36,7 +36,7 @@ const isLiveShow = (name) => LIVE_TITLE.test(name) && !SCREENED.test(name);
 const FILM_EXTRA = ['kids', 'festival'];
 
 const RULES = [
-  ['concert', /koncert|concert|\btour\b|\bband\b|orchest|recital|filharmon|symfon|jazz|\brock|metal\b|hip.?hop|\brap\b|\bdj\b|\bspev|zbor\b|\blive\b/],
+  ['concert', /koncert|concert|\btour\b|\bband\b|orchest|recital|filharmon|symfon|jazz|\brock|metal\b|hip.?hop|\brap\b|\bdj\b|\bspev|zbor\b/],
   ['theatre', /divadl|predstaveni|inscenac|\bopera|balet|muzikal|theat|stand.?up/],
   ['exhibition', /vystav|vernisaz|exhibit|expozic|(?<!oc )galeri[ae]\b|\bmuze/],
   ['festival', /festival|\bfest\b|majales|biela noc|dni mesta/],
@@ -45,14 +45,16 @@ const RULES = [
   ['workshop', /workshop|\bkurz|dielni|tvoriv|kreativn|masterclass|seminar/],
   ['talk', /prednask|beseda|diskusi|\btalk\b|konferenc|literatur|\bcitani|autorsk|krst knihy|podcast/],
   ['party', /party|\bparty|disco|clubb|salsa|tango|tanec|tancovani|\bples\b|kviz|quiz/],
-  ['market', /\btrh|jarmok|market|burza|ochutnavk|degustac|\bfood|\bvin(o|a)\b|wine|gastro|bazar|street food/],
+  ['market', /\btrh|jarmok|\bmarkets?\b|burza|ochutnavk|degustac|\bfood (market|festival|truck)|\bvin(o|a)\b|wine|gastro|bazar|street food/],
 ];
 
 /** Tags for one sighting or event, from its text and URLs. */
 export function guessTags({ title, description, location, url, via, source }) {
-  const place = fold(`${location} ${url} ${via || source}`);
+  // The venue's name says where, not what: "Športové námestie" hosts cabaret, "(bývalé kino Slovan)" plays.
+  const venue = fold(location).replace(/\([^)]*\)/g, ' ').replace(/\bbyval\S* kin\S*/g, ' ');
+  const place = `${venue} ${fold(`${url} ${via || source}`)}`;
   const name = fold(title);
-  const text = fold(`${title} ${description} ${location}`);
+  const text = fold(`${title} ${description}`);
   const tags = RULES.filter(([, re]) => re.test(text)).map(([tag]) => tag);
   // A cinema's descriptions are written for films; for a live show there, trust only its title.
   if (isLiveShow(name)) return CINEMA_PLACE.test(place) ? RULES.filter(([, re]) => re.test(name)).map(([tag]) => tag) : tags;
@@ -143,7 +145,10 @@ export function learnedTags(rules, ev) {
 export function tagSources(ev, rules) {
   const from = {};
   const put = (tags, why) => { for (const t of tags || []) from[t] ??= why; };
-  put(guessTags(ev), 'rules');
+  // What the sources' own data says (schema.org TheaterEvent…) beats a cinema guessed from words.
+  const own = (ev.sources || []).flatMap((s) => s.tags || []);
+  const guessed = guessTags(ev);
+  put(own.length && !own.includes('cinema') ? guessed.filter((t) => t !== 'cinema') : guessed, 'rules');
   for (const s of ev.sources || []) put(s.tags, 'rules');
   // Learned rules and AI only fill in events the page and keyword rules couldn't place: a venue
   // that hosts mostly concerts mustn't add "concert" to its workshops.

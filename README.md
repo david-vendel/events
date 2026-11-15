@@ -176,7 +176,11 @@ all its events are in one. Each distinct place is looked up once in OpenStreetMa
 and 40 new places per pass; after "too many requests" lookups pause for an hour). A venue-name hit
 must share a word with the venue's name and lie in the expected town, otherwise free-text search
 would happily return the railway station called "Košice" for "Yama Event Place, Košice"; asking for
-just the town always counts as town-level precision and cached in
+the town must find a town of that name, not a building or a shop named after it (a cinema "KINO
+Moskva" for Москва, a shop "Boston" in Senica), and counts as town-level precision. A town that isn't
+a Slovak municipality is looked for worldwide only, unless the location reads as Slovak; a number,
+one or two letters or a US state ("38", "MD", "Pa.") is never taken for the town, and a venue's name
+of one word with no town ("Makerspace", "Štúdio") isn't looked up at all. Lookups are cached in
 `data/venues.json`. Coordinates on the event page itself (schema.org `geo`) win over the lookup.
 Events with no location at all get a city from the AI tagging job when the title or page makes it
 clear. Every upcoming event gets `place: { lat, lon, precision, name, address, km }`: `precision` is
@@ -209,25 +213,39 @@ good sources. Now only events in Slovakia are kept ([src/slovakia.js](src/slovak
 
 1. its location's own words: a Slovak town or village it names, another country ("…, Czechia",
    "Zlín (CZ)"), a town abroad as a whole part ("…, Hamburg"), letters Slovak doesn't have (Czech
-   ě ř ů, German ß…) or street words of other languages ("Fraser Highway", "Rue …"). A Slovak village
-   alone, on pages whose events are abroad, is taken for the Czech one of that name (Dolany, Lipník…);
-2. coordinates from the event's page or its venue's lookup, tested against the country's outline;
-3. the location's language: letters or venue words only Slovak has ("Dom kultúry Kanianka",
+   ě ř ů, German ß…), other scripts (Cyrillic, Greek, Thai, Chinese…), street words of other languages
+   ("Fraser Highway", "Rue …"), an American address ("350 Bulldogger Rd") or a US state after the town
+   ("Chester, Pa.", "Wilmington, DE 19801"). A Slovak village alone, on pages whose events are abroad,
+   is taken for the Czech one of that name (Dolany, Lipník…). A location that is only an online
+   platform ("Online", "ZOOM", "Virtual", "Webinar (MS Teams)") is no place: it's not looked up and says
+   nothing about the country;
+2. what the event's page says in its schema.org data: `addressCountry`, or a start in a time zone of
+   the Americas or Asia ("…T19:00:00-05:00"; `+00:00` says nothing);
+3. coordinates from the event's page or its venue's lookup, tested against the country's outline;
+4. the location's language: letters or venue words only Slovak has ("Dom kultúry Kanianka",
    "Evanjelický kostol", "Hlavné námestie"), or a Slovak town in the locative ("Divadlo J. Palárika
    v Trnave", "knižnica v Tvrdošovciach");
-4. the country the AI gave, a country code in the title ("LEVICE (SK)", "CZ TOUR"), the listing's
+5. the country the AI gave, a country code in the title ("LEVICE (SK)", "CZ TOUR", "(CZ MiniTour)"), the listing's
    address ("eventbrite.com/d/united-kingdom/…", "ticketportal.sk/venue/Kino-Hviezda-Trencin"; that it
    names Slovakia counts on a site abroad only for an event without a location: eventbrite's
    `/d/slovakia--trnava/` lists Vienna too), the city of its listing page or site, or its venue's;
-5. last, its site: an event without a location on a `.sk` site, or on pages whose events are in
+6. last, its site: an event without a location on a `.sk` site, or on pages whose events are in
    Slovakia, is there; Czech words in the title or description ("Městské divadlo") on a site not known
    to have its events in Slovakia mean abroad. Otherwise it's not known until it's located.
+
+The website shows only events known to be in Slovakia, and those whose country isn't known yet if
+they come from a `.sk` site; the others stay stored until they're located (in Nov 2026 most of them
+were American webinars, college games and Russian concerts).
 
 The crawler learns **where each kind of page has its events**: every page template and every host
 counts the events it gave that are known to be in Slovakia (`sk`) and abroad (`abroad`) in
 the `patterns` table and `hosts.json`. With 3 or more known, a template or host is *Slovakia* (over 85 % in
 Slovakia), *abroad* (under 15 %) or *mixed*; the exact template's verdict counts first, then the
-rougher template's, then the host's (`regionAt` in [src/learn.js](src/learn.js)). Before all of
+rougher template's, then the host's (`regionAt` in [src/learn.js](src/learn.js)). Only what an
+event itself says (steps 1–5, a `.sk` site) counts towards `sk`, never a verdict taken from that very
+record, which would feed itself: in Nov 2026 lookups of foreign places that found Slovak shops had made
+thousands of American and Russian events "Slovak", and their sites with them (expomap.ru: 7,313 in
+Slovakia). Those lookups were forgotten and the `sk` counts of sites outside `.sk` counted again, once. Before all of
 them, a page of a site outside `.sk` whose address names a country or a town abroad is that
 (`eventbrite.com/d/australia--byron-bay/networking`, `…/festivals/berlin`). A site that has never had
 an event in Slovakia and is on another country's domain (`kinoaero.cz`) or has had any event abroad

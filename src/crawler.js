@@ -29,7 +29,7 @@ import {
 } from './ai.js';
 import { aiJobDone, aiJobFailed, aiJobPostponed, aiJobsDue, enqueueAi } from './aiqueue.js';
 import { eventTags, headingTags, learnTags } from './tags.js';
-import { eventCountry, locateEvents, repairSiteCities } from './geo.js';
+import { eventCountry, locateEvents, purgeDoubtfulVenues, repairSiteCities } from './geo.js';
 import { SK_PLACES, isTown, regionOf, slovakPage, slovakVariants } from './slovakia.js';
 import { EventIndex, migrate } from './events.js';
 import { dueForVerification, verifyEvent } from './corroborate.js';
@@ -333,8 +333,11 @@ function inSlovakiaOnly(state, events, url, source) {
     // A venue's own site often omits the address; a single-city listing at least gives the city.
     const city = source.pages[url]?.city || source.city;
     if (!ev.location && (source.venue || city)) ev.location = source.venue || city;
-    const c = eventCountry(state, ev);
-    if (c === 'sk') sk++;
+    // Counted towards what's learned about this page's template and site only when the event itself
+    // says where it is: a verdict taken from that record would only feed it.
+    const sure = eventCountry(state, ev, { strong: true });
+    const c = sure ?? eventCountry(state, ev);
+    if (sure === 'sk') sk++;
     if (c === 'abroad') abroad++;
     if (c === 'sk' || (!c && !outside)) kept.push(ev);
   }
@@ -1037,6 +1040,33 @@ function bootstrapCountries(state, report) {
     + 'counted towards the templates and sites they came from');
 }
 
+// 15 Nov 2026: lookups that searched Slovakia first had put thousands of events abroad on Slovak shops
+// and cinemas, and each such event counted its site and template as Slovak (expomap.ru 7,313 to 9,620).
+// Once: forget those places, and count again where each site's and template's events are in Slovakia,
+// from only what the events themselves say. (Their counts abroad stay.)
+const GEO_STRICT = 'geo-strict-2026-11-15';
+
+function recountSlovakia(state, report) {
+  state.meta.repairs ??= [];
+  if (state.meta.repairs.includes(GEO_STRICT)) return;
+  const venues = purgeDoubtfulVenues(state);
+  // Not Slovak sites': their counts came from Slovak events, and an old listing whose events are gone
+  // would be left with only its few trips abroad.
+  const foreignish = (key) => !/\.sk$/.test(key.split('/')[0]);
+  for (const [host, h] of Object.entries(state.hosts)) if (foreignish(host)) delete h.sk;
+  const templates = state.patterns.clearField('sk', foreignish);
+  const tally = { sk: 0, abroad: 0, unknown: 0 };
+  for (const ev of Object.values(state.events)) {
+    const c = eventCountry(state, ev, { strong: true });
+    tally[c || 'unknown']++;
+    if (c !== 'sk') continue;
+    for (const via of new Set(ev.sources.filter((r) => !r.linked && r.via).map((r) => r.via))) noteCountry(state, via, { sk: 1 });
+  }
+  state.meta.repairs.push(GEO_STRICT);
+  report.log(`Places: forgot ${fmtN(venues)} doubtful lookups; counted Slovak events again (${fmtN(templates)} templates had a count): `
+    + `${fmtN(tally.sk)} in Slovakia by their own data, ${fmtN(tally.abroad)} abroad, ${fmtN(tally.unknown)} not known`);
+}
+
 // Every Slovak municipality's own website (sk-places.json), most of which have a calendar of
 // events ("kalendár podujatí"). A few a pass, biggest places first, until each has been visited
 // once; from then on what the visit found decides, as for any page.
@@ -1200,6 +1230,7 @@ export async function crawlPass(state, options = {}, control = defaultControl())
   repairUnreadVisits(state, report);
   repairOfflineVisits(state, report);
   bootstrapCountries(state, report);
+  recountSlovakia(state, report);
   if (!state.patterns.count()) {
     const n = bootstrapPatterns(state, CRASH_REPAIR.from);
     report.log(`Page templates: learned from ${n} earlier visits which kinds of pages hold events`);

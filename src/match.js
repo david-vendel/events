@@ -3,7 +3,8 @@
 // must not differ (one film plays in many towns the same day). Words count by how rare they are
 // among all event titles: "TOSCA" and "Giacomo Puccini: TOSCA" share the word that matters, while
 // "Kino pre deti: HLAVIČKA" and "Kino pre deti: ZABUDNUTÝ OSTROV" share only words many titles have.
-import { knownTown, withoutTowns } from './geo.js';
+import { knownTown, parseLocation, withoutTowns } from './geo.js';
+import { isTown, skPlace } from './slovakia.js';
 
 // Words that say nothing about which event it is: grammar, and ticket-shop notes ("VYPREDANÉ").
 const STOPWORDS = new Set(`a i o u v vo na do od po pri pre s so z zo za k ku je sa si to aj ale
@@ -89,11 +90,33 @@ export function dateDistance(a, b) {
   return Math.min(Math.abs(dayDiff(a.start, bEnd)), Math.abs(dayDiff(b.start, aEnd)));
 }
 
-/** Both places are known and they're different towns. */
+/**
+ * Both places are known and they're different towns: towns we know in the locations, else any town
+ * they name ("Barnaul" / "Kemerovo"), else the town in the sites' addresses (zilina.virtualne.sk /
+ * kosice.virtualne.sk listed one band's two concerts a day apart, at street addresses only).
+ */
 export const differentTowns = (a, b) => {
   const x = knownTown(a.location), y = knownTown(b.location);
-  return Boolean(x && y && x !== y);
+  if (x && y) return x !== y;
+  const px = a.location && parseLocation(a.location).city, py = b.location && parseLocation(b.location).city;
+  if (px && py) return fold(px) !== fold(py);
+  const hx = x || hostTown(a.url) || hostTown(a.via || a.source), hy = y || hostTown(b.url) || hostTown(b.via || b.source);
+  return Boolean(hx && hy && hx !== hy);
 };
+
+// A Slovak town as the first part of a site's address: "zilina.virtualne.sk" → Žilina.
+const hostTowns = new Map();
+function hostTown(url) {
+  let label;
+  try { label = new URL(url).hostname.replace(/^www\./, '').split('.'); } catch { return undefined; }
+  if (label.length < 3) return undefined;
+  if (!hostTowns.has(label[0])) {
+    const p = skPlace(label[0]);
+    if (hostTowns.size > 5000) hostTowns.clear();
+    hostTowns.set(label[0], p && isTown(p) && !p.partOf ? p.name : undefined);
+  }
+  return hostTowns.get(label[0]);
+}
 
 const isRun = (x) => Boolean(x.end && x.end > x.start);
 

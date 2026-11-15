@@ -16,7 +16,7 @@ import { fetchBody } from './fetcher.js';
 import { regionAt } from './learn.js';
 import { hostOf } from './urls.js';
 import {
-  SK_ALIASES, SK_TOWN_NAMES, boroughOf, countryCode, countryInUrl, countryNamed, countryPart, czechWords, foreignTown, inSlovakia, isTown, looksAbroad, skPlace, slovakWords, townOfPlace, uniqueName,
+  SK_ALIASES, SK_TOWN_NAMES, boroughOf, countryCode, countryInUrl, countryNamed, countryPart, czechWords, foreignTown, inSlovakia, isOnline, isTown, looksAbroad, skPlace, slovakWords, townOfPlace, uniqueName, usState,
 } from './slovakia.js';
 
 const NOMINATIM = process.env.EVENTS_NOMINATIM_URL || 'https://nominatim.openstreetmap.org/search';
@@ -71,14 +71,20 @@ for (const [a, name] of SK_ALIASES) TOWNS.set(fold(a), name);
 const ABROAD = { cz: ['praha', 'brno', 'ostrava', 'olomouc'], hu: ['budapest', 'miskolc'], at: ['wien', 'vieden', 'vienna'],
   pl: ['krakow', 'krakov'], ua: ['uzhorod', 'uzhhorod'] };
 const COUNTRY = new Map(Object.entries(ABROAD).flatMap(([cc, towns]) => towns.map((t) => [t, cc])));
-// The country to look a town up in: its own, null for a town abroad we don't know (look anywhere),
-// undefined when the town says nothing (Slovakia first, then anywhere).
-function countryOf(city) {
+// The country to look a town up in: its own; null for a town that isn't a Slovak municipality (look
+// anywhere: searching Slovakia first found "KINO Moskva" in Martin for Москва, a shop called "Boston"
+// in Senica for Boston, Nov 2026), unless the location reads as Slovak; undefined when there's no town
+// (Slovakia first, then anywhere).
+function countryOf(city, text = '') {
+  if (!city) return undefined;
   if (COUNTRY.has(fold(city))) return COUNTRY.get(fold(city));
   const sk = skPlace(city);
-  if (foreignTown(city || '') && !isTown(sk)) return null;
-  return sk ? 'sk' : undefined;
+  if (foreignTown(city) && !isTown(sk)) return null;
+  if (sk || TOWNS.has(fold(city))) return 'sk';
+  return slovakLooking(text) ? undefined : null;
 }
+// Letters and words of Slovak (or Czech, which the Slovakia-first search and its checks sort out).
+const slovakLooking = (text) => /[áäčďéíĺľňóôŕšťúýž]/i.test(text) || slovakWords(text);
 // One town's names in other languages, as OpenStreetMap may write it in an address ("Wien" → "Viedeň").
 const SAME_TOWN = [['wien', 'vieden', 'vienna'], ['krakow', 'krakov'], ['uzhorod', 'uzhhorod']];
 const townNames = (town) => SAME_TOWN.find((names) => names.includes(town)) || [town];
@@ -151,6 +157,9 @@ export function parseLocation(text, cityHint) {
 const parsed = new Map();
 
 function splitLocation(text, cityHint) {
+  // "Online", "ZOOM", "Virtual": no place at all (looked up, they found a tyre shop "Pneu Online" in
+  // Košice and "Bistro Zoom" in Nové Zámky for thousands of American webinars, Nov 2026).
+  if (isOnline(text)) return { online: true };
   // A country on its own ("…, Slovensko", "…, Czechia") is no part of the address.
   const parts = (text || '').split(/\s*[,|;]\s*/).map((p) => p.trim()).filter((p) => p && !countryPart(p));
   let name, street, postcode, city, district;
@@ -182,7 +191,7 @@ function splitLocation(text, cityHint) {
     // Otherwise the city is the last plain part after the street (or the last part, when there's
     // no street), unless that part is a venue that merely names its town ("Miestny úrad Košice").
     const cityPart = [...rest].reverse().find((r) => r.afterStreet || !street);
-    if (cityPart && (rest.length > 1 || street)) {
+    if (cityPart && (rest.length > 1 || street) && !notATown(cityPart.p)) {
       const named = townIn(cityPart.p);
       city = named || cityPart.p;
       if (!named || rest.length > 1) rest.splice(rest.indexOf(cityPart), 1);
@@ -192,6 +201,10 @@ function splitLocation(text, cityHint) {
   city ??= townIn(text); // "Dom umenia Košice", "Národné divadlo Košice"
   return { name, street, postcode, city: city || cityHint || undefined, district };
 }
+
+// A part that can't be a town: a number ("…, 38", the house number), one or two letters, a US state
+// ("…, Pa.", "…, MD": looked up in Slovakia they found a building "PA" in Žilina, Línia MD in Bratislava).
+const notATown = (part) => /^\d/.test(part) || fold(part).replace(/[^\p{L}]/gu, '').length <= 2 || usState(`x, ${part}`);
 
 const townCache = new Map();
 /**
@@ -212,7 +225,7 @@ export function knownTown(text) {
 /** Cache key for a place: its street (or name) and city, so spelling variants share one lookup. */
 export function venueKey(text, cityHint) {
   const p = parseLocation(text, cityHint);
-  if (p.multi) return null; // several towns: no one place to look up
+  if (p.multi || p.online) return null; // several towns, or online: no one place to look up
   const what = p.street ? fold(p.street).replace(/\.$/, '') : fold(p.name);
   return what ? `${what}|${fold(p.city)}` : `city|${fold(p.city)}`;
 }
@@ -312,14 +325,16 @@ function townCentre(p) {
  */
 async function geocode(text, cityHint) {
   const p = parseLocation(text, cityHint);
-  if (p.multi) return null;
+  if (p.multi || p.online) return null;
   const city = p.city;
+  // A venue's name alone, of one word ("Makerspace", "Štúdio", "Wash"): any place of that name anywhere.
+  if (!city && !p.street && nameWords(p.name || '').length < 2) return null;
   // Just a Slovak town ("Prešov", "Košice - Juh"): its centre, from the list.
   if (!p.street && !p.name && townCentre(p)) return townCentre(p);
   // The town came from the site, not from the location: the location may name another place
   // ("Stará Hora - Sebechleby" on a site about Banská Bystrica).
   const hinted = Boolean(city) && !parseLocation(text).city;
-  const country = countryOf(city);
+  const country = countryOf(city, text);
   const tries = []; // [precision, query, check (see CHECKS; none: any hit)]
   if (p.street && city) {
     tries.push(['address', { street: p.street, city, ...(p.postcode && { postalcode: p.postcode }) }, 'town']);
@@ -340,6 +355,8 @@ async function geocode(text, cityHint) {
       if (kind === 'city' && where === 'sk' && townCentre(p)) return townCentre(p);
       const hit = await nominatim(where ? { ...params, countrycodes: where } : params);
       if (!hit || (check && !plausible(hit, p, CHECKS[check]))) continue;
+      // Asking for the town must find the town, not a shop or a cinema named after it.
+      if (kind === 'city' && !(hit.area && inTown(hit.label, city))) continue;
       // Precision from what OpenStreetMap found: a town or district only gives the area's centre
       // (and asking for just the town counts as that, even if the best hit is a building named after it).
       return { ...hit, precision: hit.area || kind === 'city' ? 'city' : kind };
@@ -444,12 +461,36 @@ export function repairSiteCities(state) {
 }
 
 /**
+ * Repair, once (15 Nov 2026): forget the places looked up under rules that put most of an American or
+ * Russian event list on Slovak shops and cinemas ("Москва" at KINO Moskva in Martin, "Online" at a
+ * tyre shop in Košice, "Pa." at a building in Žilina), so they're looked up again with today's.
+ * Returns how many were forgotten.
+ */
+export function purgeDoubtfulVenues(state) {
+  let n = 0;
+  for (const [key, v] of Object.entries(state.venues)) {
+    if (v.status !== 'ok' || v.status === 'manual' || v.precision === 'page' || v.precision === 'manual') continue;
+    const city = key.slice(key.lastIndexOf('|') + 1);
+    const p = parseLocation(v.text || '');
+    const doubtful = p.online
+      // a town that isn't Slovak, found in Slovakia
+      || (city && v.country === 'sk' && (notATown(city) || countryOf(city, v.text || '') === null))
+      // "the town" that is a building or a shop of that name
+      || (v.precision === 'city' && city && v.label && !inTown(v.label, city))
+      // one word of a venue's name, with no town
+      || (!city && !p.street && nameWords(p.name || '').length < 2);
+    if (doubtful) { delete state.venues[key]; n++; }
+  }
+  return n;
+}
+
+/**
  * Is an event in Slovakia? 'sk', 'abroad', or undefined while that isn't known. Best first: the
  * town or country its location names, the coordinates its page gives or where its place was found
  * (venues.json), the location's language, the country the AI gave, a country code in the title,
  * the listing's address, the city of its site or venue, and last what's known of its site.
  */
-export function eventCountry(state, ev) {
+export function eventCountry(state, ev, { strong = false } = {}) {
   // The location's own words first: a Slovak town it names beats coordinates that disagree (a page's
   // organiser address, a same-named village abroad), a town or country abroad is abroad. A village
   // alone, on pages whose events are abroad, is the Czech one of that name.
@@ -457,6 +498,10 @@ export function eventCountry(state, ev) {
   const own = ev.location && locationEvidence(ev.location);
   if (own === 'village') return via && regionAt(state, via) === 'abroad' ? 'abroad' : 'sk';
   if (own) return own;
+  // What the event's page says in its schema.org data: addressCountry, or a time zone of the Americas
+  // or Asia ("…T19:00:00-05:00"; extract.js: jsonLdEvents).
+  const page = ev.pageCountry || ev.sources?.find((r) => r.pageCountry && !r.linked)?.pageCountry;
+  if (page) return countryCode(page);
   const at = coordsFor(state, ev);
   if (at) return inSlovakia(at) ? 'sk' : 'abroad';
   if (ev.location) {
@@ -468,7 +513,7 @@ export function eventCountry(state, ev) {
   if (ev.country) return countryCode(ev.country);
   // A country code in the title: "LEVICE (SK)", "BRUNTÁL (CZ)", "KOLLÁROVCI - CZ TOUR".
   if (/\((sk|sr)\)/i.test(ev.title || '')) return 'sk';
-  if (/\((cz|čr|at|hu|pl|de|ua)\)|\bcz tour\b/i.test(ev.title || '')) return 'abroad';
+  if (/\((cz|čr|at|hu|pl|de|ua)\b|\bcz (mini)?tour\b/i.test(ev.title || '')) return 'abroad';
   // The listing's address: "eventbrite.com/d/united-kingdom/…", "…/Kino-Hviezda-Trencin". That it
   // names Slovakia says less on a site abroad: eventbrite's "/d/slovakia--trnava/" lists Vienna too,
   // so there it counts only for an event without a location (one with is looked up).
@@ -485,6 +530,9 @@ export function eventCountry(state, ev) {
   if (!ev.location && host.endsWith('.sk')) return 'sk';
   // Czech words ("Městské divadlo", "Třemošnice") on a site not known to have its events in Slovakia.
   if (czechWords(`${ev.title} ${ev.location || ''} ${ev.description || ''}`) && regionAt(state, via) !== 'sk') return 'abroad';
+  // Only what the event itself says counts towards what's learned about its pages (crawler.js:
+  // inSlovakiaOnly): a verdict from that record would only feed itself.
+  if (strong) return undefined;
   if (!ev.location && regionAt(state, via) === 'sk') return 'sk';
   return undefined;
 }
@@ -513,7 +561,7 @@ function coordsFor(state, ev, city = parseLocation(ev.location || '', cityHint(s
 export function placeFor(state, ev) {
   if (!ev.location) return undefined;
   const p = parseLocation(ev.location, cityHint(state, ev));
-  if (p.multi) return undefined;
+  if (p.multi || p.online) return undefined;
   const base = { name: p.name, address: [p.street, p.district, p.city].filter(Boolean).join(', '), city: p.city };
   const at = coordsFor(state, ev, p.city);
   if (at) return { ...base, lat: at.lat, lon: at.lon, precision: at.precision, km: at.km ?? distanceKm(KOSICE, at) };

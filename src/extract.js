@@ -22,8 +22,8 @@ export function plain(s) {
  */
 export function cleanLocation(s) {
   return plain(s)
-    .replace(/(termín|dátum|kedy|začiatok)\s*:.*?(?=(mesto|miesto konania|miesto|adresa)\s*:|$)/gi, '')
-    .replace(/(miesto konania|mesto|miesto|adresa)\s*:\s*/gi, '')
+    .replace(/(termín|dátum|kedy|začiatok)\s*:.*?(?=(mesto|miesto konania|miesto podujatia|miesto|adresa|lokalita)\s*:|$)/gi, '')
+    .replace(/(miesto konania podujatia|miesto konania|miesto podujatia|miesto udalosti|mesto|miesto|adresa|lokalita|venue|location)\s*:\s*/gi, '')
     .replace(/(?<![\d.])\d{1,2}\.\s*\d{1,2}\.\s*(\d{4})?(\s*,?\s*\d{1,2}[:.]\d{2})?\s*[|,–-]?\s*/g, '') // "04.10.2026 10:30 | BDNR"
     .replace(/\s+/g, ' ').trim();
 }
@@ -54,11 +54,26 @@ function structuredDate(text, now) {
   return finishDate({ start, time });
 }
 
+// The year of a date in a URL with the same month and day as `iso`: "2026-08-19", "2026/08/19", "19-08-2026".
+function yearInUrl(url, iso) {
+  const [, m, d] = iso.split('-');
+  const re = new RegExp(`(?<!\\d)(20\\d\\d)[-/._]${m}[-/._]${d}(?!\\d)|(?<!\\d)${d}[-._]${m}[-._](20\\d\\d)(?!\\d)`);
+  const hit = re.exec(String(url || ''));
+  return hit && (hit[1] || hit[2]);
+}
+
 export function makeEvent(raw, sourceUrl, now = new Date()) {
   const title = plain(raw.title);
   // Free-form text (from a recipe) goes through the learned formats; structured dates don't need to.
-  const date = raw.start ? structuredDate(raw.start, now) : readDateText(clean(raw.dateText), now);
-  if (!title || !date || tooFarAhead(date.start, now)) return null;
+  let date = raw.start ? structuredDate(raw.start, now) : readDateText(clean(raw.dateText), now);
+  if (!title || !date) return null;
+  // A date written without its year, whose own page address has the full date ("…/2026-08-19-…"):
+  // that year, not the one guessed.
+  if (!raw.start && !/\d{4}/.test(raw.dateText || '')) {
+    const y = yearInUrl(raw.url, date.start);
+    if (y && !date.start.startsWith(y)) date = { ...date, start: `${y}${date.start.slice(4)}`, end: undefined };
+  }
+  if (tooFarAhead(date.start, now)) return null;
   const endDate = raw.end ? structuredDate(raw.end, now) : null;
   const time = raw.time || date.time;
   const fin = finishDate({
@@ -76,7 +91,7 @@ export function makeEvent(raw, sourceUrl, now = new Date()) {
     endTime: fin.endTime,
     dateText: raw.start ? undefined : clean(raw.dateText), // kept so the date can be read again when a format is learned
     location: cleanLocation(raw.location).slice(0, 200) || undefined,
-    description: plain(raw.description).slice(0, 500) || undefined,
+    description: plain(raw.description).replace(/^(popis( udalosti| podujatia)?|o podujatí|description)\s*:\s*/i, '').slice(0, 500) || undefined,
     url: raw.url || sourceUrl,
     source: sourceUrl,
     tags: raw.tags?.filter((t) => TAGS.includes(t)).length ? raw.tags.filter((t) => TAGS.includes(t)) : undefined,
@@ -92,6 +107,19 @@ function* walkJsonLd(node) {
   }
 }
 
+// schema.org addressCountry: "SK", "Slovakia", { name: "United States" }.
+const pageCountry = (c) => clean(typeof c === 'string' ? c : c?.name || c?.['@id'] || '') || undefined;
+/**
+ * A start with a time zone no Slovak event has: the Americas' (-05:00) or Asia's (+03:00 and more).
+ * "+00:00"/"Z" says nothing (sites write local time so); +01:00 and +02:00 are Central Europe's.
+ */
+function zoneCountry(start) {
+  const m = /T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?([+-])(\d{2}):?(\d{2})$/.exec(String(start || '').trim());
+  if (!m || (m[2] === '00' && m[3] === '00')) return undefined;
+  const h = (m[1] === '-' ? -1 : 1) * Number(m[2]);
+  return h < 0 || h > 2 ? 'abroad' : undefined;
+}
+
 /** schema.org Event objects embedded as JSON-LD. Free, exact, and fairly common. */
 export function jsonLdEvents($, pageUrl) {
   const out = [];
@@ -101,14 +129,17 @@ export function jsonLdEvents($, pageUrl) {
     for (const n of walkJsonLd(data)) {
       const types = [].concat(n['@type'] || []);
       if (!types.some((t) => /Event$/.test(t))) continue;
-      const loc = [].concat(n.location || [])[0] || {};
+      const locs = [].concat(n.location || []);
+      const loc = locs.find((l) => !/VirtualLocation/.test(l?.['@type'])) || {};
       const addr = typeof loc.address === 'string' ? loc.address
         : [loc.address?.streetAddress, loc.address?.addressLocality].filter(Boolean).join(', ');
+      // Online only (a webinar on Zoom): no place to look up.
+      const online = !addr && !loc.name && (locs.length > 0 || /OnlineEventAttendanceMode/.test(n.eventAttendanceMode || ''));
       const ev = makeEvent({
         title: n.name,
         start: n.startDate,
         end: n.endDate,
-        location: [loc.name, addr].filter(Boolean).join(', '),
+        location: online ? 'Online' : [loc.name, addr].filter(Boolean).join(', '),
         description: n.description,
         url: n.url || n.URL ? absolutize(n.url || n.URL, pageUrl) : undefined, // some sites write "URL"
         tags: tagsFromSchemaTypes(types),
@@ -116,6 +147,9 @@ export function jsonLdEvents($, pageUrl) {
       // Coordinates, when the page gives them (Place.geo): the best location there is.
       const lat = Number(loc.geo?.latitude), lon = Number(loc.geo?.longitude);
       if (ev && Number.isFinite(lat) && Number.isFinite(lon) && (lat || lon)) ev.geo = { lat, lon };
+      // The country the page gives (geo.js: eventCountry), from the address or the start's time zone.
+      const country = ev && (pageCountry(loc.address?.addressCountry) || zoneCountry(n.startDate));
+      if (country) ev.pageCountry = country;
       if (ev) out.push(ev);
     }
   });
@@ -180,6 +214,20 @@ export function applyRecipe($, recipe, pageUrl) {
       try { return clean($el.find(sel).first().text()) || ($el.is(sel) ? clean($el.text()) : ''); }
       catch { return ''; }
     };
+    // A title in two or three cells of one item is a match: "BK DSG Dunajská Streda – BK Iskra
+    // Partizánske" (the first cell alone named only the home team).
+    const pickTitle = (sel) => {
+      try {
+        const cells = $el.find(sel).toArray();
+        const parts = [...new Set(cells.map((x) => clean($(x).text())).filter(Boolean))];
+        // Cells alike (same tag and class), not a title and a "more" link.
+        const alike = cells.every((x) => x.tagName === cells[0].tagName && $(x).attr('class') === $(cells[0]).attr('class'));
+        if (alike && parts.length >= 2 && parts.length <= 3 && parts.every((t) => t.length <= 60 && !/^(viac|more|detail|info|kúpiť|kupit|vstupenk|listky|lístky|tickets?|rezerv)/i.test(t))) {
+          return parts.join(' – ');
+        }
+      } catch {}
+      return pick(sel);
+    };
     let href;
     try {
       href = recipe.link
@@ -188,11 +236,11 @@ export function applyRecipe($, recipe, pageUrl) {
     } catch {}
     const dateText = [pick(recipe.date), pick(recipe.time)].join(' ');
     const ev = makeEvent({
-      title: pick(recipe.title),
+      title: recipe.title ? pickTitle(recipe.title) : '',
       dateText,
       location: pick(recipe.location),
       description: pick(recipe.description),
-      url: href ? absolutize(href, pageUrl) : undefined,
+      url: href && !/^\s*(javascript|mailto|tel):/i.test(href) ? absolutize(href, pageUrl) : undefined,
     }, pageUrl);
     if (ev) out.push(ev);
   });

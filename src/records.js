@@ -177,6 +177,22 @@ export class Records {
     return this.db.prepare(sql).all(...params);
   }
 
+  /**
+   * Drop one field from every record whose key passes `keep(key)` (all by default), in the database
+   * and in the records held in memory. Returns how many rows had it.
+   */
+  clearField(field, keep = () => true) {
+    if (!/^\w+$/.test(field)) throw new Error(`bad field ${field}`);
+    this.flush();
+    for (const [key, l] of this.live) if (keep(key)) delete l.rec[field];
+    for (const [key, w] of this.weak) { const rec = w.ref.deref(); if (rec && keep(key)) delete rec[field]; }
+    const fn = `keep_${this.name}`;
+    this.db.function(fn, { deterministic: true }, (key) => (keep(key) ? 1 : 0));
+    const { changes } = this.db.prepare(`UPDATE ${this.name} SET data = json_remove(data, '$.${field}') WHERE json_extract(data, '$.${field}') IS NOT NULL AND ${fn}(key) = 1`).run();
+    this.flush();
+    return Number(changes);
+  }
+
   /** Bring a record's indexed columns up to date now (e.g. a page's finalUrl was just set). */
   touchColumns(key) {
     const rec = this.get(key);
