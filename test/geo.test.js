@@ -22,8 +22,15 @@ describe('parseLocation', () => {
     const p = parseLocation('Štátna filharmónia Košice, Dom umenia');
     assert.equal(p.name, 'Štátna filharmónia Košice');
   });
-  test.todo('"Štátna filharmónia Košice, Dom umenia" should have city Košice (README: the town is found '
-    + 'whatever the order; knownTown\'s doc gives this very example). Actual: city "Dom umenia"');
+  test('a town inside the venue\'s name, when the last part names none', () => {
+    const p = parseLocation('Štátna filharmónia Košice, Dom umenia');
+    assert.equal(p.city, 'Košice');
+    assert.equal(p.name, 'Štátna filharmónia Košice');
+    assert.equal(venueKey('Štátna filharmónia Košice, Dom umenia'), 'statna filharmonia kosice|kosice');
+  });
+  test('a town in the name does not override a town abroad', () => {
+    assert.notEqual(parseLocation('Hotel Bratislava, Wien Mitte').city, 'Bratislava');
+  });
 
   test('venue, street, postcode and town', () => {
     assert.deepEqual({ ...parseLocation('CINEMAX, Moldavská cesta 32., OC OPTIMA, Košice 04011') }, {

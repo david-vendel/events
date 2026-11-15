@@ -191,7 +191,12 @@ function splitLocation(text, cityHint) {
     // Otherwise the city is the last plain part after the street (or the last part, when there's
     // no street), unless that part is a venue that merely names its town ("Miestny úrad Košice").
     const cityPart = [...rest].reverse().find((r) => r.afterStreet || !street);
-    if (cityPart && (rest.length > 1 || street) && !notATown(cityPart.p)) {
+    // A Slovak town named inside another part, when the last part names none: "Štátna filharmónia
+    // Košice, Dom umenia" is in Košice, not in a town called "Dom umenia".
+    const inName = !street && !looksAbroad(text) && cityPart && !townIn(cityPart.p)
+      && rest.map((r) => townIn(r.p)).find(Boolean);
+    if (inName) city = inName;
+    else if (cityPart && (rest.length > 1 || street) && !notATown(cityPart.p)) {
       const named = townIn(cityPart.p);
       city = named || cityPart.p;
       if (!named || rest.length > 1) rest.splice(rest.indexOf(cityPart), 1);
