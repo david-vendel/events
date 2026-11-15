@@ -276,9 +276,12 @@ describe('locativeTown / slovakWords / czechWords', () => {
     assert.equal(czechWords('Hlavné námestie'), false);
     assert.equal(czechWords(''), false);
   });
-  // The doc comment gives "Městské divadlo" and "Třemošnice" as Czech, but each has only one of ě ř ů,
-  // so the ">= 2" threshold says false for both (README step 6 also cites "Městské divadlo").
-  test.todo('czechWords("Městské divadlo") and czechWords("Třemošnice") are true (currently false)');
+  test('two Czech-only letters are Czech; one is not (a Czech name in a Slovak event)', () => {
+    assert.equal(czechWords('Městské divadlo Přerov'), true);
+    assert.equal(czechWords('Hřbitovní kaple Třemošnice'), true);
+    assert.equal(czechWords('Městské divadlo'), false);
+    assert.equal(czechWords('Koncert: Antonín Dvořák, Bratislava'), false);
+  });
 });
 
 describe('slovakPage', () => {

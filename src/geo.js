@@ -534,7 +534,7 @@ export function eventCountry(state, ev, { strong = false } = {}) {
   try { host = new URL(via).hostname; } catch { return undefined; }
   // No place at all on a Slovak site (a cinema's coming films, a festival's own pages).
   if (!ev.location && host.endsWith('.sk')) return 'sk';
-  // Czech words ("Městské divadlo", "Třemošnice") on a site not known to have its events in Slovakia.
+  // Czech words ("Městské divadlo Přerov", "Hřbitovní kaple Třemošnice") on a site not known to have its events in Slovakia.
   if (czechWords(`${ev.title} ${ev.location || ''} ${ev.description || ''}`) && regionAt(state, via) !== 'sk') return 'abroad';
   // Only what the event itself says counts towards what's learned about its pages (crawler.js:
   // inSlovakiaOnly): a verdict from that record would only feed itself.
