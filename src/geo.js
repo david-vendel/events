@@ -528,7 +528,12 @@ export function* countrySignals(state, ev) {
   const page = ev.pageCountry || ev.sources?.find((r) => r.pageCountry && !r.linked)?.pageCountry;
   if (page) yield { step: 'page', c: countryCode(page) };
   const at = coordsFor(state, ev);
-  if (at) yield { step: 'coords', c: inSlovakia(at) ? 'sk' : 'abroad' };
+  // A place looked up without any town that was found in Slovakia (Slovakia is searched first) is a
+  // guess: "Las Vegas" found a bar of that name in Bratislava. It comes after what the AI, the
+  // address and the language say.
+  const guess = at && !['page', 'manual'].includes(at.precision) && inSlovakia(at)
+    && !parseLocation(ev.location || '', cityHint(state, ev)).city;
+  if (at && !guess) yield { step: 'coords', c: inSlovakia(at) ? 'sk' : 'abroad' };
   if (ev.location) {
     const said = locationCountry(ev.location, cityHint(state, ev));
     if (said) yield { step: 'location+hint', c: said };
@@ -550,7 +555,7 @@ export function* countrySignals(state, ev) {
   const hint = cityHint(state, ev) || (src?.venue && knownTown(src.venue));
   if (hint && locationCountry(hint)) yield { step: 'site city', c: locationCountry(hint) };
   let host;
-  try { host = new URL(via).hostname; } catch { yield { step: 'no host' }; return; }
+  try { host = new URL(via).hostname; } catch { if (guess) yield { step: 'coords (no town)', c: 'sk' }; yield { step: 'no host' }; return; }
   // No place at all on a Slovak site (a cinema's coming films, a festival's own pages).
   if (!ev.location && host.endsWith('.sk')) yield { step: '.sk site', c: 'sk' };
   // The language its title and description are written in (language.js). Slovak is Slovakia; Czech,
@@ -565,6 +570,7 @@ export function* countrySignals(state, ev) {
     && !/slovak|slovensk|bratislav/i.test(`${text} ${ev.location || ''}`) && !townIn(`${text} ${ev.location || ''}`)) {
     yield { step: 'english text', c: 'abroad' };
   }
+  if (guess) yield { step: 'coords (no town)', c: 'sk' };
   if (!ev.location && regionAt(state, via) === 'sk') yield { step: 'site region', c: 'sk', weak: true };
   else yield { step: 'none', weak: true };
 }

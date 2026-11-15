@@ -152,6 +152,15 @@ describe('venueKey', () => {
 describe('eventCountry', () => {
   const s = fakeState();
 
+  test('a place looked up without a town and found in Slovakia is a guess: the AI or the language beat it', () => {
+    const venues = { 'las vegas|': { status: 'ok', lat: 48.15, lon: 17.17, precision: 'venue', country: 'sk', text: 'Las Vegas' } };
+    const ev = { title: 'Jazz night', location: 'Las Vegas', source: 'https://www.vicslasvegas.com/event/x' };
+    assert.equal(eventCountry(fakeState({ venues }), { ...ev, country: 'United States' }), 'abroad');
+    assert.equal(eventCountry(fakeState({ venues }), { ...ev, description: 'Join us for a night of jazz with your friends at the club.' }), 'abroad');
+    // Nothing else known: the lookup still counts.
+    assert.equal(eventCountry(fakeState({ venues }), ev), 'sk');
+  });
+
   test('the language of the title and description', () => {
     const st = fakeState();
     // Slovak text: Slovakia, wherever the site is.
