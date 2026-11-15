@@ -377,12 +377,35 @@ async function geocode(text, cityHint) {
   return null;
 }
 
-// The city the event's listing page covers (from the AI's look at it), or else the one its whole site
-// covers (only set while every page the AI read named the same city), as a hint.
+// Sites that are one place: their events are in its town (a town hall's calendar, a theatre's programme).
+const ONE_PLACE = new Set(['municipality', 'venue', 'shopping_center']);
+/**
+ * The town a site's events are in, when that can be trusted. A site that is one place: its town. A
+ * listing of many places (event_listing, ticketing, news…): only the town the AI gave for this very
+ * page, and only on a Slovak site ("kosice.virtualne.sk/akcie…"). A whole site's town from one or two
+ * pages the AI read put every event of hapsy.co in Košice, eventbrite.com's in Trnava, sportnet's in
+ * Liptovský Mikuláš (Nov 2026).
+ */
+export function trustedCity(source, url) {
+  if (!source) return undefined;
+  const page = source.pages?.[url]?.city || undefined;
+  if (ONE_PLACE.has(source.siteKind)) return page || source.city;
+  const host = hostOf(url || '') || '';
+  if (page && host.endsWith('.sk')) return page;
+  // A site named after its town: "bratislava.codnes.sk", "nasekosice.sk", "visitbardejov.sk".
+  return source.city && namedInHost(host, source.city) ? source.city : undefined;
+}
+const namedInHost = (host, city) => {
+  const town = fold(city).replace(/[^a-z]/g, '');
+  return town.length >= 4 && fold(host).replace(/[^a-z]/g, '').includes(town);
+};
+/** A site's venue, only when the site is that venue's own (a ticket shop's address is no venue). */
+export const trustedVenue = (source) => (['venue', 'shopping_center'].includes(source?.siteKind) ? source.venue : undefined);
+
+// The town the event's listing page or site covers, as a hint (trustedCity).
 function cityHint(state, ev) {
   const via = ev.source || ev.sources?.[0]?.via;
-  const src = sourceOf(state, ev);
-  return src?.pages?.[via]?.city || src?.city;
+  return trustedCity(sourceOf(state, ev), via);
 }
 
 // The source site an event was read from.
@@ -552,7 +575,8 @@ export function* countrySignals(state, ev) {
   // The city its listing page or site covers, or its venue's (a theatre's own site), when the
   // location says nothing we know ("Kategória: Pre deti • … • Staré divadlo" on nitra.eu).
   const src = sourceOf(state, ev);
-  const hint = cityHint(state, ev) || (src?.venue && knownTown(src.venue));
+  const venue = trustedVenue(src);
+  const hint = cityHint(state, ev) || (venue && knownTown(venue));
   if (hint && locationCountry(hint)) yield { step: 'site city', c: locationCountry(hint) };
   let host;
   try { host = new URL(via).hostname; } catch { if (guess) yield { step: 'coords (no town)', c: 'sk' }; yield { step: 'no host' }; return; }

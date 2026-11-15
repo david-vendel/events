@@ -29,7 +29,7 @@ import {
 } from './ai.js';
 import { aiJobDone, aiJobFailed, aiJobPostponed, aiJobsDue, enqueueAi } from './aiqueue.js';
 import { eventTags, headingTags, learnTags } from './tags.js';
-import { eventCountry, locateEvents, purgeDoubtfulVenues, repairSiteCities } from './geo.js';
+import { eventCountry, locateEvents, purgeDoubtfulVenues, repairSiteCities, trustedCity, trustedVenue } from './geo.js';
 import { SK_PLACES, countryInUrl, isTown, regionOf, slovakPage, slovakVariants } from './slovakia.js';
 import { EventIndex, migrate } from './events.js';
 import { dueForVerification, verifyEvent } from './corroborate.js';
@@ -331,11 +331,12 @@ function inSlovakiaOnly(state, events, url, source) {
   let sk = 0, abroad = 0;
   for (const ev of events) {
     // A venue's own site often omits the address; a single-city listing at least gives the city.
-    const city = source.pages[url]?.city || source.city;
+    const city = trustedCity(source, url);
     // Not when the page's or the event's address names a place abroad ("eventland.eu/barcelona/…" on
     // a site whose city is Bratislava: the Barcelona road race became "Bratislava", Nov 2026).
     const elsewhere = [url, ev.url].some((u) => sectionAbroad(u));
-    if (!ev.location && !elsewhere && (source.venue || city)) ev.location = source.venue || city;
+    const venue = trustedVenue(source);
+    if (!ev.location && !elsewhere && (venue || city)) ev.location = venue || city;
     // Counted towards what's learned about this page's template and site only when the event itself
     // says where it is: a verdict taken from that record would only feed it.
     const sure = eventCountry(state, ev, { strong: true });
@@ -1081,6 +1082,33 @@ function repairSiteCityAbroad(state, report) {
   report.log(`Places: ${fmtN(n)} events had their site's city for a location although their address is abroad; forgotten`);
 }
 
+// 15 Nov 2026, once: events without a location of their own were given their site's town or "venue"
+// although the site lists many places (hapsy.co: everything in Košice, ticketlive.sk: everything at
+// "Stromoradie, Prešov"). They lose it unless the site can be trusted for it now (geo.js: trustedCity).
+const UNTRUSTED_SITE_CITY = 'untrusted-site-city-2026-11-15';
+
+function repairUntrustedSiteCity(state, report) {
+  state.meta.repairs ??= [];
+  if (state.meta.repairs.includes(UNTRUSTED_SITE_CITY)) return;
+  let n = 0;
+  for (const ev of Object.values(state.events)) {
+    if (!ev.location) continue;
+    const rows = ev.sources?.filter((r) => !r.linked) || [];
+    let source;
+    try { source = state.sources[new URL(ev.source).origin]; } catch { continue; }
+    if (!source) continue;
+    const given = new Set([source.venue, source.city, ...Object.values(source.pages || {}).map((p) => p?.city)].filter(Boolean));
+    if (!given.has(ev.location)) continue;
+    const trusted = new Set([trustedVenue(source), ...[ev.source, ...rows.map((r) => r.via)].map((u) => trustedCity(source, u))].filter(Boolean));
+    if (trusted.has(ev.location)) continue;
+    delete ev.location;
+    for (const r of rows) if (given.has(r.location) && !trusted.has(r.location)) delete r.location;
+    n++;
+  }
+  state.meta.repairs.push(UNTRUSTED_SITE_CITY);
+  report.log(`Places: ${fmtN(n)} events had a town or venue of a site listing many places, not their own; forgotten`);
+}
+
 // 15 Nov 2026: lookups that searched Slovakia first had put thousands of events abroad on Slovak shops
 // and cinemas, and each such event counted its site and template as Slovak (expomap.ru 7,313 to 9,620).
 // Once: forget those places, and count again where each site's and template's events are in Slovakia,
@@ -1273,6 +1301,7 @@ export async function crawlPass(state, options = {}, control = defaultControl())
   bootstrapCountries(state, report);
   recountSlovakia(state, report);
   repairSiteCityAbroad(state, report);
+  repairUntrustedSiteCity(state, report);
   if (!state.patterns.count()) {
     const n = bootstrapPatterns(state, CRASH_REPAIR.from);
     report.log(`Page templates: learned from ${n} earlier visits which kinds of pages hold events`);
