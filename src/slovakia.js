@@ -358,14 +358,6 @@ export function slovakWords(text) {
   return SLOVAK_LETTERS.test(text) || SLOVAK_WORDS.test(fold(text)) || Boolean(locativeTown(text));
 }
 
-/**
- * Is this text Czech? Two or more letters only Czech has ("Městské divadlo Přerov"). One isn't enough:
- * Slovak events name Czech people ("Antonín Dvořák") and places ("Městské divadlo" alone).
- */
-export function czechWords(text) {
-  return ((text || '').match(/[ěřů]/gi) || []).length >= 2;
-}
-
 // Letters only Slovak and Czech write (č, š and ž are Latvian, Lithuanian, Croatian… too).
 const SK_CZ_LETTERS = /[ľĺŕťďňěřůĽĹŔŤĎŇĚŘŮ]/g;
 

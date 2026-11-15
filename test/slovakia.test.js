@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {
   fold, skPlace, boroughOf, uniqueName, isTown, townOfPlace, inSlovakia, foreignTown, countryPart,
   countryNamed, looksAbroad, usState, isOnline, countryInUrl, foreignHost, countryCode, regionOf,
-  slovakVariants, namesSkTown, locativeTown, slovakWords, czechWords, slovakPage,
+  slovakVariants, namesSkTown, locativeTown, slovakWords, slovakPage,
 } from '../src/slovakia.js';
 
 describe('fold', () => {
@@ -255,7 +255,7 @@ describe('namesSkTown', () => {
   });
 });
 
-describe('locativeTown / slovakWords / czechWords', () => {
+describe('locativeTown / slovakWords', () => {
   test('a Slovak town in the locative', () => {
     assert.equal(locativeTown('Divadlo J. Palárika v Trnave'), 'Trnava');
     assert.equal(locativeTown('knižnica v Tvrdošovciach'), 'Tvrdošovce');
@@ -269,18 +269,6 @@ describe('locativeTown / slovakWords / czechWords', () => {
   });
   test('not Slovak', () => {
     for (const t of ['Lucerna, Praha', 'Café Paris', 'Městské divadlo', '']) assert.equal(slovakWords(t), false, t);
-  });
-  test('Czech: two or more letters only Czech has', () => {
-    assert.equal(czechWords('Dům kultury, Třebíč'), true);
-    assert.equal(czechWords('Hořice'), false); // only one
-    assert.equal(czechWords('Hlavné námestie'), false);
-    assert.equal(czechWords(''), false);
-  });
-  test('two Czech-only letters are Czech; one is not (a Czech name in a Slovak event)', () => {
-    assert.equal(czechWords('Městské divadlo Přerov'), true);
-    assert.equal(czechWords('Hřbitovní kaple Třemošnice'), true);
-    assert.equal(czechWords('Městské divadlo'), false);
-    assert.equal(czechWords('Koncert: Antonín Dvořák, Bratislava'), false);
   });
 });
 

@@ -144,6 +144,27 @@ describe('venueKey', () => {
 describe('eventCountry', () => {
   const s = fakeState();
 
+  test('the language of the title and description', () => {
+    const st = fakeState();
+    // Slovak text: Slovakia, wherever the site is.
+    assert.equal(eventCountry(st, { title: 'Spoločný koncert', description: 'Srdečne vás pozývame, vstup je voľný pre všetkých.', source: 'https://example.org/e' }), 'sk');
+    // Czech text on a site not known to be Slovak: abroad.
+    assert.equal(eventCountry(st, { title: 'Koncert', description: 'Srdečně zveme všechny, kteří chtějí přijít.', source: 'https://example.org/e' }), 'abroad');
+    // English, outside .sk, naming no Slovak town: abroad.
+    assert.equal(eventCountry(st, { title: 'GIS Day', description: 'Join us for a free online event about maps and your community.', source: 'https://gisday.com/e' }), 'abroad');
+  });
+  test('English is not abroad on a .sk site, on a Slovak site, or when it names a Slovak town', () => {
+    const en = 'Join us for a free event about the history of the town and its people.';
+    assert.notEqual(eventCountry(fakeState(), { title: 'A journey', description: en, location: 'Sunday / Štrbské Pleso', source: 'https://www.strbskepleso.sk/events' }), 'abroad');
+    assert.equal(eventCountry(fakeState(), { title: 'A journey', description: en, location: 'Pódium', source: 'https://www.regionpovazie.sk/en/' }), undefined);
+    assert.equal(eventCountry(fakeState(), { title: 'Bratislava Collectors Exchange', description: en, source: 'https://eventland.eu/x' }), undefined);
+    assert.equal(eventCountry(fakeState({ hosts: { 'expats.com': { sk: 10, abroad: 0 } } }),
+      { title: 'Expat quiz', description: en, location: 'Some Pub', source: 'https://expats.com/e' }), undefined);
+  });
+  test('a Czech band\'s name in a Slovak town stays in Slovakia', () => {
+    assert.equal(eventCountry(fakeState(), { title: 'Zdeněk Vřešťál 70 - NEŘEŽ TRIO', location: 'Synagóga, Nitra', source: 'https://www.ajdnes.sk/x' }), 'sk');
+  });
+
   test('a Slovak town in the location', () => {
     assert.equal(eventCountry(s, { location: 'Dom kultúry, Prešov' }), 'sk');
   });

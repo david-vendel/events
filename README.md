@@ -230,9 +230,14 @@ good sources. Now only events in Slovakia are kept ([src/slovakia.js](src/slovak
    names Slovakia counts on a site abroad only for an event without a location: eventbrite's
    `/d/slovakia--trnava/` lists Vienna too), the city of its listing page or site, or its venue's;
 6. last, its site: an event without a location on a `.sk` site, or on pages whose events are in
-   Slovakia, is there; Czech words in the title or description ("Městské divadlo Přerov": two letters only Czech has, as one
-   alone may be a Czech name, "Dvořák") on a site not known
-   to have its events in Slovakia mean abroad. Otherwise it's not known until it's located.
+   Slovakia, is there. Then the language of its title and description ([src/language.js](src/language.js)),
+   by the small words every sentence has, which Slovak and Czech write differently ("sú"/"jsou",
+   "ktorý"/"který"), not by single letters (one "ř" is often a Czech name in a Slovak event, "Dvořák";
+   a Czech band's name isn't a Czech sentence): Slovak is Slovakia; Czech, on a site not known to have
+   its events in Slovakia, is abroad; English on a site outside `.sk` that names no Slovak town is
+   abroad (in Nov 2026, of 7,392 such events whose country wasn't known all but 2 were American or
+   worldwide, and those 2 were on `.sk` sites). Hungarian and German say nothing (Hungarians live in
+   southern Slovakia). Otherwise it's not known until it's located.
 
 The website shows only events known to be in Slovakia, and those whose country isn't known yet if
 they come from a `.sk` site; the others stay stored until they're located (in Nov 2026 most of them

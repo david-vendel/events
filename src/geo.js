@@ -15,8 +15,9 @@
 import { fetchBody } from './fetcher.js';
 import { regionAt } from './learn.js';
 import { hostOf } from './urls.js';
+import { languageOf } from './language.js';
 import {
-  SK_ALIASES, SK_TOWN_NAMES, boroughOf, countryCode, countryInUrl, countryNamed, countryPart, czechWords, foreignTown, inSlovakia, isOnline, isTown, looksAbroad, skPlace, slovakWords, townOfPlace, uniqueName, usState,
+  SK_ALIASES, SK_TOWN_NAMES, boroughOf, countryCode, countryInUrl, countryNamed, countryPart, foreignTown, inSlovakia, isOnline, isTown, looksAbroad, skPlace, slovakWords, townOfPlace, uniqueName, usState,
 } from './slovakia.js';
 
 const NOMINATIM = process.env.EVENTS_NOMINATIM_URL || 'https://nominatim.openstreetmap.org/search';
@@ -497,50 +498,70 @@ export function purgeDoubtfulVenues(state) {
  * the listing's address, the city of its site or venue, and last what's known of its site.
  */
 export function eventCountry(state, ev, { strong = false } = {}) {
+  for (const { c, weak } of countrySignals(state, ev)) {
+    if (weak && strong) return undefined;
+    if (c) return c;
+  }
+  return undefined;
+}
+
+/**
+ * Every clue to where an event is, best first, as { step, c } (c: 'sk' / 'abroad'). Lazy: eventCountry
+ * takes the first. `weak` ones come from what's learned about the event's pages, which mustn't count
+ * towards that very record (crawler.js: inSlovakiaOnly). A clue with no c ends the list (no host).
+ */
+export function* countrySignals(state, ev) {
   // The location's own words first: a Slovak town it names beats coordinates that disagree (a page's
   // organiser address, a same-named village abroad), a town or country abroad is abroad. A village
   // alone, on pages whose events are abroad, is the Czech one of that name.
   const via = ev.sources?.find((r) => !r.linked)?.via || ev.source;
   const own = ev.location && locationEvidence(ev.location);
-  if (own === 'village') return via && regionAt(state, via) === 'abroad' ? 'abroad' : 'sk';
-  if (own) return own;
+  if (own === 'village') yield { step: 'village', c: via && regionAt(state, via) === 'abroad' ? 'abroad' : 'sk' };
+  else if (own) yield { step: 'location', c: own };
   // What the event's page says in its schema.org data: addressCountry, or a time zone of the Americas
   // or Asia ("…T19:00:00-05:00"; extract.js: jsonLdEvents).
   const page = ev.pageCountry || ev.sources?.find((r) => r.pageCountry && !r.linked)?.pageCountry;
-  if (page) return countryCode(page);
+  if (page) yield { step: 'page', c: countryCode(page) };
   const at = coordsFor(state, ev);
-  if (at) return inSlovakia(at) ? 'sk' : 'abroad';
+  if (at) yield { step: 'coords', c: inSlovakia(at) ? 'sk' : 'abroad' };
   if (ev.location) {
     const said = locationCountry(ev.location, cityHint(state, ev));
-    if (said) return said;
+    if (said) yield { step: 'location+hint', c: said };
     // Written in Slovak: "Dom kultúry Kanianka", "Evanjelický kostol", "Divadlo J. Palárika v Trnave".
-    if (slovakWords(ev.location)) return 'sk';
+    if (slovakWords(ev.location)) yield { step: 'slovak words', c: 'sk' };
   }
-  if (ev.country) return countryCode(ev.country);
+  if (ev.country) yield { step: 'ai', c: countryCode(ev.country) };
   // A country code in the title: "LEVICE (SK)", "BRUNTÁL (CZ)", "KOLLÁROVCI - CZ TOUR".
-  if (/\((sk|sr)\)/i.test(ev.title || '')) return 'sk';
-  if (/\((cz|čr|at|hu|pl|de|ua)\b|\bcz (mini)?tour\b/i.test(ev.title || '')) return 'abroad';
+  if (/\((sk|sr)\)/i.test(ev.title || '')) yield { step: 'title code', c: 'sk' };
+  if (/\((cz|čr|at|hu|pl|de|ua)\b|\bcz (mini)?tour\b/i.test(ev.title || '')) yield { step: 'title code', c: 'abroad' };
   // The listing's address: "eventbrite.com/d/united-kingdom/…", "…/Kino-Hviezda-Trencin". That it
   // names Slovakia says less on a site abroad: eventbrite's "/d/slovakia--trnava/" lists Vienna too,
   // so there it counts only for an event without a location (one with is looked up).
   const inUrl = via && countryInUrl(via);
-  if (inUrl === 'abroad' || (inUrl === 'sk' && (!ev.location || hostOf(via).endsWith('.sk')))) return inUrl;
+  if (inUrl === 'abroad' || (inUrl === 'sk' && (!ev.location || hostOf(via).endsWith('.sk')))) yield { step: 'url', c: inUrl };
   // The city its listing page or site covers, or its venue's (a theatre's own site), when the
   // location says nothing we know ("Kategória: Pre deti • … • Staré divadlo" on nitra.eu).
   const src = sourceOf(state, ev);
   const hint = cityHint(state, ev) || (src?.venue && knownTown(src.venue));
-  if (hint && locationCountry(hint)) return locationCountry(hint);
+  if (hint && locationCountry(hint)) yield { step: 'site city', c: locationCountry(hint) };
   let host;
-  try { host = new URL(via).hostname; } catch { return undefined; }
+  try { host = new URL(via).hostname; } catch { yield { step: 'no host' }; return; }
   // No place at all on a Slovak site (a cinema's coming films, a festival's own pages).
-  if (!ev.location && host.endsWith('.sk')) return 'sk';
-  // Czech words ("Městské divadlo Přerov", "Hřbitovní kaple Třemošnice") on a site not known to have its events in Slovakia.
-  if (czechWords(`${ev.title} ${ev.location || ''} ${ev.description || ''}`) && regionAt(state, via) !== 'sk') return 'abroad';
-  // Only what the event itself says counts towards what's learned about its pages (crawler.js:
-  // inSlovakiaOnly): a verdict from that record would only feed itself.
-  if (strong) return undefined;
-  if (!ev.location && regionAt(state, via) === 'sk') return 'sk';
-  return undefined;
+  if (!ev.location && host.endsWith('.sk')) yield { step: '.sk site', c: 'sk' };
+  // The language its title and description are written in (language.js). Slovak is Slovakia; Czech,
+  // on a site not known to have its events in Slovakia, is abroad. English is abroad on a site
+  // outside .sk when nothing in it names a Slovak town: of 7,392 such events whose country wasn't
+  // known (Nov 2026) all were American or worldwide but 2, both on .sk sites.
+  const text = `${ev.title || ''} ${ev.description || ''}`;
+  const lang = languageOf(text);
+  if (lang === 'sk') yield { step: 'slovak text', c: 'sk' };
+  else if (lang === 'cz' && regionAt(state, via) !== 'sk') yield { step: 'czech text', c: 'abroad' };
+  else if (lang === 'en' && !host.endsWith('.sk') && regionAt(state, via) !== 'sk'
+    && !/slovak|slovensk|bratislav/i.test(`${text} ${ev.location || ''}`) && !townIn(`${text} ${ev.location || ''}`)) {
+    yield { step: 'english text', c: 'abroad' };
+  }
+  if (!ev.location && regionAt(state, via) === 'sk') yield { step: 'site region', c: 'sk', weak: true };
+  else yield { step: 'none', weak: true };
 }
 
 // A place without a town looked up worldwide, before lookups tried Slovakia first (18 Oct 2026): a hit
