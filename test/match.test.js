@@ -91,6 +91,13 @@ describe('dateDistance', () => {
 });
 
 describe('differentTowns', () => {
+  test("a town site's address with the town's words run together or hyphenated (virtualne.sk)", () => {
+    // "Ja, Rocky" at Kino Úsmev in Hlohovec was joined with Kino Orbis in Rimavská Sobota.
+    const hlohovec = { location: 'Kino Úsmev, Hlohovec', url: 'https://kulthund.sk/podujatie/ja-rocky-16298' };
+    assert.equal(differentTowns(hlohovec, { location: 'Kino Orbis', url: 'https://rimavskasobota.virtualne.sk/akcie-a-podujatia/ja--rocky--0.htm' }), true);
+    assert.equal(differentTowns(hlohovec, { location: 'Kino', url: 'https://banska-bystrica.example.sk/a' }), true);
+    assert.equal(differentTowns(hlohovec, { location: 'Milana Rastislava Štefánika 223/3', url: 'https://hlohovec.virtualne.sk/a' }), false);
+  });
   test('two known Slovak towns', () => {
     assert.equal(differentTowns({ location: 'Dom umenia, Košice' }, { location: 'Mestské divadlo, Žilina' }), true);
   });

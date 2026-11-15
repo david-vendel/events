@@ -4,7 +4,7 @@
 // among all event titles: "TOSCA" and "Giacomo Puccini: TOSCA" share the word that matters, while
 // "Kino pre deti: HLAVIČKA" and "Kino pre deti: ZABUDNUTÝ OSTROV" share only words many titles have.
 import { knownTown, parseLocation, withoutTowns } from './geo.js';
-import { isTown, skPlace } from './slovakia.js';
+import { SK_PLACES, isTown, skPlace } from './slovakia.js';
 
 // Words that say nothing about which event it is: grammar, and ticket-shop notes ("VYPREDANÉ").
 const STOPWORDS = new Set(`a i o u v vo na do od po pri pre s so z zo za k ku je sa si to aj ale
@@ -104,16 +104,27 @@ export const differentTowns = (a, b) => {
   return Boolean(hx && hy && hx !== hy);
 };
 
-// A Slovak town as the first part of a site's address: "zilina.virtualne.sk" → Žilina.
+// A Slovak town as the first part of a site's address: "zilina.virtualne.sk" → Žilina, with its
+// words run together or hyphenated: "rimavskasobota.virtualne.sk", "banska-bystrica.dnes24.sk".
 const hostTowns = new Map();
+let joinedTowns; // "rimavskasobota" -> "Rimavská Sobota" (names two towns share are left out)
 function hostTown(url) {
   let label;
   try { label = new URL(url).hostname.replace(/^www\./, '').split('.'); } catch { return undefined; }
   if (label.length < 3) return undefined;
   if (!hostTowns.has(label[0])) {
-    const p = skPlace(label[0]);
+    if (!joinedTowns) {
+      joinedTowns = new Map();
+      for (const t of SK_PLACES) {
+        if (!isTown(t) || t.partOf) continue;
+        const k = fold(t.name).replace(/[^a-z]/g, '');
+        joinedTowns.set(k, joinedTowns.has(k) ? null : t.name);
+      }
+    }
+    const p = skPlace(label[0].replace(/-/g, ' '));
     if (hostTowns.size > 5000) hostTowns.clear();
-    hostTowns.set(label[0], p && isTown(p) && !p.partOf ? p.name : undefined);
+    hostTowns.set(label[0], (p && isTown(p) && !p.partOf ? p.name : undefined)
+      || joinedTowns.get(label[0].replace(/-/g, '')) || undefined);
   }
   return hostTowns.get(label[0]);
 }
