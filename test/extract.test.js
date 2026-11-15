@@ -56,6 +56,7 @@ test('makeEvent: basic event from date text', () => {
 test('makeEvent: url falls back to the source', () => {
   const ev = makeEvent({ title: 'X', dateText: '5.12.2026' }, SRC, NOW);
   assert.equal(ev.url, SRC);
+  assert.equal(ev.listingUrl, true);
   assert.equal(ev.location, undefined);
   assert.equal(ev.description, undefined);
 });

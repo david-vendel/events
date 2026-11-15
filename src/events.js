@@ -2,7 +2,7 @@
 // the site we found it on, its detail page, the Facebook event it links to, another site
 // that lists the same thing… Each sighting keeps its own date so the UI can show whether
 // sources agree. sources[0] is the primary source; the event's top-level fields mirror it.
-import { cleanLocation, eventId, facebookEvent } from './extract.js';
+import { cleanLocation, eventId, facebookEvent, repairRow } from './extract.js';
 import {
   couldBeSame, dateDistance, differentTowns, findSameEvent, sameEventScore, titleSimilarity, titleTokens, useTitleWeights,
 } from './match.js';
@@ -264,8 +264,23 @@ function joinRuns(state) {
  * are rows read with the wrong text encoding (the listing gives them again, readable).
  */
 function tidyRows(ev) {
+  const primaryLocation = ev.sources[0]?.location;
   ev.sources = ev.sources.filter((r) => {
     if (/\uFFFD/.test(r.title || '')) return false;
+    // A listing row is cleaned again (extract.js: repairRow), so title, place and link fixes reach
+    // stored events: screen-reader words, glued showtimes, kulthund's "— category, date, place" in
+    // the title, waste collection and cancelled events, "javascript:" and front-page links.
+    if (!r.linked && (r.kind || 'web') === 'web' && r.title) {
+      const fixed = repairRow(r);
+      if (!fixed) return false;
+      if (fixed.title !== r.title) {
+        // Found again under its clean title by the next crawl (EventIndex.find: byId).
+        ev.aliases = [...new Set([...(ev.aliases || []), eventId(fixed.title, r.start)])].filter((a) => a !== ev.id);
+        r.title = fixed.title;
+      }
+      if (fixed.location) r.location = fixed.location; else delete r.location;
+      if (r.url && !fixed.url) { r.url = r.via || r.url; r.listingUrl = true; }
+    }
     if (r.linked && r.kind === 'web' && r.status !== 'ok') {
       if (r.status === 'no_date') ev.unconfirmed = [...new Set([...(ev.unconfirmed || []), r.url])].slice(-20);
       return false;
@@ -274,6 +289,8 @@ function tidyRows(ev) {
   });
   const first = ev.sources.findIndex((r) => !r.linked); // the primary must be a listing row
   if (first > 0) ev.sources.unshift(...ev.sources.splice(first, 1));
+  // A place the cleaning emptied ("Org. ŠBK GALAXY Košice", "@") goes from the event too.
+  if (primaryLocation && !ev.sources[0]?.location && ev.location === primaryLocation) delete ev.location;
   for (const r of ev.sources) {
     if (r.location) r.location = cleanLocation(r.location) || undefined;
     if (!r.start) continue;
