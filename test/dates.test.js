@@ -167,3 +167,98 @@ test('sameDate ignores missing fields', () => {
   assert.equal(sameDate({ start: '2026-10-01', time: '18:00' }, { start: '2026-10-01' }), false);
   assert.equal(sameDate(null, { start: '2026-10-01' }), false);
 });
+
+test('a year after a comma counts', () => {
+  assert.deepEqual(read('20 decembra, 2021'), { start: '2021-12-20' });
+  assert.deepEqual(read('3 October – 3 December, 2017'), { start: '2017-10-03', end: '2017-12-03' });
+  assert.deepEqual(read('30 január, 2026'), { start: '2026-01-30' });
+  assert.equal(p('12 June, 2020; 13 June, 2020').start, '2020-06-12');
+  // still: no year, a year without a comma, a time after a comma
+  assert.deepEqual(read('20. decembra'), { start: '2026-12-20' });
+  assert.deepEqual(read('20. decembra 2026, 19:00'), { start: '2026-12-20', time: '19:00' });
+  assert.deepEqual(read('5. októbra, 18:00'), { start: '2026-10-05', time: '18:00' });
+  assert.deepEqual(read('5. októbra – 9. decembra, 19:30'), { start: '2026-10-05', end: '2026-12-09', time: '19:30' });
+});
+
+test('a two-digit year after a d.m. range', () => {
+  assert.deepEqual(read('1. 10. – 28. 11. 25'), { start: '2025-10-01', end: '2025-11-28' });
+  assert.deepEqual(read('1.10. - 28.11.2025'), { start: '2025-10-01', end: '2025-11-28' });
+  // only the end has a year, across New Year (gjk.sk)
+  assert.deepEqual(read('05.10 - 31.01.27'), { start: '2026-10-05', end: '2027-01-31' });
+  assert.deepEqual(read('03.07 - 31.12.26'), { start: '2026-07-03', end: '2026-12-31' });
+  assert.deepEqual(read('5. dec – 9. jan 2027'), { start: '2026-12-05', end: '2027-01-09' });
+  // a dotted time is not a year
+  assert.deepEqual(read('1. 10. – 28. 11. 20.00 h'), { start: '2026-10-01', end: '2026-11-28', time: '20:00' });
+  assert.deepEqual(read('01.10. 00:00 – 05.10. 00:00'), { start: '2026-10-01', end: '2026-10-04' });
+});
+
+test('a weekday glued after the month (ticketportal)', () => {
+  assert.deepEqual(read('nedeľa 29. novembrane29 18:00'), { start: '2026-11-29', time: '18:00' });
+  assert.deepEqual(read('sobota 10. aprílaso10 19:00'), { start: '2027-04-10', time: '19:00' });
+  assert.deepEqual(read('sobota 12. decembraso12 18:30'), { start: '2026-12-12', time: '18:30' });
+  assert.deepEqual(read('utorok 8. decembraut8'), { start: '2026-12-08' });
+});
+
+test('a weekday is not "next such day" when the text has a date', () => {
+  assert.equal(p('piatok 31. 11. 19:00'), null); // 31 November: no such day, not next Friday
+  assert.equal(p('sobota 30. februára 19:00'), null);
+  // without a date it still is
+  assert.deepEqual(read('v piatok 19:00'), { start: '2026-11-20', time: '19:00' });
+  assert.deepEqual(read('v piatok o 19.30'), { start: '2026-11-20', time: '19:30' });
+});
+
+test('date without a year: the year that fits the weekday', () => {
+  // 30.5.2026 is a Saturday (30.5.2027 a Sunday): last May, though more than 100 days back
+  assert.deepEqual(read('so 30. 5.'), { start: '2026-05-30' });
+  assert.deepEqual(read('6.1. UT'), { start: '2026-01-06' }); // 6.1.2027 is a Wednesday
+  assert.deepEqual(read('sobota 10. apríla 19:00'), { start: '2027-04-10', time: '19:00' }); // the guess fits
+  assert.deepEqual(read('27 říjen Út | 19.00'), { start: '2026-10-27', time: '19:00' });
+  // Fits neither the guessed year nor the one before: the guess stays, flagged.
+  assert.deepEqual(read('Streda, 15. november'), { start: '2026-11-15', weekdayMismatch: true });
+  // "so" after a date as a word ("with"), not a weekday
+  assert.deepEqual(read('1. 8. so skupinou'), { start: '2027-08-01' });
+  // a year given: left alone
+  assert.deepEqual(read('so 30. 5. 2027'), { start: '2027-05-30' });
+  // a range moves with its start
+  assert.deepEqual(read('so 30. 5. - ne 31. 5.'), { start: '2026-05-30', end: '2026-05-31' });
+});
+
+test('am/pm times', () => {
+  assert.deepEqual(read('Wednesday 29. 7. 2026 at 5:00 PM'), { start: '2026-07-29', time: '17:00' });
+  assert.deepEqual(read('3.12.2026 5 PM'), { start: '2026-12-03', time: '17:00' });
+  assert.deepEqual(read('3.12.2026 7:30 p.m.'), { start: '2026-12-03', time: '19:30' });
+  assert.deepEqual(read('3.12.2026 10 am'), { start: '2026-12-03', time: '10:00' });
+  assert.deepEqual(read('3.12.2026 12 PM'), { start: '2026-12-03', time: '12:00' });
+  assert.deepEqual(read('3.12.2026 12 AM'), { start: '2026-12-03' }); // 00:00: no time
+  assert.deepEqual(read('3.12.2026 5:00 PM - 8:00 PM'), { start: '2026-12-03', time: '17:00', endTime: '20:00' });
+  assert.deepEqual(read('3.12.2026 o 5 a mám'), { start: '2026-12-03' }); // Slovak "a" (and) is no a.m.
+});
+
+test('finishDate: impossible and placeholder times', () => {
+  assert.deepEqual(read('19.11.2026 · 16:00 - 14:00'), { start: '2026-11-19', time: '16:00' });
+  assert.deepEqual(tidy(finishDate({ start: '2026-10-01', end: '2026-10-03', time: '18:00', endTime: '18:00' })),
+    { start: '2026-10-01', end: '2026-10-03', time: '18:00' });
+  assert.deepEqual(read('19.11.2026 00:01'), { start: '2026-11-19' });
+  assert.deepEqual(read('19.11.2026 00:30 - 23:30'), { start: '2026-11-19' });
+  assert.deepEqual(read('19.11.2026 01:00 - 23:00'), { start: '2026-11-19' });
+  // still: a night out, a normal evening, a late start
+  assert.deepEqual(read('19.11.2026 22:00 - 05:00'), { start: '2026-11-19', time: '22:00', endTime: '05:00' });
+  assert.deepEqual(read('19.11.2026 18:00 - 22:00'), { start: '2026-11-19', time: '18:00', endTime: '22:00' });
+  assert.deepEqual(read('19.11.2026 02:00 - 23:30'), { start: '2026-11-19', time: '02:00', endTime: '23:30' });
+});
+
+test('ISO times with a zone are Bratislava local time', () => {
+  assert.deepEqual(read('2026-11-20T22:00:00Z'), { start: '2026-11-20', time: '23:00' }); // CET
+  assert.deepEqual(read('2026-07-20T17:00:00Z'), { start: '2026-07-20', time: '19:00' }); // CEST
+  assert.deepEqual(read('2026-11-20T23:30:00Z'), { start: '2026-11-21', time: '00:30' }); // the next day
+  assert.deepEqual(read('2026-11-20T19:00:00+01:00'), { start: '2026-11-20', time: '19:00' });
+  // A Central European offset keeps the written time, even when wrong for summer (+01:00 all year round)
+  assert.deepEqual(read('2026-10-07T19:00:00+01:00'), { start: '2026-10-07', time: '19:00' });
+  assert.deepEqual(read('2026-10-07T19:00:00+02:00'), { start: '2026-10-07', time: '19:00' });
+  assert.deepEqual(read('2026-11-20T19:00:00+00:00'), { start: '2026-11-20', time: '20:00' });
+  assert.deepEqual(read('2026-11-20T13:00:00-05:00'), { start: '2026-11-20', time: '19:00' });
+  assert.deepEqual(read('2026-11-20T18:00:00.000Z 2026-11-20T21:00:00.000Z'), { start: '2026-11-20', time: '19:00', endTime: '22:00' });
+  // no zone: as written; "T10:00-12:00" is a time range, not a zone
+  assert.deepEqual(read('2026-11-20T19:00'), { start: '2026-11-20', time: '19:00' });
+  assert.deepEqual(read('2026-11-20T10:00-12:00'), { start: '2026-11-20', time: '10:00' });
+});

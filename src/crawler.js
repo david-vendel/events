@@ -25,13 +25,13 @@ import {
 import { checkDates } from './datecheck.js';
 import { useDateFormats } from './dates.js';
 import {
-  aiAvailable, aiPausedUntil, aiReady, analyzePage, classifyEvents, discoverUrls, isLimitError, setAiConfig, triagePage,
+  aiAvailable, aiPausedUntil, aiReady, analyzePage, classifyEvents, discoverUrls, isLimitError, judgeSite, setAiConfig, triagePage,
 } from './ai.js';
 import { aiJobDone, aiJobFailed, aiJobPostponed, aiJobsDue, enqueueAi } from './aiqueue.js';
 import { eventTags, headingTags, learnTags } from './tags.js';
 import { eventCountry, locateEvents, purgeDoubtfulVenues, repairSiteCities, trustedCity, trustedVenue } from './geo.js';
 import { SK_PLACES, countryInUrl, isTown, regionOf, slovakPage, slovakVariants } from './slovakia.js';
-import { EventIndex, migrate } from './events.js';
+import { EventIndex, dropSiteRows, migrate } from './events.js';
 import { dueForVerification, verifyEvent } from './corroborate.js';
 import { defaultControl, runPool } from './pool.js';
 import { hostOf, normalizeUrl, urlKey, urlPattern } from './urls.js';
@@ -326,6 +326,8 @@ function aiSummary(call) {
  * country's site that has shown none in Slovakia (it's located later, and dropped then if it's abroad). Returns { kept, sk, abroad } (sk/abroad: events known to be there).
  */
 function inSlovakiaOnly(state, events, url, source) {
+  // A site the AI judged not to list public events (judgeSites): none of its events.
+  if (source.siteVerdict?.drop) return { kept: [], sk: 0, abroad: 0 };
   const outside = unknownIsAbroad(state, url);
   const kept = [];
   let sk = 0, abroad = 0;
@@ -762,6 +764,7 @@ function learnFromAnalysis(state, source, url, a, $, pageUrl, events, report, tp
   source.siteKind = a.siteKind;
   if (a.venue?.name) source.venue = [a.venue.name, a.venue.address].filter(Boolean).join(', ');
   source.kind = a.publishesEvents ? 'events' : (source.kind === 'events' ? 'events' : 'irrelevant');
+  if (source.siteVerdict?.drop) source.kind = 'irrelevant'; // judged as a whole (judgeSites): one page doesn't undo it
   source.judgedFor = 'slovakia';
   source.intervalHours = clampInterval(a.checkEveryHours);
   // Events abroad: the page (or the whole site) is skipped from now on. The AI's word counts as three
@@ -780,7 +783,9 @@ function learnFromAnalysis(state, source, url, a, $, pageUrl, events, report, tp
   const said = [`${a.publishesEvents ? 'event source' : 'not an event source'} (${a.siteKind})${a.listingCity ? `, events in ${a.listingCity}` : ''}`
     + `${away(a.eventsCountry) ? `; events here are in ${a.eventsCountry}, not Slovakia: page skipped from now on` : ''}`
     + `${away(a.siteCountry) ? `; the site's events are in ${a.siteCountry}: site skipped from now on` : ''}`];
-  listing.tags = a.pageTags?.length ? a.pageTags : undefined; // e.g. a cinema programme: every event is "cinema"
+  // e.g. a cinema programme: every event is "cinema". Only one kind counts: a ticket shop's page
+  // tagged concert+theatre+kids says nothing about any one of its events.
+  listing.tags = a.pageTags?.length === 1 ? a.pageTags : undefined;
   if (a.recipe) {
     const found = withTags(applyRecipe($, a.recipe, pageUrl), listing.tags);
     // A repair must read the page at least about as well as the recipe it replaces does now.
@@ -793,7 +798,7 @@ function learnFromAnalysis(state, source, url, a, $, pageUrl, events, report, tp
       // Other pages built from the same template ("…/podujatia/<any event>") get the same recipe.
       tpl.recipe = a.recipe;
       noteRecipe(state, url);
-      tpl.tags = listing.tags;
+      delete tpl.tags; // page tags describe this page, not every page built from the same template
       events.push(...found);
       said.push(`recipe saved, finds ${found.length} events (later visits, and pages like ${urlPattern(url)}, need no AI)`);
     } else if (!worse) {
@@ -1242,6 +1247,72 @@ async function runAiQueue(state, ctx, report = ctx.control.report) {
   }, { ...ctx.control, concurrency: () => state.settings?.aiParallel || 1 });
 }
 
+/**
+ * Each event source gets one look as a whole (ai.js: judgeSite), from what we read there: its listing
+ * pages and a sample of its upcoming events. Sites became sources without one whenever a page held a
+ * few events in structured data, and an unknown country counted as Slovakia: a US bar (420 events),
+ * NHL and KHL results (1,058), a nursing school's timetable, hotel packages, radio broadcasts (Nov 2026).
+ * Not public events: the site stops being a source and its events go. Abroad: retired like other
+ * sites abroad (re-checked every 45 days). Mixed: only its events known to be in Slovakia count
+ * (learn.js: unknownIsAbroad). Sites never judged go first, then those with the most events; a site
+ * is judged again after half a year.
+ */
+const JUDGE_PER_PASS = 100;
+const JUDGE_AGAIN = 180 * DAY;
+const JUDGE_SAMPLE = 30;
+async function judgeSites(state, ctx, report = ctx.control.report) {
+  const now = Date.now();
+  const byOrigin = new Map();
+  for (const ev of Object.values(state.events)) {
+    if ((ev.end || ev.start) < ctx.today) continue;
+    let origin;
+    try { origin = originOf(ev.source); } catch { continue; }
+    if (!byOrigin.has(origin)) byOrigin.set(origin, []);
+    byOrigin.get(origin).push(ev);
+  }
+  const due = Object.values(state.sources)
+    .filter((s) => s.kind === 'events' && byOrigin.has(s.origin)
+      && now - Date.parse(s.siteVerdict?.at || 0) >= JUDGE_AGAIN)
+    .sort((a, b) => Number(Boolean(a.judgedFor)) - Number(Boolean(b.judgedFor))
+      || byOrigin.get(b.origin).length - byOrigin.get(a.origin).length)
+    .slice(0, JUDGE_PER_PASS);
+  if (!due.length) return;
+  report.phase('AI judging sites', `${due.length} sites`);
+  let dropped = 0, retired = 0, mixed = 0, gone = 0;
+  await Promise.all(due.map(async (source) => {
+    const evs = byOrigin.get(source.origin);
+    // A spread over the site's events, not its first few (one festival's 30 days).
+    const step = Math.max(1, evs.length / JUDGE_SAMPLE);
+    const sample = Array.from({ length: Math.min(JUDGE_SAMPLE, evs.length) }, (_, i) => evs[Math.floor(i * step)])
+      .map((e) => ({ title: e.title, start: e.start, location: e.location, url: e.url }));
+    const pages = Object.keys(source.pages || {}).slice(0, 12);
+    const { verdict: v } = await judgeSite({
+      origin: source.origin, known: source.summary, events: evs.length, sample, pages, today: ctx.today,
+    });
+    if (!v) return;
+    source.siteVerdict = { at: iso(Date.now()), publicEvents: v.publicEvents, where: v.where, reason: v.reason };
+    source.summary ??= v.summary;
+    source.siteKind ??= v.siteKind;
+    if (!v.publicEvents) {
+      source.siteVerdict.drop = true;
+      Object.assign(source, { kind: 'irrelevant', judgedFor: 'slovakia' });
+      gone += dropSiteRows(state, new URL(source.origin).hostname);
+      dropped++;
+      report.log(`${source.origin}: not public events (${v.reason}); not a source any more, its ${evs.length} events go`);
+    } else if (v.where === 'abroad') {
+      retire(source);
+      noteCountry(state, source.origin + '/', { abroad: 3 });
+      gone += dropSiteRows(state, new URL(source.origin).hostname);
+      retired++;
+      report.log(`${source.origin}: its events are abroad (${v.reason}); not a source any more, its ${evs.length} events go`);
+    } else if (v.where === 'mixed') {
+      mixed++;
+    }
+  }));
+  report.log(`Sites judged: ${due.length}; ${dropped} not public events, ${retired} abroad, ${mixed} in several countries `
+    + `(only their events known to be in Slovakia stay); ${fmtN(gone)} events gone`);
+}
+
 async function learnFromQueue(state, ctx, j) {
   const aiJob = { url: j.url };
   ctx.aiJobs.set(j.url, aiJob);
@@ -1315,6 +1386,8 @@ export async function crawlPass(state, options = {}, control = defaultControl())
   let aiDone = false;
   const aiReport = { ...report, phase: (name, detail) => report.log(`${name}${detail ? ` — ${detail}` : ''}`) };
   const aiSteps = (async () => {
+    // 5b. Sources nobody has judged as a whole: are they public events in Slovakia at all?
+    if (!control.stopped() && aiReady('judge')) await judgeSites(state, ctx, aiReport);
     // 6. Pages waiting for AI: no recipe yet, or one that stopped reading the page well.
     if (!control.stopped()) await runAiQueue(state, ctx, aiReport);
     // 7. Date formats not confirmed yet (or due for a re-check), and schedules written as prose.

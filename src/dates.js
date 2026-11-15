@@ -12,7 +12,7 @@ const fold = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase().no
 
 // Bump when date parsing changes: listing pages are then re-read even if unchanged, so events
 // already stored get the corrected dates.
-export const PARSER_VERSION = 8;
+export const PARSER_VERSION = 9;
 
 const MONTHS = {
   januar: 1, februar: 2, marec: 3, marca: 3, april: 4, maj: 5, jun: 6, jul: 7, august: 8,
@@ -60,7 +60,8 @@ export const tooFarAhead = (start, now = new Date()) => (Date.parse(start) - now
 // 05.10. 00:00" is 1–4 October with no time; "17:00 – 23:59" just means "from 17:00".
 export function finishDate({ start, end, time, endTime }) {
   if (end && (end < start || placeholderEnd(start, end))) end = endTime = undefined;
-  if (time === '00:00' || time === '23:59') time = undefined; // 23:59: "time not set" (slovakbasket.sk)
+  // 23:59: "time not set" (slovakbasket.sk); 00:01 is midnight's placeholder too
+  if (time === '00:00' || time === '00:01' || time === '23:59') time = undefined;
   if (endTime === '23:59') endTime = undefined;
   if (endTime === '00:00') {
     if (end && end > start) end = dayBefore(end);
@@ -69,23 +70,33 @@ export function finishDate({ start, end, time, endTime }) {
   // "Fri 22:00 – Sat 04:00" is one night out, not two days.
   if (end && time && endTime && endTime <= '06:00' && end === dayAfter(start)) end = undefined;
   if (end === start) end = undefined;
-  if (!time || (!end && endTime === time)) endTime = undefined; // "08:00 08:00" is a start time, twice
+  if (!end && time && endTime) {
+    // "00:30 – 23:30" on one day: all day, no times
+    if (time <= '01:00' && endTime >= '23:00') time = endTime = undefined;
+    // "16:00 - 14:00" on one day is a mistake, not a night out (that ends by 06:00)
+    else if (endTime < time && endTime > '06:00') endTime = undefined;
+  }
+  if (!time || endTime === time) endTime = undefined; // "08:00 08:00" is a start time, twice
   return { start, end, time, endTime };
 }
 
 const DMY = String.raw`(?<![\d.])(0?[1-9]|[12]\d|3[01])\.\s*(0?[1-9]|1[0-2])(?![\d:])\.?\s*(\d{4})?`;
+// The range's last day may have a two-digit year: "1. 10. – 28. 11. 25" (not a time: "28. 11. 20.00")
+const DMY_END = String.raw`(?<![\d.])(0?[1-9]|[12]\d|3[01])\.\s*(0?[1-9]|1[0-2])(?![\d:])\.?\s*(\d{4}|(?<=\.\s*)\d{2}(?![\d:.]))?`;
 const AT = String.raw`(?:\s*,?\s*(?:o\s*)?([01]?\d|2[0-3]):([0-5]\d))?`;
 // (the end may repeat a weekday: "pi 2. 10. 18:00 – ne 4. 10. 20:00")
 // ("od 1.9.2026 08:00 do 31.10.2026 18:00": "do" is a dash too)
 const DASH = String.raw`\s*(?:h|hod\.?)?\s*(?:[-–—]|\bdo\b)\s*(?:[a-z]{2,8}\.?,?\s*)?`;
 // 02.10.2026 10:00 - 03.10.2026 18:00, 09.10 - 11.10.2026
-const DMY_RANGE = new RegExp(`${DMY}${AT}${DASH}${DMY}${AT}`);
+const DMY_RANGE = new RegExp(`${DMY}${AT}${DASH}${DMY_END}${AT}`);
+// A year after a month name, maybe after a comma: "20 decembra, 2021", "3 December, 2017"
+const YEAR_AFTER = String.raw`(?:\s*[.,]?\s*((?:19|20)\d{2})(?!\d))?`;
 // 5. októbra – 9. decembra, 1. augusta 2023 0:00 - 6. septembra 2023 0:00 (no weekday after the dash:
 // "– nám. 29. augusta" is a street)
 // Short month names count only here, inside a range ("28. nov - 1. dec 2022"): alone, "jan" is a name.
 const SHORT_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, okt: 10, oct: 10, nov: 11, dec: 12 };
 const monthNum = (w) => MONTHS[w] ?? SHORT_MONTHS[w];
-const DMONTH = String.raw`(?<![\d.])(0?[1-9]|[12]\d|3[01])\.?\s*\b(${MONTH_RE}|${Object.keys(SHORT_MONTHS).join('|')})\b\.?\s*(\d{4})?`;
+const DMONTH = String.raw`(?<![\d.])(0?[1-9]|[12]\d|3[01])\.?\s*\b(${MONTH_RE}|${Object.keys(SHORT_MONTHS).join('|')})\b\.?${YEAR_AFTER}\s*`;
 const DMONTH_RANGE = new RegExp(`${DMONTH}${AT}\\s*(?:h|hod\\.?)?\\s*(?:[-–—]|\\bdo\\b)\\s*${DMONTH}${AT}`);
 // 17:00 - 23:59, 10.00 – 18.00 hod.
 const TIME_RE = /(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?:\s*(?:h|hod\.?)?\s*(?:[-–—]|\bdo\b)\s*([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d))?/;
@@ -133,60 +144,137 @@ export function withoutPlace(t) {
   return t;
 }
 
-/** Parse free-form (mostly Slovak) date text into { start, end?, time?, endTime? } or null. */
-export function parseDateText(text, now = new Date()) {
-  const t = withoutPlace(fold(text));
-  let start, end;
-  let m;
+// Weekday words next to a date, for picking the year of a date written without one ("so 30. 5.",
+// "Streda, 15. november", "6.1. UT"). Folded "st" is both streda and štvrtok.
+const WEEKDAY_DAYS = {
+  ...Object.fromEntries(Object.entries(WEEKDAY_NUM).map(([w, d]) => [w, [d]])),
+  pondelka: [1], utorka: [2], stredy: [3], stvrtka: [4], piatku: [5], soboty: [6], ctvrtka: [4], patku: [5],
+  mon: [1], tue: [2], tues: [2], wed: [3], thu: [4], thur: [4], thurs: [4], fri: [5], sat: [6], sun: [0],
+};
+const WEEKDAY_ABBR = { po: [1], ut: [2], st: [3, 4], stv: [4], ct: [4], pi: [5], pia: [5], pa: [5], so: [6], ne: [0] };
 
-  if ((m = t.match(/(\d{4})-(\d{2})-(\d{2})(?:[t ](\d{2}):(\d{2}))?/))) {
-    start = makeDate(m[3], m[2], m[1], now); // "2026-11-92" is no date
-    const e = t.slice(m.index + m[0].length).match(/(\d{4})-(\d{2})-(\d{2})(?:[t ](\d{2}):(\d{2}))?/);
-    if (e) end = makeDate(e[3], e[2], e[1], now) || undefined;
-    if (start && m[4]) return finishDate({ start, end, time: hhmm(m[4], m[5]), endTime: hhmm(e?.[4], e?.[5]) });
+/** The weekdays (0 = Sunday) named right before the date matched by m, or right after it (`after`). */
+function weekdaysAt(t, m, after) {
+  const b = t.slice(0, m.index).match(/(?<![a-z])([a-z]+)\.?\s*,?\s*$/);
+  const before = b && (WEEKDAY_DAYS[b[1]] || WEEKDAY_ABBR[b[1]]);
+  if (before || !after) return before || undefined;
+  // After the date, an abbreviation counts only before a time, a separator or the end: "6.1. ut",
+  // "27 rijen ut | 19.00", "29. novembra ne29", but not "3.12. so skupinou" (with the band).
+  const rest = t.slice(m.index + m[0].length);
+  const a = rest.match(/^\s*[,|(]?\s*([a-z]+)(?![a-z])\.?/);
+  if (!a) return undefined;
+  return WEEKDAY_DAYS[a[1]] || (/^\s*(?:$|[\d|,.:)])/.test(rest.slice(a[0].length)) && WEEKDAY_ABBR[a[1]]) || undefined;
+}
+
+const weekdayOf = (iso) => new Date(`${iso}T12:00Z`).getUTCDay();
+const yearsBack = (iso, k) => iso && (makeDate(+iso.slice(8), +iso.slice(5, 7), +iso.slice(0, 4) - k) || undefined);
+
+// "nedeľa 29. novembrane29 18:00", "sobota 12. decembraso12" (ticketportal): a weekday and day glued to the month.
+const MONTH_GLUED = new RegExp(`\\b(${MONTH_RE})(?=(?:po|ut|stv|st|pia|pi|so|ne)\\d)`, 'g');
+// "5:00 PM", "5 pm", "7 p.m." -> 24-hour time
+const AM_PM = /(?<![\d:.])(1[0-2]|0?[1-9])(?:[:.]([0-5]\d))?\s*([ap])(?:m|\.\s?m\.?)(?![a-z])/g;
+const to24h = (_, h, min, ap) => `${pad((+h % 12) + (ap === 'p' ? 12 : 0))}:${min || '00'}`;
+// A day with a month name, or a d.m. date: a weekday in such text is not "next Friday".
+const DATE_LIKE = new RegExp(`\\d{1,2}\\.?\\s*(?:${MONTH_RE})|(?<![\\d.])(?:0?[1-9]|[12]\\d|3[01])\\.\\s*(?:0?[1-9]|1[0-2])\\.(?!\\d)`);
+
+// ISO dates, maybe with a time and a zone ("2026-11-20T22:00:00Z", "…T19:00:00+01:00").
+const ISO = /(\d{4})-(\d{2})-(\d{2})(?:[t ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(z|[+-][01]\d:?[0-5]\d)?)?/;
+const BRATISLAVA = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Bratislava', year: 'numeric', month: '2-digit',
+  day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+/**
+ * An ISO match as a local (Bratislava) { date, time }. A zone counts when it's "z", "+…", or after seconds
+ * ("T10:00-12:00" is more likely a time range than a zone). A Central European offset (+01:00, +02:00)
+ * keeps the time as written: sites often write +01:00 all year round, and the written time is the local one.
+ */
+function isoLocal(m, now) {
+  const date = makeDate(m[3], m[2], m[1], now);
+  if (!date || !m[4]) return { date, time: hhmm(m[4], m[5]) };
+  const zone = m[7];
+  if (!zone || !(zone === 'z' || zone[0] === '+' || m[6] !== undefined) || /^\+0[12]:?00$/.test(zone)) {
+    return { date, time: hhmm(m[4], m[5]) };
+  }
+  const off = zone === 'z' ? 0 : (zone[0] === '-' ? -1 : 1) * (+zone.slice(1, 3) * 60 + +zone.slice(-2));
+  const at = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) - off * 6e4);
+  const x = Object.fromEntries(BRATISLAVA.formatToParts(at).map((p) => [p.type, p.value]));
+  return { date: `${x.year}-${x.month}-${x.day}`, time: `${x.hour}:${x.minute}` };
+}
+
+/**
+ * Parse free-form (mostly Slovak) date text into { start, end?, time?, endTime? } or null.
+ *
+ * A date written without a year gets the nearest occurrence from ~100 days back to ~265 days ahead;
+ * when a weekday is written next to it ("so 30. 5."), the year in which that weekday fits (that one,
+ * or the year before). If the weekday fits neither, the guess stays and the result has
+ * `weekdayMismatch: true`: the text is likely an old listing or a typo, and callers may drop it.
+ */
+export function parseDateText(text, now = new Date()) {
+  const t = withoutPlace(fold(text).replace(MONTH_GLUED, '$1 ').replace(AM_PM, to24h));
+  let start, end, time, endTime;
+  let m;
+  let yearGiven = false;
+  let single = false; // a single date: a weekday may follow it ("6.1. ut")
+
+  if ((m = t.match(ISO))) {
+    const s = isoLocal(m, now);
+    start = s.date; // "2026-11-92" is no date
+    yearGiven = true;
+    const e = t.slice(m.index + m[0].length).match(ISO);
+    const f = e ? isoLocal(e, now) : {};
+    end = f.date || undefined;
+    if (start && s.time) return finishDate({ start, end, time: s.time, endTime: f.time });
   } else if ((m = t.match(DMY_RANGE))) {
     const y = m[3] || m[8];
+    yearGiven = Boolean(y);
     start = makeDate(m[1], m[2], y, now);
     end = makeDate(m[6], m[7], m[8] || y, now);
-    if (start && m[4]) return finishDate({ start, end, time: hhmm(m[4], m[5]), endTime: hhmm(m[9], m[10]) });
+    // Only the end has a year, and the range crosses New Year: "05.10 - 31.01.27"
+    if (!m[3] && m[8] && start && end && start > end) start = makeDate(m[1], m[2], +m[8] - 1, now);
+    if (start && m[4]) [time, endTime] = [hhmm(m[4], m[5]), hhmm(m[9], m[10])];
     // "09.10 - 11.10.2026 19:00": a time only after the last day is each day's start
-    if (start && m[9]) {
+    else if (start && m[9]) {
       const to = t.slice(m.index + m[0].length).match(/^\s*(?:h|hod\.?)?\s*[-–—]\s*([01]?\d|2[0-3])[:.]([0-5]\d)(?!\d)/);
-      return finishDate({ start, end, time: hhmm(m[9], m[10]), endTime: to ? hhmm(to[1], to[2]) : undefined });
+      [time, endTime] = [hhmm(m[9], m[10]), to ? hhmm(to[1], to[2]) : undefined];
     }
   } else if ((m = t.match(DMONTH_RANGE))) {
     const y = m[3] || m[8];
+    yearGiven = Boolean(y);
     start = makeDate(m[1], monthNum(m[2]), y, now);
     // No year: the end is in the start's year, or the next one ("20. júla – 24. augusta", "5. dec – 9. jan").
     end = !y && start ? makeDate(m[6], monthNum(m[7]), start.slice(0, 4), now) : makeDate(m[6], monthNum(m[7]), m[8] || y, now);
     if (!y && end && end < start) end = makeDate(m[6], monthNum(m[7]), String(+start.slice(0, 4) + 1), now);
-    if (start && m[4]) return finishDate({ start, end, time: hhmm(m[4], m[5]), endTime: hhmm(m[9], m[10]) });
-    if (start && m[9]) return finishDate({ start, end, time: hhmm(m[9], m[10]) });
+    if (!m[3] && m[8] && start && end && start > end) start = makeDate(m[1], monthNum(m[2]), +m[8] - 1, now); // "5. dec – 9. jan 2027"
+    if (start && m[4]) [time, endTime] = [hhmm(m[4], m[5]), hhmm(m[9], m[10])];
+    else if (start && m[9]) time = hhmm(m[9], m[10]);
   } else if ((m = t.match(/(\d{1,2})\.\s*[-–—]\s*(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})?/))) {
     // 9. - 11. 10. 2026
+    yearGiven = Boolean(m[4]);
     start = makeDate(m[1], m[3], m[4], now);
     end = makeDate(m[2], m[3], m[4], now);
   } else {
     // A single date, written one of three ways; the one that comes first in the text counts (a later
     // one may be part of an address: "ul. 29. augusta").
     const ways = [
-      // 3. októbra 2026, 9. – 11. októbra
-      [new RegExp(`(\\d{1,2})\\.?\\s*(?:[-–—]\\s*(\\d{1,2})\\.?\\s*)?\\b(${MONTH_RE})\\b\\s*(\\d{4})?`), (x) => {
+      // 3. októbra 2026, 9. – 11. októbra, 20 decembra, 2021
+      [new RegExp(`(\\d{1,2})\\.?\\s*(?:[-–—]\\s*(\\d{1,2})\\.?\\s*)?\\b(${MONTH_RE})\\b${YEAR_AFTER}`), (x) => {
         start = makeDate(x[1], MONTHS[x[3]], x[4], now);
         if (x[2]) end = makeDate(x[2], MONTHS[x[3]], x[4], now);
+        yearGiven = Boolean(x[4]);
       }],
       // október 7 2026 (Facebook), October 7, 2026
-      [new RegExp(`\\b(${MONTH_RE})\\s+(\\d{1,2}),?\\s+(\\d{4})`), (x) => { start = makeDate(x[2], MONTHS[x[1]], x[3], now); }],
+      [new RegExp(`\\b(${MONTH_RE})\\s+(\\d{1,2}),?\\s+(\\d{4})`), (x) => { start = makeDate(x[2], MONTHS[x[1]], x[3], now); yearGiven = true; }],
       // 3.10.2026, 3. 10.
-      [/(?<![\d.])(\d{1,2})\.\s*(\d{1,2})\.(?:\s*(\d{4}))?/, (x) => { start = makeDate(x[1], x[2], x[3], now); }],
+      [/(?<![\d.])(\d{1,2})\.\s*(\d{1,2})\.(?:\s*(\d{4}))?/, (x) => { start = makeDate(x[1], x[2], x[3], now); yearGiven = Boolean(x[3]); }],
     ].map(([re, use]) => [t.match(re), use]).filter(([x]) => x).sort((a, b) => a[0].index - b[0].index);
     if (ways.length) {
       m = ways[0][0];
       ways[0][1](m);
+      single = !end;
     }
   }
   if (!start) {
-    // No date written out: maybe one relative to today ("dnes 19:00", "pred 1 tyzdnom").
+    // No date written out: maybe one relative to today ("dnes 19:00", "pred 1 tyzdnom"). Not when the
+    // text has a day and month the parser couldn't read: "nedela 29. ..." is not next Sunday (AI reads it).
+    if (DATE_LIKE.test(t)) return null;
     const days = relativeDays(t, now);
     if (days === undefined) return null;
     const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + days);
@@ -194,9 +282,22 @@ export function parseDateText(text, now = new Date()) {
     m = null;
   }
 
-  const rest = m ? t.slice(m.index + m[0].length) + ' ' + t.slice(0, m.index) : t;
-  const tm = rest.match(TIME_RE) || rest.match(TIME_H_RE) || rest.match(TIME_AFTER_SEP);
-  return finishDate({ start, end, time: tm ? hhmm(tm[1], tm[2]) : undefined, endTime: tm ? hhmm(tm[3], tm[4]) : undefined });
+  // A guessed year that doesn't fit the weekday written with the date: the year before, if that fits.
+  let weekdayMismatch = false;
+  const days = m && !yearGiven && weekdaysAt(t, m, single);
+  if (days && !days.includes(weekdayOf(start))) {
+    const prev = yearsBack(start, 1);
+    if (prev && days.includes(weekdayOf(prev))) [start, end] = [prev, yearsBack(end, 1)];
+    else weekdayMismatch = true;
+  }
+
+  if (!time) {
+    const rest = m ? t.slice(m.index + m[0].length) + ' ' + t.slice(0, m.index) : t;
+    const tm = rest.match(TIME_RE) || rest.match(TIME_H_RE) || rest.match(TIME_AFTER_SEP);
+    if (tm) [time, endTime] = [hhmm(tm[1], tm[2]), hhmm(tm[3], tm[4])];
+  }
+  const r = finishDate({ start, end, time, endTime });
+  return weekdayMismatch ? { ...r, weekdayMismatch } : r;
 }
 
 // ---------------------------------------------------------------- learned formats

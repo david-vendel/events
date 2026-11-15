@@ -14,7 +14,8 @@ export const TAGS = ['cinema', 'concert', 'theatre', 'exhibition', 'festival', '
 const SCHEMA_TYPES = {
   ScreeningEvent: 'cinema', MusicEvent: 'concert', TheaterEvent: 'theatre', ExhibitionEvent: 'exhibition',
   Festival: 'festival', ChildrensEvent: 'kids', SportsEvent: 'sport', EducationEvent: 'workshop',
-  LiteraryEvent: 'talk', DanceEvent: 'party', SocialEvent: 'party', FoodEvent: 'market', SaleEvent: 'market',
+  // No SocialEvent → party: Eventbrite calls every event a SocialEvent ("Bosch Best Practices", yoga classes).
+  LiteraryEvent: 'talk', DanceEvent: 'party', FoodEvent: 'market', SaleEvent: 'market',
   ComedyEvent: 'theatre',
 };
 
@@ -24,40 +25,104 @@ const fold = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,
 
 // A film screening: cinema venue, cinema programme page, or "2D/3D" in the title. Film titles
 // would trip the keyword rules ("Zápas storočia" is not a sports match), so these get only "cinema".
+// "3D prehliadky" are virtual tours of flats for sale, not films.
 const CINEMA_PLACE = /\bkin[oa]\b|cinemax|cinema ?city|\bsterio\b|program-kina|\/kin[oa]\//;
-const CINEMA_TITLE = /\b[234]d\b|\b(dabing|titulky)\b|\bimax\b|\bfilm(ov[ya]?)?\b|projekci|\bkino\b/;
+const DIMENSION = /\b[234]d\b(?! ?(prehliadk|tlac|pero|pasta|model|tour))/;
+const CINEMA_TITLE = new RegExp(`${DIMENSION.source}|\\b(dabing|titulky)\\b|\\bimax\\b|\\bfilm(ov[ya]?)?\\b|projekci|\\bkino\\b`);
 // A live show at a cinema venue (a concert, a play) is not a screening, unless the title says it is
 // one ("MET Opera – záznam", "Balet 2D").
-const LIVE_TITLE = /koncert|concert|divadl|predstaveni|inscenac|\bopera\b|balet|muzikal|stand.?up|recital/;
-const SCREENED = /\b[234]d\b|\b(dabing|titulky)\b|\bimax\b|projekci|zaznam|prenos|live in hd|\bmet\b/;
+const LIVE_TITLE = /koncert|concert|divad(l|eln)|predstaveni|inscenac|\bopera\b|\bopern|balet|muzikal|stand.{0,3}up|recital|\bshow\b|talk ?show|comedy|komedi|\bturne\b|beseda|prednask|kabaret/;
+const SCREENED = new RegExp(`${DIMENSION.source}|\\b(dabing|titulky)\\b|\\bimax\\b|projekci|zaznam|prenos|live in hd|\\bmet\\b`);
 const isLiveShow = (name) => LIVE_TITLE.test(name) && !SCREENED.test(name);
 
 // The only keyword tags a screening keeps: a kids' film, a film festival.
 const FILM_EXTRA = ['kids', 'festival'];
 
+// Each rule: `re` matches the title and the description, `title` the title only, `desc` the
+// description only (a description says "v rámci festivalu", "wellness pre rodiny s deťmi"...).
 const RULES = [
-  ['concert', /koncert|concert|\btour\b|\bband\b|orchest|recital|filharmon|symfon|jazz|\brock|metal\b|hip.?hop|\brap\b|\bdj\b|\bspev|zbor\b/],
-  ['theatre', /divadl|predstaveni|inscenac|\bopera|balet|muzikal|theat|stand.?up/],
-  ['exhibition', /vystav|vernisaz|exhibit|expozic|(?<!oc )galeri[ae]\b|\bmuze/],
-  ['festival', /festival|\bfest\b|majales|biela noc|dni mesta/],
-  ['kids', /\bdeti\b|\bdeti |detsk|pre najmensich|rozpravk|\bkids\b|rodin(y|ne|u)\b|\bjunior/],
-  ['sport', /\bbeh\b|maraton|turnaj|hokej|futbal|basketbal|volejbal|\bsport|cyklo|\brun\b|fitness|\bjog[ay]\b|plavan/],
-  ['workshop', /workshop|\bkurz|dielni|tvoriv|kreativn|masterclass|seminar/],
-  ['talk', /prednask|beseda|diskusi|\btalk\b|konferenc|literatur|\bcitani|autorsk|krst knihy|podcast/],
-  ['party', /party|\bparty|disco|clubb|salsa|tango|tanec|tancovani|\bples\b|kviz|quiz/],
-  ['market', /\btrh|jarmok|\bmarkets?\b|burza|ochutnavk|degustac|\bfood (market|festival|truck)|\bvin(o|a)\b|wine|gastro|bazar|street food/],
+  ['concert', {
+    re: /koncert|concert|(?<!(food|wine|guided|walking|city|bike|boat|bus|walk|ghost|pub|beer) )\btour\b|\bturne\b|\bband\b|orchest|recital|filharmon|symfon|jazz|\brock\b|\brock(ov|en|k)|metal\b|hip.?hop|\brap\b|\bdj\b|\bspev(?!n)|\bzbor\b|\bpiano\b|\bkapel(a|y|ou|e)\b|gospel|\bunplugged|hudob\w* (vecer|show)/,
+  }],
+  // Not "operný": "operné árie", "sólisti operných domov" are concerts.
+  ['theatre', {
+    re: /divad(l|eln)|predstaveni|inscenac|\bopera\b|\bopery\b|\bopere(ta|ty)|balet|muzikal|theat|stand.{0,3}up|kabaret|tanecn\w* (predstaven|divadl|inscenac)/,
+  }],
+  ['exhibition', { re: /vystav|vernisaz|exhibit|expozic|(?<!oc )galeri[ae]\b|\bmuze(um|a|i|u|om|jn)/ }],
+  ['festival', { title: /festival|\bfest\b|majales|biela noc|dni mesta/, desc: /\d+\. rocnik\w* (\w+ )?festival/ }],
+  ['kids', {
+    title: /\bdeti\b|detsk|pre najmensich|rozpravk|\bkids\b|rodin(y|ne|u)\b/,
+    desc: /pre (deti|rodiny|najmensich|skolak)|detsk\w* (predstaven|divadl|program|dieln|tvoriv)|rozpravk|\bod ([1-9]|10) rokov/,
+  }],
+  ['sport', {
+    re: /\bbeh(u|y)?\b|maraton|turnaj|hokej|futbal|basketbal|volejbal|\bsport|\bcyklo|\brun\b|\bjog[ay]\b|plavan|\bpretek|\bkros\b|\btenis|\bsach\b|\blyz|korculov|\bsplav|pilates|zumba|aerobik|turistick\w* (pochod|vylet|tras|akci|prechadz|zraz)/,
+    title: /fitness/,
+  }],
+  ['workshop', { re: /workshop|\bkurz|dielni|tvoriv|kreativn|masterclass|seminar/ }],
+  ['talk', {
+    re: /prednask|beseda|diskusi|\btalk\b|talk ?show|konferenc|\bcitani|krst knihy|podcast|literarn\w* (vecer|kaviaren)|stretnutie s autor|autogramiad|prezentaci\w* knih|autorsk\w* (citani|stretnuti|vecer|beseda)/,
+  }],
+  ['party', {
+    re: /party|clubb|\bdisco(?!ver|unt|rd)|diskotek|kviz|quiz|tanecn\w* (zabav|vecer|party)|tancovack|tanciaren|\bples\b|(salsa|tango|bachata|kizomba)\w* (night|vecer|noc)|milong|(katarinsk|fasiangov|hasicsk|silvestrovsk|vinobran|oberackov)\w* zabav/,
+    title: /\w{2,}a zabava\b|-zabava\b/, // Katarínska zábava, Labko-zábava (not "Opera nás zabáva")
+  }],
+  ['market', {
+    re: /\btrh|jarmok|\bmarkets?\b|burza|ochutnavk|degustac|\bfood (market|festival|truck)|wine|gastro|bazar|street food|(slavnost|festival|trh|pivnic)\w* vin|otvoren\w* pivnic/,
+    title: /\bvin(o|a)\b/,
+  }],
 ];
+
+const keywordTags = (name, desc) => RULES.filter(([, r]) => (r.re && (r.re.test(name) || r.re.test(desc)))
+  || r.title?.test(name) || r.desc?.test(desc)).map(([tag]) => tag);
+
+// Places named in a description say where, not what: "Východoslovenská galéria", "Múzeum Spiša",
+// "v Mestskom divadle", "Športová hala", "kultúrno-kreatívne centrum". Removed before the keyword
+// rules. "Divadlo Artynas uvádza" names who plays, so a theatre's name is removed only after "v", "do"…
+const UP = 'A-ZÁÄČĎÉÍĹĽŇÓÔŔŠŤÚÝŽ';
+const PLACE_NOUN = '(?:[Gg]al[ée]ri|[Mm][úu]ze|Museum|Gallery)\\p{L}*';
+const NAMED_PLACE = [
+  new RegExp(`(?:\\b[${UP}][\\p{L}-]*\\s+){1,3}${PLACE_NOUN}`, 'gu'), // Mestské divadlo, Východoslovenská galéria
+  new RegExp(`\\b${PLACE_NOUN}(?:\\s+[${UP}][\\p{L}.]*){1,4}`, 'gu'), // Divadlo Jána Palárika, Múzeum Spiša
+];
+// "v Mestskom divadle", "do Slovenskej národnej galérie", "pred divadlom" (not "v podaní divadla Komédie").
+const PLACE_PHRASE = /\b(v|vo|pri) ((\w+(om|ej) ){0,2})(divadle|galerii|muzeu)\b|\b(do|z|zo|od) ((\w+(eho|ej) ){0,2})(divadla|galerie|muzea)\b|\bpred ((\w+(ym|ou) ){0,2})(divadlom|galeriou|muzeom)\b|\bsportov\w* (hal|areal|centr)\w*|\bkulturn\w*.kreativn\w* centr\w*/g;
+const describe = (description) => {
+  let d = description || '';
+  for (const re of NAMED_PLACE) d = d.replace(re, ' ');
+  return fold(d).replace(PLACE_PHRASE, ' ');
+};
+
+// kulthund.sk titles: "Title — koncert, 20.11.2026 20:30, Venue, Town." The part after " — "
+// names the kind; the venue there must not trip keyword rules ("Mestské divadlo" at a concert).
+const CATEGORY_TITLE = /^(.*?) — ([^,—]+), (\d{1,2}\.\d{1,2}\.\d{4}|prebieha)/;
+const CATEGORIES = {
+  koncert: 'concert', 'vazna hudba': 'concert', divadlo: 'theatre', tanec: 'theatre', vystava: 'exhibition',
+  prednaska: 'talk', diskusia: 'talk', citacka: 'talk', workshop: 'workshop', 'podujatie pre rodiny': 'kids',
+  film: 'cinema', party: 'party', festival: 'festival', gastro: 'market',
+};
 
 /** Tags for one sighting or event, from its text and URLs. */
 export function guessTags({ title, description, location, url, via, source }) {
   // The venue's name says where, not what: "Športové námestie" hosts cabaret, "(bývalé kino Slovan)" plays.
   const venue = fold(location).replace(/\([^)]*\)/g, ' ').replace(/\bbyval\S* kin\S*/g, ' ');
   const place = `${venue} ${fold(`${url} ${via || source}`)}`;
-  const name = fold(title);
-  const text = fold(`${title} ${description}`);
-  const tags = RULES.filter(([, re]) => re.test(text)).map(([tag]) => tag);
-  // A cinema's descriptions are written for films; for a live show there, trust only its title.
-  if (isLiveShow(name)) return CINEMA_PLACE.test(place) ? RULES.filter(([, re]) => re.test(name)).map(([tag]) => tag) : tags;
+  let name = fold(title);
+  const m = name.match(CATEGORY_TITLE);
+  if (m) name = m[1];
+  const desc = describe(description);
+  const tags = keywordTags(name, desc);
+  // "tanec" is mostly stage dance (Luskáčik, Nu Dance Fest), but also "Latino party" and dance classes.
+  const kind = m && m[2].trim();
+  const category = kind === 'tanec' && tags.some((t) => t === 'party' || t === 'workshop') ? undefined : m && CATEGORIES[kind];
+  const titleTags = () => keywordTags(name, '');
+  const merge = (...lists) => TAGS.filter((t) => lists.some((l) => l.includes(t)));
+  if (category === 'cinema') return ['cinema', ...tags.filter((t) => FILM_EXTRA.includes(t))];
+  // A live show (or a kulthund concert, play…) at a cinema: its descriptions are written for films,
+  // trust only its title. A title that names no kind still says it is a film ("The Truman Show").
+  if (category || isLiveShow(name)) {
+    if (!CINEMA_PLACE.test(place)) return merge(category ? [category] : [], tags);
+    if (category || titleTags().length) return merge(category ? [category] : [], titleTags());
+  }
   if (CINEMA_PLACE.test(place) || CINEMA_TITLE.test(name)) return ['cinema', ...tags.filter((t) => FILM_EXTRA.includes(t))];
   return tags;
 }
@@ -66,7 +131,7 @@ export function guessTags({ title, description, location, url, via, source }) {
 export function headingTags(text) {
   const t = fold(text);
   if (CINEMA_PLACE.test(t) || CINEMA_TITLE.test(t)) return ['cinema'];
-  const tags = RULES.filter(([, re]) => re.test(t)).map(([tag]) => tag);
+  const tags = keywordTags(t, '');
   return tags.length === 1 ? tags : [];
 }
 

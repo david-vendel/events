@@ -1,7 +1,8 @@
-// The only place that talks to Claude. AI does four jobs, each switchable in the admin panel
+// The only place that talks to Claude. AI does these jobs, each switchable in the admin panel
 // (AI tab) with its own model:
 //  - analyze:  first look at a promising page -> what the site is, and a CSS "recipe" so future
 //              visits are parsed with zero AI;
+//  - judge:    one look at each event source as a whole: public events in Slovakia at all?
 //  - tag:      give a kind (cinema, concert…) to events the rules couldn't tag;
 //  - discover: web search for new event sources, a different Slovak town and kind each time;
 //  - dates:    check date formats the parser hasn't confirmed (and write rules for them), and read
@@ -41,6 +42,13 @@ export const AI_JOBS = {
     what: 'Web search for pages that list events, aimed at the town and kind of event we cover worst (see the Coverage '
       + 'tab); every 6 hours, every 24 once what we have is well covered.',
     model: 'haiku', // found as many new event sites as Sonnet (eval, 2 Oct 2026)
+  },
+  judge: {
+    label: 'Judge sites',
+    what: 'Looks once at each event source as a whole (what it is, and a sample of the events read from it) and says '
+      + 'whether it publishes public events in Slovakia. Sites that do not (a bar in the US, NHL results, a school\'s '
+      + 'timetable, hotel packages, news posts) stop being sources and their events go.',
+    model: 'sonnet',
   },
   dates: {
     label: 'Check dates',
@@ -348,6 +356,54 @@ export function triagePage({ url, title, text, today, onStart }) {
   });
 }
 
+const SiteVerdict = z.object({
+  summary: z.string().describe('one sentence: what this website is'),
+  siteKind: z.enum(['event_listing', 'venue', 'municipality', 'tourism', 'news', 'ticketing', 'shopping_center', 'other']),
+  publicEvents: z.boolean().describe('are the listed items mostly public events people can go to?'),
+  where: z.enum(['slovakia', 'mixed', 'abroad', 'unknown']).describe('where the listed events take place'),
+  reason: z.string().describe('a few words'),
+});
+const JUDGE_SYSTEM = `You help a crawler that collects public events in Slovakia for a "what's on" website. \
+You get one website: its address, what is known about it, the pages its events were read from, and a sample \
+of those events (title | date | place | address). Judge the site as a whole.
+publicEvents: true when the items are mostly happenings the public can attend: concerts, theatre, cinema \
+screenings, exhibitions, festivals, markets, sport matches and races to watch or join, talks, workshops, \
+guided tours, kids' programmes, leisure courses open to anyone (dance, pottery, cooking). False when they are mostly something else: news or \
+blog posts, radio or TV broadcasts, results or archives, a school's or university's timetable (exams, \
+lectures, parent meetings), internal or members-only meetings, office hours, waste collection, closures and \
+outages, catalogues of paid professional training (management, IT, certification courses for employees), hotel, spa or travel packages, products, coupons, real-estate viewings, job ads, online-only \
+webinars.
+where: "slovakia" when they are (nearly) all in Slovakia; "abroad" when (nearly) all are in other \
+countries (a US bar, NHL games, a Czech theatre); "mixed" when the site lists many countries and only some \
+of its events are in Slovakia (an international ticket shop, world hockey results); "unknown" when the \
+sample doesn't tell. Slovak-language titles and Slovak towns point to Slovakia; English titles alone do not \
+point abroad. When the sample is too small or too unclear to tell, publicEvents is true and where is "unknown": \
+sites are dropped only when the evidence is clear.`;
+
+/**
+ * One look at a whole site from what we read there: { verdict, call } (verdict null: no answer).
+ * `sample`: [{ title, start, location, url }], `pages`: listing URLs the events came from.
+ */
+export function judgeSite({ origin, known, events, sample, pages, today, onStart }) {
+  if (!aiAvailable('judge')) return Promise.resolve({ verdict: null, call: null });
+  const prompt = `Website: ${origin}\nToday: ${today}\n${known ? `Known about it: ${known}\n` : ''}`
+    + `Events read from it that are still upcoming: ${events}\n\n<pages>\n${pages.join('\n')}\n</pages>\n\n<events>\n`
+    + sample.map((e) => [e.title, e.start, e.location || '-', e.url || '-'].join(' | ')).join('\n') + '\n</events>';
+  return oneAtATime({ kind: 'judge', target: origin }, onStart, async () => {
+    const started = Date.now();
+    try {
+      const res = await ask({ prompt, systemPrompt: JUDGE_SYSTEM, schema: SiteVerdict, maxTurns: 2, model: modelFor('judge') });
+      const parsed = SiteVerdict.safeParse(res.structured_output);
+      const call = record({ kind: 'judge', target: origin, started, res, input: { system: JUDGE_SYSTEM, prompt },
+        result: res.structured_output, error: parsed.success ? undefined : 'answer did not match the schema',
+        outcome: parsed.success ? `${parsed.data.publicEvents ? 'public events' : 'not public events'}, ${parsed.data.where}: ${parsed.data.reason}` : undefined });
+      return { verdict: parsed.success ? parsed.data : null, call };
+    } catch (err) {
+      return { verdict: null, call: record({ kind: 'judge', target: origin, started, res: err.result, input: { system: JUDGE_SYSTEM, prompt }, error: err.message }) };
+    }
+  });
+}
+
 // The answer's eventListUrls are only used when they are on this site (and only the first few),
 // so the AI sees same-site links that could lead to events, best first.
 const MAX_LINKS = 100;
@@ -451,7 +507,8 @@ groups to date parts (months may capture a number or a month name); when the par
 Text that holds no event date (a byline, an e-mail, a headline, when an article was posted such as "pred 1 \
 tyzdnom") gets start null and rule null. Conventions: a start \
 time of 00:00 means no time; an end time of 23:59 means no end time; an end at 00:00 means the event ends \
-the day before with no end time; if the year is missing, it is the next upcoming such date from today. \
+the day before with no end time; if the year is missing, it is the nearest such date from about 100 days \
+ago to about 265 days ahead of today, and it must agree with any weekday given (then pick the year where it does). \
 For each PROSE text (an event description), give the event's first day, last day, start and end time, and \
 a per-day schedule when the days have their own hours. Only use what the text says; never guess.`;
 

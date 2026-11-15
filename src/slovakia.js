@@ -330,7 +330,10 @@ let textTownRe;
 
 // Letters only Slovak has (not Czech), and venue words spelt so only in Slovak ("Dom kultúry" is
 // "Dům kultury" in Czech, "námestie" "náměstí", "kostol" "kostel", "knižnica" "knihovna").
-const SLOVAK_LETTERS = /[äľĺŕô]/i;
+const SLOVAK_LETTERS = /[ľĺŕ]/i;
+// ä and ô are German, Estonian, Finnish, French… too ("Tallinna vanalinna käigu" was Slovak, Nov 2026):
+// only with a letter Slovak has and those languages lack.
+const slovakLetters = (t) => SLOVAK_LETTERS.test(t) || (/[äô]/i.test(t) && /[áíúýčťďň]/i.test(t));
 const SLOVAK_WORDS = /(^|[^a-z])(dom (kultury|umenia|hudby|matice|odborov|techniky|seniorov|mladeze|kniznice)|namestie|namestia|ulica|ulici|kulturny|kulturne|kulturneho|obecny|obecna|obecne|obecnom|kostol|kostole|kniznica|kniznici|kniznice|zamok|zamku|galeria|galerii|amfiteater|amfiteatri|sala kultury|mestsky urad|obecny urad|pod holym nebom)([^a-z]|$)/;
 // Letters only Czech has, among those Slovak lacks.
 const CZECH_LETTER = /[ěřů]/i;
@@ -358,7 +361,7 @@ const locativeStems = () => (stems ??= SK_PLACES.filter((p) => isTown(p) && !p.p
 /** Is this location written in Slovak (letters or venue words only Slovak has, or a town in the locative)? */
 export function slovakWords(text) {
   if (!text) return false;
-  return SLOVAK_LETTERS.test(text) || SLOVAK_WORDS.test(fold(text)) || Boolean(locativeTown(text));
+  return slovakLetters(text) || SLOVAK_WORDS.test(fold(text)) || Boolean(locativeTown(text));
 }
 
 // Letters only Slovak and Czech write (č, š and ž are Latvian, Lithuanian, Croatian… too).

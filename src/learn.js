@@ -141,6 +141,9 @@ export function siteAbroad(state, host) {
  * events are abroad, and on a site abroad (siteAbroad) while its pages' record says nothing.
  */
 export function unknownIsAbroad(state, url) {
+  // A site the AI judged to list many countries (world hockey results, an international ticket shop):
+  // only its events known to be in Slovakia count.
+  try { if (state.sources?.[new URL(url).origin]?.siteVerdict?.where === 'mixed') return true; } catch { /* no URL */ }
   const r = regionAt(state, url);
   return r === 'abroad' || (!r && siteAbroad(state, hostOf(url)));
 }

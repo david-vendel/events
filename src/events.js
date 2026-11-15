@@ -83,6 +83,25 @@ function syncFromPrimary(ev, rules) {
   ev.tags = eventTags(ev, rules);
 }
 
+/**
+ * Forget what one site said: its rows (and pages linked from them) leave every event; an event left
+ * with no listing row goes. Returns how many events went.
+ */
+export function dropSiteRows(state, host) {
+  const bare = host.replace(/^www\./, '');
+  const ours = (u) => siteOf(u) === bare;
+  let gone = 0;
+  for (const [id, ev] of Object.entries(state.events)) {
+    if (!ev.sources?.some((r) => r.site === bare || ours(r.via))) continue;
+    ev.sources = ev.sources.filter((r) => !(r.site === bare || ours(r.via)));
+    const first = ev.sources.findIndex((r) => !r.linked);
+    if (first < 0) { delete state.events[id]; gone++; continue; }
+    if (first > 0) ev.sources.unshift(...ev.sources.splice(first, 1));
+    syncFromPrimary(ev, state.tagRules);
+  }
+  return gone;
+}
+
 /** Older data had no sources[] or tags; fill them in. Tags are recomputed as the rules improve. */
 export function migrate(state, today = new Date().toISOString().slice(0, 10)) {
   // Word weights from the distinct titles of all listing rows, not from the events' titles: those
