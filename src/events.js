@@ -4,11 +4,11 @@
 // sources agree. sources[0] is the primary source; the event's top-level fields mirror it.
 import { cleanLocation, eventId, facebookEvent, repairRow } from './extract.js';
 import {
-  couldBeSame, dateDistance, differentTowns, findSameEvent, sameEventScore, titleSimilarity, titleTokens, useTitleWeights,
+  clash, couldBeSame, dateDistance, findSameEvent, rowsDiffer, sameEventScore, titleSimilarity, titleTokens, useTitleWeights,
 } from './match.js';
 import { finishDate, readDateText, tooFarAhead } from './dates.js';
 import { eventTags } from './tags.js';
-import { knownTown } from './geo.js';
+import { knownTown, trustedCity } from './geo.js';
 
 const iso = () => new Date().toISOString();
 
@@ -44,7 +44,7 @@ const WHEN_FIELDS = ['end', 'time', 'endTime'];
 export const runRows = (ev) => {
   const p = ev.sources[0];
   const same = ev.sources.filter((r) => r === p
-    || (!r.linked && r.start && r.site === p.site && titleSimilarity(r.title, p.title) >= 0.85 && !differentTowns(r, p)));
+    || (!r.linked && r.start && r.site === p.site && titleSimilarity(r.title, p.title) >= 0.85 && !rowsDiffer(r, p)));
   if (!p.start) return same;
   const run = [p];
   let grew = true;
@@ -130,25 +130,27 @@ export function migrate(state, today = new Date().toISOString().slice(0, 10)) {
   joinDuplicates(state, today);
 }
 
-/** The town an event is in: from its location, or else the city its listing site covers. */
+/**
+ * The town an event is in: from its location, or else the city its listing site covers, when that
+ * can be trusted (trustedCity: hapsy.co lists all of Slovakia, and its events stayed apart from
+ * Bratislava's listings of them as "Košice" events).
+ */
 export function townOf(state, ev) {
   const t = knownTown(ev.location);
   if (t) return t;
-  try { return state.sources[new URL(ev.sources?.[0]?.via || ev.source).origin]?.city || null; } catch { return null; }
+  const via = ev.sources?.[0]?.via || ev.source;
+  try { return trustedCity(state.sources[new URL(via).origin], via) || null; } catch { return null; }
 }
 
 const listingSitesOf = (ev) => new Set(ev.sources.filter((r) => !r.linked && r.site).map((r) => r.site));
 
 /**
  * Would splitUnrelated keep a and b together once joined? Some listing of one must match some
- * listing of the other, and their listings mustn't name different towns.
+ * listing of the other, and no listing of one may disagree with one of the other (town, time, cinema).
  */
 function rowsConnect(a, b) {
   const ra = a.sources.filter((r) => !r.linked), rb = b.sources.filter((r) => !r.linked);
-  const towns = (rows) => new Set(rows.map((r) => knownTown(r.location)).filter(Boolean));
-  const ta = towns(ra), tb = towns(rb);
-  if ([...ta].some((t) => tb.size && !tb.has(t)) || [...tb].some((t) => ta.size && !ta.has(t))) return false;
-  return ra.some((x) => rb.some((y) => sameEventRows(x, y)));
+  return !clash(a, b) && ra.some((x) => rb.some((y) => sameEventRows(x, y)));
 }
 
 /**
@@ -195,6 +197,9 @@ function joinDuplicates(state, today) {
   let joined = 0;
   for (const { a, b } of pairs) {
     if (!state.events[a.id] || !state.events[b.id]) continue; // already joined into another
+    // Either may have grown by an earlier join: a row that gives no town matched both a Košice and
+    // an Ivanka pri Dunaji listing, which must not end up in one event through it.
+    if (clash(a, b)) continue;
     const [keep, gone] = (a.firstSeenAt || '') <= (b.firstSeenAt || '') ? [a, b] : [b, a];
     for (const r of gone.sources) if (!keep.sources.some((x) => rowKey(x) === rowKey(r))) keep.sources.push(r);
     keep.aliases = [...new Set([...(keep.aliases || []), gone.id, ...(gone.aliases || [])])];
@@ -303,7 +308,7 @@ function tidyRows(ev) {
 
 /** Would matching put these two rows in one event today? (See findSameEvent.) */
 const sameEventRows = (a, b) => (!a.start || !b.start
-  ? titleSimilarity(a.title, b.title) >= 0.5 && !differentTowns(a, b)
+  ? titleSimilarity(a.title, b.title) >= 0.5 && !rowsDiffer(a, b)
   : couldBeSame(a, b) && dateDistance(a, b) <= (a.site === b.site ? 1 : 3));
 
 /**
@@ -316,7 +321,7 @@ const sameEventRows = (a, b) => (!a.start || !b.start
 function splitUnrelated(state, ev) {
   const rows = ev.sources.filter((r) => !r.linked);
   const group = rows.map((_, i) => i);
-  const town = rows.map((r) => knownTown(r.location)); // per group, once known
+  const members = rows.map((r) => [r]); // per group
   const root = (i) => (group[i] === i ? i : (group[i] = root(group[i])));
   // Dates the event's own page gives (a schedule, or a range under its heading): the primary's
   // site listing it on those days lists the same event.
@@ -324,14 +329,15 @@ function splitUnrelated(state, ev) {
   const range = ev.pageRange;
   const onItsPage = (r) => r.site === rows[0].site && r.start && titleSimilarity(r.title, rows[0].title) >= 0.85
     && (days.has(r.start) || (range?.start && r.start >= range.start && r.start <= (range.end || range.start)));
-  for (let i = 1; i < rows.length; i++) if (onItsPage(rows[i])) group[root(i)] = root(0);
+  const unite = (a, b) => { group[b] = a; members[a].push(...members[b]); };
+  for (let i = 1; i < rows.length; i++) if (onItsPage(rows[i]) && root(i) !== root(0)) unite(root(0), root(i));
   for (let i = 0; i < rows.length; i++) {
     for (let j = i + 1; j < rows.length; j++) {
       const a = root(i), b = root(j);
-      // a row whose town isn't known must not bridge two towns
-      if (a === b || (town[a] && town[b] && town[a] !== town[b]) || !sameEventRows(rows[i], rows[j])) continue;
-      group[b] = a;
-      town[a] ??= town[b];
+      // A row that gives no town, time or cinema must not bridge two that differ: groups join only
+      // when none of their rows disagree (as matching joins a row to an event, see clash).
+      if (a === b || !sameEventRows(rows[i], rows[j]) || members[a].some((x) => members[b].some((y) => rowsDiffer(x, y)))) continue;
+      unite(a, b);
     }
   }
   const byRoot = new Map();
@@ -347,7 +353,7 @@ function splitUnrelated(state, ev) {
   const split = [];
   for (const rows of groups.slice(1)) {
     const same = state.events[eventId(rows[0].title, rows[0].start)];
-    if (same && same !== ev && couldBeSame(same, rows[0])) {
+    if (same && same !== ev && couldBeSame(same, { ...rows[0], sources: rows })) {
       for (const r of rows) if (!same.sources.some((x) => rowKey(x) === rowKey(r))) same.sources.push(r);
       split.push(same.id);
       continue;
@@ -378,10 +384,19 @@ export class EventIndex {
   find(s) {
     // The same row seen again, unless it's a URL that several events share (a film's page, for
     // its screenings in every town).
-    const known = this.byKey.get(rowKey(s));
-    if (known && titleSimilarity(known.title, s.title) >= 0.5 && !differentTowns(known, s)) return known;
+    // Compared with the event's other rows: this row's own earlier reading may give another time.
+    const key = rowKey(s);
+    const others = (ev) => ({
+      location: rowKey(ev.sources[0]) !== key ? ev.location : undefined, // the event's place is its primary's
+      sources: ev.sources.filter((r) => rowKey(r) !== key),
+    });
+    const known = this.byKey.get(key);
+    if (known && titleSimilarity(known.title, s.title) >= 0.5 && !clash(others(known), s)) return known;
+    // The same title and day (a title in another script has no letters for the id: all of a day's
+    // Russian stand-ups share one).
     const same = this.byId.get(eventId(s.title, s.start));
-    if (same && !differentTowns(same, s)) return same;
+    if (same && (same.sources.some((r) => r.title === s.title) || titleSimilarity(same.title, s.title) >= 0.5)
+      && !clash(others(same), s)) return same;
     return findSameEvent(Object.values(this.state.events), s);
   }
 

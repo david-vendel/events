@@ -5,7 +5,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   titleTokens, titleMatch, titleSimilarity, useTitleWeights, dateDistance, differentTowns,
-  sameEventScore, findSameEvent, couldBeSame,
+  sameEventScore, findSameEvent, couldBeSame, rowsDiffer, clash,
 } from '../src/match.js';
 
 const tokens = (t) => [...titleTokens(t)].sort();
@@ -213,6 +213,113 @@ describe('same event (no word weights)', () => {
   });
 });
 
+// Cases from the live data (Nov 2026) that were joined or kept apart wrongly.
+describe('titles: scripts, towns, matches and word forms', () => {
+  test('words in another script count ("Никита Шевчук. Stand Up" is not "stand up")', () => {
+    assert.deepEqual(tokens('Никита Шевчук. Stand Up'), ['stand', 'up', 'никита', 'шевчук']);
+    assert.ok(titleSimilarity('Никита Шевчук. Stand Up', 'MEDZI RIADKAMI - STAND UP ZO ŠKOLSKÝCH LAVÍC') < 0.5);
+    assert.ok(titleSimilarity('Евгений Чебатков. Stand Up', 'Карина Мейханаджян: Stand Up') < 0.5);
+  });
+  test('titles naming different towns are different events', () => {
+    assert.equal(titleSimilarity('Trenčín vs. Slovan', 'Slovan vs. Žilina'), 0);
+    assert.equal(titleSimilarity('Slovan vs. Žilina', 'Slovan vs. Spišská Nová Ves'), 0);
+    assert.equal(titleSimilarity('Prešovské vianočné trhy 2026 Prešov', 'Vianočné trhy 2026 Košice'), 0);
+    assert.equal(titleSimilarity('Žilina: Microsoft 365 - Teams', 'Nitra: Microsoft 365 - Teams'), 0);
+  });
+  test('the same town in other forms agrees', () => {
+    assert.ok(titleSimilarity('Prešovské vianočné trhy', 'Vianočné trhy v Prešove') >= 0.5);
+    assert.ok(titleSimilarity('Jan Kraus v Prievidzi', 'Jan Kraus - Prievidza - Pridané') >= 0.5);
+  });
+  test('a match needs both opponents', () => {
+    assert.equal(titleSimilarity('Górnik Zabrze vs. ŠK Slovan', 'ŠK Slovan vs. MFK Zvolen'), 0);
+    assert.equal(titleSimilarity('CSKA Moskva vs. HC Soči', 'HK 32 Liptovský Mikuláš vs HC Košice'), 0);
+    assert.equal(titleSimilarity('HK Poprad vs HC Košice', 'HK Poprad VS. HC Košice'), 1);
+  });
+  test("a word's forms agree", () => {
+    assert.ok(titleSimilarity('Workshop hry na handpan s Milanom Zdvořilým', 'Workshop hra na handpan s Milan Zdvořilým') >= 0.5);
+  });
+});
+
+describe('rows that cannot be one event', () => {
+  const day = '2026-11-19';
+  test('a film at two cinemas in one town: "Ja, Rocky" at Kino Film Europe and at Cinema City Eurovea', () => {
+    const klubkino = { title: 'Ja, Rocky – Kino Film Europe', start: day, time: '19:00', location: 'Kino Film Europe, Štefánikova 25, Bratislava',
+      url: 'https://www.klubkino.sk/film/ja-rocky/', via: 'https://www.klubkino.sk/film/ja-rocky/' };
+    const eurovea = { title: 'Ja, Rocky', start: day, time: '20:00', location: 'Cinema City Eurovea, Pribinova 8, Bratislava',
+      url: 'https://kinoprogram.sk/program/tyzden/', via: 'https://kinoprogram.sk/program/tyzden/' };
+    assert.equal(differentTowns(klubkino, eurovea), false);
+    assert.equal(rowsDiffer(klubkino, eurovea), true);
+    assert.equal(sameEventScore(klubkino, eurovea), 0);
+    assert.equal(couldBeSame(klubkino, eurovea), false);
+    assert.equal(sameEventScore(klubkino, { ...eurovea, time: '19:00' }), 0); // another cinema, same time
+  });
+  test('one screening on two sites is one event', () => {
+    const klubkino = { title: 'Ja, Rocky – Kino Lúky', start: day, time: '19:00', location: 'Kino Lúky, Vigľašská 1, Petržalka, Bratislava',
+      url: 'https://www.klubkino.sk/film/ja-rocky/', via: 'https://www.klubkino.sk/film/ja-rocky/' };
+    const csfd = { title: 'Ja, Rocky', start: day, time: '19:00', location: 'Bratislava - Kino Lúky',
+      url: 'https://www.csfd.sk/film/1751594-ja-rocky/prehlad/', via: 'https://www.csfd.sk/kino/94-bratislava/?period=all' };
+    assert.ok(sameEventScore(klubkino, csfd) > 0);
+    // Artkino Za zrkadlom is in the DK Zrkadlový háj, at Rovniankova 3.
+    const artkino = { title: 'Já, Rocky', start: '2026-11-22', time: '19:00', location: 'Artkino Za zrkadlom, Rovniankova ulica 3., Bratislava 85102',
+      url: 'https://tv-program.aktuality.sk/film/ja-rocky/', via: 'https://tv-program.aktuality.sk/program-kina/bratislava/artkino-za-zrkadlom/' };
+    const kzp = { title: 'Klenoty žánrového filmu: JA, ROCKY', start: '2026-11-22', time: '19:00', location: 'DK Zrkadlový háj, Rovniankova 3, Bratislava',
+      url: 'http://kulturavpetrzalke.sk/podujatie/klenoty-zanroveho-filmu-ja-rocky', via: 'http://kulturavpetrzalke.sk/podujatia/kino?paginator-page=2' };
+    assert.equal(rowsDiffer(artkino, kzp), false);
+  });
+  test("a cinema's own ticket site says which cinema a row without a place is at (kinomat.sk)", () => {
+    const at = (url, time = '20:00') => ({ title: 'Sense and Sensibility', start: day, time, url, via: 'https://kinomat.sk/en/program' });
+    const edison = { title: 'Sense and Sensibility – Edison Filmhub', start: day, time: '17:20', location: 'Edison Filmhub, Baštová 6A, Bratislava',
+      url: 'https://www.klubkino.sk/en/film/rozum-a-cit/', via: 'https://www.klubkino.sk/en/film/rozum-a-cit/' };
+    assert.equal(rowsDiffer(at('https://edisonfilmhub.sk/kosik?ent_id=102720', '17:20'), edison), false);
+    assert.equal(rowsDiffer(at('https://tickets.cinemacity.sk/order/108003?lang=sk', '17:20'), edison), true);
+    assert.equal(rowsDiffer(at('https://tickets.cinemacity.sk/order/107547?lang=sk'), { title: 'Sense and Sensibility', start: day, time: '20:00',
+      location: 'Cinema City Eurovea, Pribinova 8, Bratislava', url: 'https://kinoprogram.sk/program/tyzden/', via: 'https://kinoprogram.sk/program/tyzden/' }), false);
+    assert.equal(rowsDiffer(at('https://tickets.cinemacity.sk/order/1'), at('https://predaj.cine-max.sk/kino-ba/192214')), true);
+    // Film screenings have no doors: twenty minutes apart are two screenings.
+    assert.equal(rowsDiffer(at('https://tickets.cinemacity.sk/order/1', '16:00'), { title: 'The Cat in the Hat', start: day, time: '16:20' }), true);
+  });
+  test('a play that kulthund places in a cinema is not a film', () => {
+    const kulthund = { title: 'PI ČAJ, MILÁČIK', start: '2026-11-16', time: '18:00', location: 'Kino Úsmev, Levoča', url: 'https://kulthund.sk/a', via: 'https://kulthund.sk/m/levoca' };
+    const town = { title: 'Pi čaj, miláčik!', start: '2026-11-16', time: '18:00', location: 'Mestské divadlo', url: 'https://kulturavlevoci.sk/a', via: 'https://kulturavlevoci.sk/' };
+    assert.equal(rowsDiffer(kulthund, town), false);
+  });
+  test('times an hour apart are doors and start; more are two shows', () => {
+    const livemusic = { title: 'Mireille Mathieu', start: '2026-12-01', time: '19:00', location: 'PEUGEOT aréna Bratislava' };
+    const radio = { title: 'MIREILLE MATHIEU', start: '2026-12-01', time: '20:00', location: 'Peugeut aréna' };
+    assert.ok(sameEventScore(livemusic, radio) > 0);
+    const kulthund = { title: 'Hľadá sa snehuliak', start: '2026-12-06', time: '14:30', location: 'Bábkové divadlo v Košiciach, Košice' };
+    const zoznam = { title: 'Hľadá sa snehuliak', start: '2026-12-06', time: '16:30', location: 'Bábkové divadlo Košického kraja, Alžbetina 38, 04001 Košice' };
+    assert.equal(sameEventScore(kulthund, zoznam), 0);
+    assert.ok(sameEventScore(kulthund, { ...zoznam, time: undefined }) > 0); // no time: can't tell
+    assert.ok(sameEventScore(kulthund, { ...zoznam, time: '00:00' }) > 0); // a placeholder time
+    assert.ok(sameEventScore(kulthund, { ...zoznam, start: '2026-12-05', end: '2026-12-07' }) > 0); // a run's time is any day's
+  });
+});
+
+describe('an event is matched by all its listing rows', () => {
+  const row = (location, site, extra = {}) => ({ title: 'Beh za duše 2026', start: '2026-11-20', location, url: `https://${site}/beh`, via: `https://${site}/`, site, ...extra });
+  test("a town given by the event's other rows counts, not only its primary's", () => {
+    const ev = { title: 'Beh za duše 2026', start: '2026-11-20', location: 'celé Slovensko Duchovné, Mládež, Ostatné',
+      sources: [row('celé Slovensko Duchovné, Mládež, Ostatné', 'www.vyveska.sk'), row('Ivanka pri Dunaji', 'kolegium.org')] };
+    const kosice = row('Košice', 'hapsy.co');
+    assert.equal(differentTowns(ev, kosice), false); // the primary row names no town
+    assert.equal(clash(ev, kosice), true);
+    assert.equal(sameEventScore(ev, kosice), 0);
+    assert.equal(findSameEvent([ev], kosice), null);
+    assert.equal(findSameEvent([ev], row('Ivanka pri Dunaji', 'hapsy.co')), ev);
+  });
+  test("an event's own place counts when its primary row has none (the site's town, or AI's)", () => {
+    const rimava = { title: 'Čarovné hodinky', start: '2026-11-27', location: 'Rimavská Sobota',
+      sources: [{ title: 'Čarovné hodinky', start: '2026-11-27', time: '19:00', url: 'https://www.rimava.sk/podujatie/carovne-hodinky-2/', via: 'https://www.rimava.sk/podujatia/page/2/' }] };
+    const kulthund = { title: 'ČAROVNÉ HODINKY', start: '2026-11-27', time: '19:00', location: 'Národné divadlo Košice, Košice' };
+    assert.equal(sameEventScore(rimava, kulthund), 0);
+  });
+  test('linked pages do not count', () => {
+    const ev = { title: 'X', start: '2026-11-20', sources: [row('Košice', 'a.sk'), row('Žilina', 'b.sk', { linked: true })] };
+    assert.equal(clash(ev, row('Košice', 'c.sk')), false);
+  });
+});
+
 describe('titles with word weights (rare words count)', () => {
   // A small catalogue: "Kino pre deti" and "KONCERT" are in many titles, TOSCA in two.
   const greek = ['alfa', 'beta', 'gama', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa', 'lambda',
@@ -251,5 +358,27 @@ describe('titles with word weights (rare words count)', () => {
     assert.equal(findSameEvent(events, { title: 'TOSCA', start: '2026-11-20', location: 'Štátne divadlo Košice' }), events[0]);
     assert.equal(findSameEvent(events, { title: 'Kino pre deti: ZABUDNUTÝ OSTROV', start: '2026-11-20', location: 'Kino Úsmev, Košice' }), null);
     assert.equal(findSameEvent(events, { title: 'TOSCA', start: '2026-11-20', location: 'Mestské divadlo, Žilina' }), null);
+  });
+});
+
+describe('a title found in another, with word weights', () => {
+  // A catalogue where "Deň", "Vianočné", "koncerty", "trhy" are common and the names are rare.
+  const filler = (w, n) => Array.from({ length: n }, (_, i) => `${w} ${['alfa', 'beta', 'gama', 'delta', 'omega', 'sigma', 'kappa', 'theta', 'lambda', 'zeta'][i % 10]}${i}`);
+  const titles = [
+    ...filler('Deň', 60), ...filler('Vianočné koncerty', 60), ...filler('Vianočné trhy', 60), ...filler('Čas', 60), ...filler('Workshop', 60),
+    'Deň radosti (v 21. storočí)', 'Čas radosti a veselosti', 'FRAGILE - Vianočné koncerty', 'Vianočné koncerty Zuzany Mauréry | Piešťany',
+    'Tradičné mestské vianočné trhy 2026 Modra', 'Neskoro večer - Poprad', 'Talkshow – Neskoro večer', ...filler('Talkshow', 50),
+  ];
+  test('setup', () => useTitleWeights(titles));
+  test('sharing a word is not being found in the other title', () => {
+    // "Deň radosti" (Štúdio L + S, Bratislava) was joined with "Čas radosti a veselosti" (Trnava).
+    assert.ok(titleSimilarity('Deň radosti (v 21. storočí)', 'Čas radosti a veselosti') < 0.5);
+    assert.ok(titleSimilarity('Vianočné koncerty Zuzany Mauréry | Piešťany', 'FRAGILE - Vianočné koncerty') < 0.5);
+  });
+  test('common words found whole in a longer title are not enough', () => {
+    assert.ok(titleSimilarity('Vianočné trhy', 'Tradičné mestské vianočné trhy 2026 Modra') < 0.5);
+  });
+  test('a telling title found whole still matches', () => {
+    assert.ok(titleSimilarity('Neskoro večer - Poprad', 'Talkshow – Neskoro večer') >= 0.5);
   });
 });
